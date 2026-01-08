@@ -12,7 +12,7 @@ terraform {
     bucket         = "risk-tf-state-platform"
     key            = "eks/terraform.tfstate"
     region         = "us-east-1"
-    dynamodb_table = "terraform-locks"
+    dynamodb_table = "risk-tf-locks"
     encrypt        = true
   }
 }
