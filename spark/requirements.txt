@@ -1,0 +1,8 @@
+boto3
+numpy
+pandas
+redis
+fsspec
+s3fs
+pyarrow
+python-dateutil

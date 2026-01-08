@@ -1,0 +1,74 @@
+pipeline {
+  agent any
+
+  environment {
+    AWS_REGION = "us-east-1"
+    TF_DIR     = "platform/eks"
+  }
+
+  options {
+    timestamps()
+  }
+
+  stages {
+
+    stage('Checkout Repo') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('Terraform Init') {
+      steps {
+        dir("${TF_DIR}") {
+          sh '''
+            terraform init -input=false
+          '''
+        }
+      }
+    }
+
+    stage('Terraform Validate') {
+      steps {
+        dir("${TF_DIR}") {
+          sh '''
+            terraform validate
+          '''
+        }
+      }
+    }
+
+    stage('Terraform Plan') {
+      steps {
+        dir("${TF_DIR}") {
+          sh '''
+            terraform plan -out=tfplan
+          '''
+        }
+      }
+    }
+
+    stage('Terraform Apply') {
+      input {
+        message = "Apply Terraform to create/update EKS?"
+        ok      = "Apply"
+      }
+      steps {
+        dir("${TF_DIR}") {
+          sh '''
+            terraform apply -input=false tfplan
+          '''
+        }
+      }
+    }
+  }
+
+  post {
+    success {
+      echo "EKS provisioning pipeline completed successfully."
+    }
+    failure {
+      echo "Pipeline failed. Check logs."
+    }
+  }
+}
