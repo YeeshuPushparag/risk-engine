@@ -20,9 +20,9 @@ resource "aws_eks_node_group" "core" {
   instance_types = [var.core_instance_type]
 
   scaling_config {
-    min_size     = 1
-    desired_size = 1
-    max_size     = 1
+    min_size     = 0
+    desired_size = 0
+    max_size     = var.core_max_size
   }
 
   labels = {

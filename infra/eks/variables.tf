@@ -20,7 +20,12 @@ variable "compute_instance_type" {
   default = "t3.large"
 }
 
-variable "compute_max_size" {
+variable "core_max_size" {
   type    = number
   default = 2
+}
+
+variable "compute_max_size" {
+  type    = number
+  default = 1
 }
