@@ -7,7 +7,9 @@ pipeline {
 
     TF_VAR_cluster_name = "risk-eks"
     TF_VAR_vpc_id       = "vpc-0d61e23e46f2284e3"
-    TF_VAR_subnet_ids   = '["subnet-096342fda9890b69e","subnet-068b124bbe358c9d3"]'
+    TF_VAR_subnet_ids   = '["subnet-0599001b2af627f97",
+    "subnet-087699aef4b60c2ff"
+    ]'
   }
 
   stages {
