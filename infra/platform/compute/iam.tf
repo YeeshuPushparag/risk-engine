@@ -51,10 +51,7 @@ resource "aws_iam_role_policy" "jenkins_policy" {
       {
         Effect = "Allow"
         Action = [
-          "iam:PassRole",
-          "iam:GetRole",
-          "iam:CreateRole",
-          "iam:AttachRolePolicy"
+          "iam:*"
         ]
         Resource = "*"
       },

@@ -3,9 +3,10 @@ resource "aws_instance" "jenkins" {
   instance_type               = var.instance_type
   subnet_id                   = var.public_subnets[0]
   associate_public_ip_address = true
-  key_name                    = var.jenkins_key_name
-  iam_instance_profile = aws_iam_instance_profile.jenkins_profile.name
-  vpc_security_group_ids      = [aws_security_group.jenkins_sg.id]
+
+  key_name               = var.jenkins_key_name
+  iam_instance_profile   = aws_iam_instance_profile.jenkins_profile.name
+  vpc_security_group_ids = [aws_security_group.jenkins_sg.id]
 
   root_block_device {
     volume_size = 20
@@ -16,15 +17,9 @@ resource "aws_instance" "jenkins" {
     #!/bin/bash
     dnf update -y
     dnf install -y java-17-amazon-corretto wget
-
-    # Add Jenkins repository
     wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat-stable/jenkins.repo
     rpm --import https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
-
-    # Install Jenkins
     dnf install -y jenkins
-
-    # Enable and start Jenkins
     systemctl enable jenkins
     systemctl start jenkins
   EOF

@@ -1,25 +1,14 @@
 data "aws_availability_zones" "available" {}
 
-resource "aws_subnet" "public_1" {
+resource "aws_subnet" "public" {
+  count                   = 2
   vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.0.1.0/24"
-  availability_zone       = data.aws_availability_zones.available.names[0]
+  cidr_block              = cidrsubnet("10.0.0.0/16", 8, count.index + 1)
+  availability_zone       = data.aws_availability_zones.available.names[count.index]
   map_public_ip_on_launch = true
 
   tags = {
-    Name = "${var.name_prefix}-public-1"
-    Type = "public"
-  }
-}
-
-resource "aws_subnet" "public_2" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.0.2.0/24"
-  availability_zone       = data.aws_availability_zones.available.names[1]
-  map_public_ip_on_launch = true
-
-  tags = {
-    Name = "${var.name_prefix}-public-2"
+    Name = "${var.name_prefix}-public-${count.index + 1}"
     Type = "public"
   }
 }

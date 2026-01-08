@@ -4,7 +4,7 @@
 **/.terraform/*
 *.tfstate
 *.tfstate.*
-*.secret.tfvars
+*.tfvars
 *.tfvars.json
 .terraform.lock.hcl
 tfplan

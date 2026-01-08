@@ -1,15 +1,14 @@
-variable "instance_type" {
-  default = "t3.medium"
+variable "name_prefix" {
+  type = string
 }
 
 variable "jenkins_key_name" {
-  description = "EC2 Key Pair Name to SSH"
-  type        = string
+  type = string
 }
 
-variable "name_prefix" {
-  description = "Prefix for resource naming"
-  type        = string
+variable "instance_type" {
+  type    = string
+  default = "t3.medium"
 }
 
 variable "vpc_id" {
