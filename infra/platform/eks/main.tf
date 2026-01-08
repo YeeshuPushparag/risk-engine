@@ -1,9 +1,9 @@
 resource "aws_eks_cluster" "this" {
-  name     = var.cluster_name
+  name     = local.cluster_name
   role_arn = aws_iam_role.eks_cluster_role.arn
 
   vpc_config {
-    subnet_ids = var.subnet_ids
+    subnet_ids = local.subnet_ids
   }
 
   depends_on = [
@@ -16,9 +16,9 @@ resource "aws_eks_cluster" "this" {
 # ----------------------------
 resource "aws_eks_node_group" "core" {
   cluster_name    = aws_eks_cluster.this.name
-  node_group_name = "${var.cluster_name}-core"
+  node_group_name = "${local.cluster_name}-core"
   node_role_arn   = aws_iam_role.eks_node_role.arn
-  subnet_ids      = var.subnet_ids
+  subnet_ids      = local.subnet_ids
 
   instance_types = [var.core_instance_type]
 
@@ -42,9 +42,9 @@ resource "aws_eks_node_group" "core" {
 # ----------------------------
 resource "aws_eks_node_group" "compute" {
   cluster_name    = aws_eks_cluster.this.name
-  node_group_name = "${var.cluster_name}-compute"
+  node_group_name = "${local.cluster_name}-compute"
   node_role_arn   = aws_iam_role.eks_node_role.arn
-  subnet_ids      = var.subnet_ids
+  subnet_ids      = local.subnet_ids
 
   instance_types = [var.compute_instance_type]
 
