@@ -1,3 +1,6 @@
+# ----------------------------
+# Jenkins EC2 IAM Role
+# ----------------------------
 resource "aws_iam_role" "jenkins_role" {
   name = "jenkins-role"
 
@@ -15,18 +18,53 @@ resource "aws_iam_role" "jenkins_role" {
   })
 }
 
+# ----------------------------
+# Jenkins IAM Policy
+# ----------------------------
 resource "aws_iam_role_policy" "jenkins_policy" {
   role = aws_iam_role.jenkins_role.id
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
+
+      # Terraform backend
       {
         Effect = "Allow"
         Action = [
-          "sts:AssumeRole",
           "s3:*",
           "dynamodb:*"
+        ]
+        Resource = "*"
+      },
+
+      # EKS creation & management
+      {
+        Effect = "Allow"
+        Action = [
+          "eks:*"
+        ]
+        Resource = "*"
+      },
+
+      # Required for EKS IAM roles
+      {
+        Effect = "Allow"
+        Action = [
+          "iam:PassRole",
+          "iam:GetRole",
+          "iam:CreateRole",
+          "iam:AttachRolePolicy"
+        ]
+        Resource = "*"
+      },
+
+      # EC2 / ASG describes (EKS dependency)
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:Describe*",
+          "autoscaling:Describe*"
         ]
         Resource = "*"
       }
@@ -34,6 +72,9 @@ resource "aws_iam_role_policy" "jenkins_policy" {
   })
 }
 
+# ----------------------------
+# Jenkins Instance Profile
+# ----------------------------
 resource "aws_iam_instance_profile" "jenkins_profile" {
   name = "jenkins-instance-profile"
   role = aws_iam_role.jenkins_role.name

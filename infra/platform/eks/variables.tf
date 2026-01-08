@@ -1,21 +1,27 @@
 variable "cluster_name" {
   description = "EKS cluster name"
   type        = string
-  default     = "risk-eks"
-}
-
-variable "region" {
-  description = "AWS region"
-  type        = string
-  default     = "us-east-1"
-}
-
-variable "vpc_id" {
-  description = "VPC ID where EKS will be created"
-  type        = string
 }
 
 variable "subnet_ids" {
-  description = "Subnets for EKS worker nodes"
+  description = "Subnets for EKS"
   type        = list(string)
+}
+
+variable "core_instance_type" {
+  description = "Instance type for core node group"
+  type        = string
+  default     = "t3.large"
+}
+
+variable "compute_instance_type" {
+  description = "Instance type for compute node group"
+  type        = string
+  default     = "t3.large"
+}
+
+variable "compute_max_size" {
+  description = "Maximum compute nodes"
+  type        = number
+  default     = 2
 }
