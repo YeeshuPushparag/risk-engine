@@ -3,16 +3,12 @@ pipeline {
 
   environment {
     AWS_REGION = "us-east-1"
-    TF_DIR     = "platform/eks"
-  }
-
-  options {
-    timestamps()
+    TF_DIR     = "infra/platform/eks"
   }
 
   stages {
 
-    stage('Checkout Repo') {
+    stage('Checkout') {
       steps {
         checkout scm
       }
@@ -20,44 +16,33 @@ pipeline {
 
     stage('Terraform Init') {
       steps {
-        dir("${TF_DIR}") {
-          sh '''
-            terraform init -input=false
-          '''
+        dir(env.TF_DIR) {
+          sh 'terraform init -input=false'
         }
       }
     }
 
     stage('Terraform Validate') {
       steps {
-        dir("${TF_DIR}") {
-          sh '''
-            terraform validate
-          '''
+        dir(env.TF_DIR) {
+          sh 'terraform validate'
         }
       }
     }
 
     stage('Terraform Plan') {
       steps {
-        dir("${TF_DIR}") {
-          sh '''
-            terraform plan -out=tfplan
-          '''
+        dir(env.TF_DIR) {
+          sh 'terraform plan -out=tfplan'
         }
       }
     }
 
     stage('Terraform Apply') {
-      input {
-        message = "Apply Terraform to create/update EKS?"
-        ok      = "Apply"
-      }
       steps {
-        dir("${TF_DIR}") {
-          sh '''
-            terraform apply -input=false tfplan
-          '''
+        input message: 'Apply Terraform to create/update EKS?', ok: 'Apply'
+        dir(env.TF_DIR) {
+          sh 'terraform apply -input=false tfplan'
         }
       }
     }
@@ -65,10 +50,10 @@ pipeline {
 
   post {
     success {
-      echo "EKS provisioning pipeline completed successfully."
+      echo 'EKS provisioning completed successfully.'
     }
     failure {
-      echo "Pipeline failed. Check logs."
+      echo 'Pipeline failed. Check logs.'
     }
   }
 }
