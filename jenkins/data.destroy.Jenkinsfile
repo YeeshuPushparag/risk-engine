@@ -6,8 +6,6 @@ pipeline {
     TF_DIR     = "infra/data"
 
     TF_VAR_master_db_password  = credentials('rds-master-password')
-    TF_VAR_django_db_password  = credentials('rds-django-password')
-    TF_VAR_airflow_db_password = credentials('rds-airflow-password')
   }
 
   stages {
