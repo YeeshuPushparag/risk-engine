@@ -1,3 +1,7 @@
+############################################
+# EKS CLUSTER
+############################################
+
 resource "aws_eks_cluster" "this" {
   name     = var.cluster_name
   role_arn = aws_iam_role.eks_cluster_role.arn
@@ -10,6 +14,24 @@ resource "aws_eks_cluster" "this" {
     aws_iam_role_policy_attachment.eks_cluster_policy
   ]
 }
+
+############################################
+# READ DATA STACK (RDS / REDIS)
+############################################
+
+data "terraform_remote_state" "data" {
+  backend = "s3"
+  config = {
+    bucket         = "risk-tf-state-platform"
+    key            = "data/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "risk-tf-locks"
+  }
+}
+
+############################################
+# CORE NODE GROUP
+############################################
 
 resource "aws_eks_node_group" "core" {
   cluster_name    = aws_eks_cluster.this.name
@@ -28,7 +50,15 @@ resource "aws_eks_node_group" "core" {
   labels = {
     role = "core"
   }
+
+  additional_security_group_ids = [
+    data.terraform_remote_state.data.outputs.app_access_sg_id
+  ]
 }
+
+############################################
+# COMPUTE NODE GROUP
+############################################
 
 resource "aws_eks_node_group" "compute" {
   cluster_name    = aws_eks_cluster.this.name
@@ -47,4 +77,8 @@ resource "aws_eks_node_group" "compute" {
   labels = {
     role = "compute"
   }
+
+  additional_security_group_ids = [
+    data.terraform_remote_state.data.outputs.app_access_sg_id
+  ]
 }

@@ -28,7 +28,9 @@ resource "aws_iam_role_policy" "jenkins_policy" {
     Version = "2012-10-17"
     Statement = [
 
-      # Terraform backend
+      # --------------------------------------------------
+      # Terraform backend (state & locking)
+      # --------------------------------------------------
       {
         Effect = "Allow"
         Action = [
@@ -38,7 +40,9 @@ resource "aws_iam_role_policy" "jenkins_policy" {
         Resource = "*"
       },
 
+      # --------------------------------------------------
       # EKS creation & management
+      # --------------------------------------------------
       {
         Effect = "Allow"
         Action = [
@@ -47,7 +51,9 @@ resource "aws_iam_role_policy" "jenkins_policy" {
         Resource = "*"
       },
 
-      # Required for EKS IAM roles
+      # --------------------------------------------------
+      # IAM (required for EKS, RDS monitoring roles, etc.)
+      # --------------------------------------------------
       {
         Effect = "Allow"
         Action = [
@@ -56,12 +62,48 @@ resource "aws_iam_role_policy" "jenkins_policy" {
         Resource = "*"
       },
 
-      # EC2 / ASG describes (EKS dependency)
+      # --------------------------------------------------
+      # EC2 / ASG (EKS dependency + networking)
+      # --------------------------------------------------
       {
         Effect = "Allow"
         Action = [
-          "ec2:Describe*",
-          "autoscaling:Describe*"
+          "ec2:*",
+          "autoscaling:*"
+        ]
+        Resource = "*"
+      },
+
+      # --------------------------------------------------
+      # RDS (create / modify / delete / describe)
+      # --------------------------------------------------
+      {
+        Effect = "Allow"
+        Action = [
+          "rds:*"
+        ]
+        Resource = "*"
+      },
+
+      # --------------------------------------------------
+      # ElastiCache (Redis / Memcached)
+      # --------------------------------------------------
+      {
+        Effect = "Allow"
+        Action = [
+          "elasticache:*"
+        ]
+        Resource = "*"
+      },
+
+      # --------------------------------------------------
+      # CloudWatch (logs, metrics for RDS / EKS / apps)
+      # --------------------------------------------------
+      {
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:*",
+          "logs:*"
         ]
         Resource = "*"
       }
