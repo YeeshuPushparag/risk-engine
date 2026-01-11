@@ -13,10 +13,18 @@ resource "aws_iam_role" "jenkins_role" {
           Service = "ec2.amazonaws.com"
         }
         Action = "sts:AssumeRole"
+      },
+      {
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::871007552317:user/dev-user"
+        }
+        Action = "sts:AssumeRole"
       }
     ]
   })
 }
+
 
 # ----------------------------
 # Jenkins IAM Policy
