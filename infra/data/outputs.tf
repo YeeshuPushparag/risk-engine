@@ -9,3 +9,7 @@ output "redis_endpoint" {
 output "app_access_sg_id" {
   value = aws_security_group.app_access.id
 }
+
+output "eks_node_security_group_id" {
+  value = module.eks.node_security_group_id
+}
