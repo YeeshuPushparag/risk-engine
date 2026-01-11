@@ -6,7 +6,7 @@ resource "aws_db_subnet_group" "postgres" {
 resource "aws_db_instance" "postgres" {
   identifier             = "${local.name_prefix}-postgres"
   engine                 = "postgres"
-  engine_version         = "14.10"
+  engine_version         = "16"
   instance_class         = "db.t4g.micro"
 
   allocated_storage      = 20
