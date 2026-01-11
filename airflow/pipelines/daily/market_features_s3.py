@@ -93,8 +93,7 @@ def update_market_features(input_filename="final_tickers.csv",
     tickers = tickers_df["ticker"].dropna().unique().tolist()
 
     today = datetime.today().date()
-    if datetime.today().weekday() >= 5:
-        return None, "Weekend — no update"
+
 
     # Try load existing parquet
     s3 = boto3.client("s3")

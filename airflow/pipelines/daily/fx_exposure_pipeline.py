@@ -43,8 +43,7 @@ def read_csv_s3(bucket, key):
 def run_fx_exposure_pipeline():
 
     today = datetime.today().date()
-    if today.weekday() >= 5:
-        return "WEEKEND_NO_DATA"
+
 
     # STEP 1: Map ticker to FX exposure
     df = read_parquet_s3(BUCKET, INPUT_KEY)[["ticker", "sector", "industry"]]

@@ -117,8 +117,7 @@ def update_fx_snowflake():
     Returns a status string for Airflow/XCom.
     """
     today = datetime.date.today()
-    if today.weekday() >= 5:
-        return "WEEKEND_SKIP"
+
 
     # -----------------------------
     # Get last date from Snowflake FX table

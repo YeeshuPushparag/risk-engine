@@ -126,8 +126,6 @@ def run_predictions(new_rows):
 def update_bonds_snowflake():
     """Airflow-callable wrapper. Returns status string."""
     today = datetime.today().date()
-    if today.weekday() >= 5:
-        return "WEEKEND_SKIP"
 
     with get_snowflake_conn() as ctx:
         with ctx.cursor() as cs:

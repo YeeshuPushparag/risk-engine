@@ -21,8 +21,6 @@ def run_commodities_update(
         tickers = ["GC=F", "CL=F", "SI=F", "NG=F", "ZC=F"]
 
     today = datetime.today().date()
-    if today.weekday() >= 5:
-        return "WEEKEND_SKIP"
 
     s3_client = boto3.client('s3')
 

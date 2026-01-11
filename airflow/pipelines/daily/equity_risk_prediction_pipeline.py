@@ -242,8 +242,7 @@ def run_all_equity_predictions(df):
 # =========================
 def run_equity_risk_pipeline():
     today = pd.Timestamp.today().normalize()
-    if today.weekday() >= 5:
-        return "WEEKEND_NO_PROCESSING"
+
 
     # Get last date from Snowflake EQUITY table
     with get_snowflake_conn() as ctx:
