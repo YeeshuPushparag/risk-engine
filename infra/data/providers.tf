@@ -12,6 +12,17 @@ data "terraform_remote_state" "platform" {
   }
 }
 
+data "terraform_remote_state" "eks" {
+  backend = "s3"
+  config = {
+    bucket         = "risk-tf-state-platform"
+    key            = "eks/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "risk-tf-locks"
+  }
+}
+
+
 provider "postgresql" {
   host     = aws_db_instance.postgres.address
   port     = 5432

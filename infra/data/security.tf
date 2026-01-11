@@ -19,7 +19,7 @@ resource "aws_security_group" "rds" {
     to_port         = 5432
     protocol        = "tcp"
     security_groups = [
-      data.terraform_remote_state.platform.outputs.eks_node_security_group_id
+      data.terraform_remote_state.eks.outputs.eks_node_security_group_id
     ]
   }
 
@@ -40,7 +40,7 @@ resource "aws_security_group" "redis" {
     to_port         = 6379
     protocol        = "tcp"
     security_groups = [
-      data.terraform_remote_state.platform.outputs.eks_node_security_group_id
+      data.terraform_remote_state.eks.outputs.eks_node_security_group_id
     ]
   }
 
