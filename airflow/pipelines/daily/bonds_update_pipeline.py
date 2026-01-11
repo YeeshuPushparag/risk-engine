@@ -75,7 +75,7 @@ def create_daily_bond_data(start_date, end_date):
         merged = daily.merge(
             macro.drop(columns=["date"]),
             on="mm_yy",
-            how="left"
+            how="inner"
         ).drop(columns=["mm_yy"])
 
     except Exception as e:
