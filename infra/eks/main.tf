@@ -6,7 +6,7 @@ resource "aws_eks_cluster" "this" {
     subnet_ids = var.subnet_ids
 
     security_group_ids = [
-      aws_security_group.app_access.id
+      data.terraform_remote_state.eks.outputs.eks_node_security_group_id
     ]
   }
 
