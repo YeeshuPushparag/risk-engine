@@ -4,17 +4,12 @@ resource "aws_eks_cluster" "this" {
 
   vpc_config {
     subnet_ids = var.subnet_ids
-
-    security_group_ids = [
-      data.terraform_remote_state.data.outputs.app_access_sg_id
-    ]
   }
 
   depends_on = [
     aws_iam_role_policy_attachment.eks_cluster_policy
   ]
 }
-
 
 resource "aws_eks_node_group" "core" {
   cluster_name    = aws_eks_cluster.this.name
