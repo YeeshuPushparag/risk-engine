@@ -3,11 +3,7 @@ pipeline {
 
   environment {
     AWS_REGION = "us-east-1"
-    TF_DIR     = "infra/eks"
-
-    TF_VAR_cluster_name = "risk-eks"
-    TF_VAR_vpc_id       = "vpc-0d61e23e46f2284e3"
-    TF_VAR_subnet_ids   = '["subnet-0599001b2af627f97","subnet-087699aef4b60c2ff"]'
+    TF_DIR     = "infra/ecr"
   }
 
   stages {
@@ -28,7 +24,7 @@ pipeline {
 
     stage('Terraform Destroy') {
       steps {
-        input message: 'DESTROY EKS CLUSTER? This cannot be undone.', ok: 'DESTROY'
+        input message: 'DESTROY ECR REPOSITORIES? This will delete ALL images.', ok: 'DESTROY'
         dir(env.TF_DIR) {
           sh 'terraform destroy -auto-approve'
         }
