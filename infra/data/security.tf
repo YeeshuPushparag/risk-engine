@@ -18,9 +18,7 @@ resource "aws_security_group" "rds" {
     from_port       = 5432
     to_port         = 5432
     protocol        = "tcp"
-    security_groups = [
-      data.terraform_remote_state.eks.outputs.eks_node_security_group_id
-    ]
+    security_groups = [aws_security_group.app_access.id]
   }
 
   egress {
@@ -39,9 +37,7 @@ resource "aws_security_group" "redis" {
     from_port       = 6379
     to_port         = 6379
     protocol        = "tcp"
-    security_groups = [
-      data.terraform_remote_state.eks.outputs.eks_node_security_group_id
-    ]
+    security_groups = [aws_security_group.app_access.id]
   }
 
   egress {

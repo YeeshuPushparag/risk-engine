@@ -5,7 +5,9 @@ resource "aws_eks_cluster" "this" {
   vpc_config {
     subnet_ids = var.subnet_ids
   }
-
+  security_group_ids = [
+      aws_security_group.app_access.id
+  ]
   depends_on = [
     aws_iam_role_policy_attachment.eks_cluster_policy
   ]
