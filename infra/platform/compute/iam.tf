@@ -112,6 +112,17 @@ resource "aws_iam_role_policy" "jenkins_policy" {
         ]
         Resource = "*"
       },
+      {
+        Effect = "Allow"
+        Action = [
+          "acm:RequestCertificate",
+          "acm:DescribeCertificate",
+          "acm:ListCertificates",
+          "acm:AddTagsToCertificate",
+          "acm:DeleteCertificate"
+        ]
+        Resource = "*"
+      },
 
       # --------------------------------------------------
       # CloudWatch (logs, metrics for RDS / EKS / apps)
