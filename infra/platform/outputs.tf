@@ -22,3 +22,10 @@ output "acm_validation_records" {
   value = module.compute.acm_validation_records
 }
 
+output "route53_nameservers" {
+  value = aws_route53_zone.pushparag.name_servers
+}
+
+output "route53_zone_id" {
+  value = aws_route53_zone.pushparag.zone_id
+}
