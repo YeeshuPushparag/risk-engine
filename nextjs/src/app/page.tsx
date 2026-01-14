@@ -136,13 +136,14 @@ export default function ProjectPage() {
     <Server className="w-3 h-3 text-blue-500" /> Stack Composition
   </h3>
   <div className="space-y-5 text-[10px] font-bold text-slate-500 uppercase italic">
-    <p><span className="text-blue-500">Infrastructure:</span> Terraform & AWS EKS</p>
-    <p><span className="text-blue-500">CI/CD Pipeline:</span> Jenkins Automation</p>
-    <p><span className="text-blue-500">Processing:</span> Spark & Airflow DAGs</p>
-    <p><span className="text-blue-500">Backend:</span> Django & Channels (WS)</p>
-    <p><span className="text-blue-500">Frontend:</span> Next.js & Tailwind</p>
-    <p><span className="text-blue-500">Streaming:</span> Apache Kafka & Redis</p>
-    <p><span className="text-blue-500">Database:</span> Snowflake & Postgres</p>
+   <p><span className="text-blue-500">Streaming:</span> Apache Kafka & Redis</p>
+  <p><span className="text-blue-500">Processing:</span> Spark & Airflow DAGs</p>
+  <p><span className="text-blue-500">Backend:</span> Django & Channels (WebSockets)</p>
+  <p><span className="text-blue-500">Frontend:</span> Next.js & Tailwind CSS</p>
+  <p><span className="text-blue-500">Database:</span> Snowflake & PostgreSQL</p>
+  <p><span className="text-blue-500">Monitoring:</span> Prometheus & Grafana</p>
+  <p><span className="text-blue-500">CI/CD:</span> Jenkins Automation & Argo CD</p>
+  <p><span className="text-blue-500">Infrastructure:</span> Terraform & AWS EKS</p>
   </div>
 </div>
             <div className="p-8 bg-slate-950 border border-slate-800 rounded-lg">

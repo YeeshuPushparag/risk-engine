@@ -1,0 +1,19 @@
+replicaCount: 1
+
+image:
+  repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/django
+  tag: latest
+  pullPolicy: Always
+
+service:
+  port: 8000
+
+envFrom:
+  configMapName: django-config
+  secretName: django-secret
+
+ingress:
+  enabled: true
+  host: api.pushparag.online
+  certificateArn: arn:aws:acm:us-east-1:871007552317:certificate/3ba64c9b-66cf-4dd6-b635-f92c1a8cdba9
+  groupName: risk-engine

@@ -15,7 +15,6 @@ tfplan
 ################################
 .env
 .env.*
-*.config.env
 .envrc
 *.pem
 *.key
