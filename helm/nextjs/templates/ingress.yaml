@@ -12,6 +12,7 @@ metadata:
     alb.ingress.kubernetes.io/ssl-redirect: "443"
     alb.ingress.kubernetes.io/group.name: {{ .Values.ingress.groupName }}
 spec:
+  ingressClassName: alb
   rules:
     - host: {{ .Values.ingress.host }}
       http:
