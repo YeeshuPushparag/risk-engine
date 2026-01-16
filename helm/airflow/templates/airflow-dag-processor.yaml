@@ -41,3 +41,6 @@ spec:
                 name: {{ .Values.envFrom.configMapName }}
             - secretRef:
                 name: {{ .Values.envFrom.secretName }}
+          env:
+            - name: AIRFLOW_CONFIG
+              value: "/dev/null"
