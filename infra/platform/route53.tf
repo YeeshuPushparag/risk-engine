@@ -10,7 +10,7 @@ resource "aws_route53_zone" "pushparag" {
 # Route53 Records -> ALB (EKS Ingress)
 # ------------------------------------------------------------
 locals {
-  alb_dns_name = "k8s-riskengine-ca22df56e5-778505082.us-east-1.elb.amazonaws.com"
+  alb_dns_name = "k8s-riskengine-ca22df56e5-1341215229.us-east-1.elb.amazonaws.com"
   alb_zone_id  = "Z35SXDOTRQ7X7K" # ALB Hosted Zone ID for us-east-1
 }
 
@@ -39,4 +39,15 @@ resource "aws_route53_record" "api" {
 }
 
 
+resource "aws_route53_record" "airflow" {
+  zone_id = aws_route53_zone.pushparag.zone_id
+  name    = "airflow.pushparag.online"
+  type    = "A"
+
+  alias {
+    name                   = local.alb_dns_name
+    zone_id                = local.alb_zone_id
+    evaluate_target_health = true
+  }
+}
 

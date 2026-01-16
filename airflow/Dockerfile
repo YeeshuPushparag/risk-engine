@@ -7,4 +7,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 USER airflow
 COPY requirements.txt /requirements.txt
 RUN pip install --no-cache-dir -r /requirements.txt
+
+RUN mkdir -p /opt/airflow/dags
 COPY dags/ /opt/airflow/dags/
+
+# Remove config file
+RUN rm -f /opt/airflow/airflow.cfg

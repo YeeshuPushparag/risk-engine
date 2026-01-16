@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-dag-processor
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.replicaCount.dagProcessor }}
+  selector:
+    matchLabels:
+      app: airflow-dag-processor
+  template:
+    metadata:
+      labels:
+        app: airflow-dag-processor
+    spec:
+      initContainers:
+        - name: wait-for-db
+          image: postgres:15
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              echo "Waiting for Postgres to be reachable..."
+              until pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT"; do
+                echo "Postgres not ready yet..."
+                sleep 5
+              done
+              echo "Postgres is reachable."
+          envFrom:
+            - secretRef:
+                name: {{ .Values.envFrom.secretName }}
+
+      containers:
+        - name: dag-processor
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["airflow"]
+          args: ["dag-processor"]
+          envFrom:
+            - configMapRef:
+                name: {{ .Values.envFrom.configMapName }}
+            - secretRef:
+                name: {{ .Values.envFrom.secretName }}

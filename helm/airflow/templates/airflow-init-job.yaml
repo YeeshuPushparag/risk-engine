@@ -1,0 +1,29 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: airflow-init-{{ .Release.Revision }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: airflow-init
+spec:
+  ttlSecondsAfterFinished: 180
+  backoffLimit: 5
+  template:
+    metadata:
+      labels:
+        app: airflow-init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: airflow-init
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+          command: ["/entrypoint"]
+          args: ["airflow", "db", "migrate"]
+
+          envFrom:
+            - configMapRef:
+                name: {{ .Values.envFrom.configMapName }}
+            - secretRef:
+                name: {{ .Values.envFrom.secretName }}
