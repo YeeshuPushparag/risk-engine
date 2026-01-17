@@ -17,3 +17,11 @@ output "eks_node_security_group_id" {
 output "aws_load_balancer_controller_role_arn" {
   value = aws_iam_role.aws_load_balancer_controller.arn
 }
+
+output "airflow_s3_irsa_role_arn" {
+  value = aws_iam_role.airflow_s3_irsa_role.arn
+}
+
+output "streaming_s3_irsa_role_arn" {
+  value = aws_iam_role.streaming_s3_irsa_role.arn
+}

@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-fx
+  namespace: streaming
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: spark-fx
+  template:
+    metadata:
+      labels:
+        app: spark-fx
+    spec:
+      serviceAccountName: streaming-sa
+      containers:
+        - name: spark-fx
+          image: "871007552317.dkr.ecr.us-east-1.amazonaws.com/spark:latest"
+          imagePullPolicy: Always
+          envFrom:
+            - secretRef:
+                name: streaming-infra-secret
+
+          command: ["/bin/bash", "-lc"]
+          args:
+            - >
+              spark-submit
+              --master local[*]
+              --conf spark.driver.host=spark-fx
+              --conf spark.driver.bindAddress=0.0.0.0
+              --conf spark.blockManager.port=7080
+              --conf spark.network.timeout=600s
+              --repositories https://repo.maven.apache.org/maven2
+              --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.7,org.apache.kafka:kafka-clients:3.5.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.696
+              /app/fx_consumer.py
+
+          volumeMounts:
+            - name: ivy-cache
+              mountPath: /tmp/.ivy2
+
+      volumes:
+        - name: ivy-cache
+          persistentVolumeClaim:
+            claimName: spark-ivy-cache-pvc

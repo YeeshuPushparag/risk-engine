@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: equity-producer
+  namespace: streaming
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: equity-producer
+  template:
+    metadata:
+      labels:
+        app: equity-producer
+    spec:
+      serviceAccountName: streaming-sa
+      containers:
+        - name: equity-producer
+          image: "871007552317.dkr.ecr.us-east-1.amazonaws.com/producer:latest"
+          imagePullPolicy: Always
+          command: ["python"]
+          args: ["equity_producer.py"]
+          envFrom:
+            - secretRef:
+                name: streaming-infra-secret

@@ -15,6 +15,7 @@ spec:
       labels:
         app: airflow-worker
     spec:
+      serviceAccountName: airflow-sa
       initContainers:
         - name: wait-for-db
           image: postgres:15
@@ -22,15 +23,17 @@ spec:
           command: ["/bin/bash", "-c"]
           args:
             - |
-              echo "Waiting for Postgres to be reachable..."
               until pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT"; do
-                echo "Postgres not ready yet..."
                 sleep 5
               done
-              echo "Postgres is reachable."
           envFrom:
             - secretRef:
                 name: {{ .Values.envFrom.secretName }}
+        - name: delete-airflow-config
+          image: busybox
+          command: ["sh", "-c"]
+          args:
+            - rm -f /opt/airflow/airflow.cfg
 
       containers:
         - name: worker
@@ -38,19 +41,15 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["airflow"]
           args: ["celery", "worker"]
-
           ports:
             - name: logs
               containerPort: 8793
-
           envFrom:
             - configMapRef:
                 name: {{ .Values.envFrom.configMapName }}
             - secretRef:
                 name: {{ .Values.envFrom.secretName }}
-          env:
-            - name: AIRFLOW_CONFIG
-              value: "/dev/null"
+
 
 ---
 apiVersion: v1

@@ -1,0 +1,36 @@
+namespace: streaming
+
+serviceAccount:
+  name: streaming-sa
+  roleArn: arn:aws:iam::871007552317:role/risk-eks-streaming-s3-irsa-role
+
+envFrom:
+  secretName: streaming-infra-secret
+
+image:
+  producer:
+    repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/producer
+    tag: latest
+    pullPolicy: Always
+
+  spark:
+    repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/spark
+    tag: latest
+    pullPolicy: Always
+
+replicas:
+  zookeeper: 1
+  kafka: 1
+
+  equityProducer: 0
+  fxProducer: 0
+
+  sparkEquity: 0
+  sparkFx: 0
+
+pvc:
+  ivyCache:
+    enabled: true
+    name: spark-ivy-cache-pvc
+    storageClassName: gp3
+    size: 5Gi

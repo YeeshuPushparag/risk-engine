@@ -7,47 +7,25 @@ resource "aws_route53_zone" "pushparag" {
 }
 
 # ------------------------------------------------------------
-# Route53 Records -> ALB (EKS Ingress)
+# Auto-discover the EKS ALB created by AWS Load Balancer Controller
 # ------------------------------------------------------------
-locals {
-  alb_dns_name = "k8s-riskengine-ca22df56e5-1341215229.us-east-1.elb.amazonaws.com"
-  alb_zone_id  = "Z35SXDOTRQ7X7K" # ALB Hosted Zone ID for us-east-1
-}
-
-resource "aws_route53_record" "app" {
-  zone_id = aws_route53_zone.pushparag.zone_id
-  name    = "app.pushparag.online"
-  type    = "A"
-
-  alias {
-    name                   = local.alb_dns_name
-    zone_id                = local.alb_zone_id
-    evaluate_target_health = true
+data "aws_lb" "eks_alb" {
+  tags = {
+    "elbv2.k8s.aws/cluster" = "risk-eks"
   }
 }
 
-resource "aws_route53_record" "api" {
+# ------------------------------------------------------------
+# Wildcard record -> routes ALL subdomains to same ALB
+# ------------------------------------------------------------
+resource "aws_route53_record" "wildcard" {
   zone_id = aws_route53_zone.pushparag.zone_id
-  name    = "api.pushparag.online"
+  name    = "*.pushparag.online"
   type    = "A"
 
   alias {
-    name                   = local.alb_dns_name
-    zone_id                = local.alb_zone_id
+    name                   = data.aws_lb.eks_alb.dns_name
+    zone_id                = data.aws_lb.eks_alb.zone_id
     evaluate_target_health = true
   }
 }
-
-
-resource "aws_route53_record" "airflow" {
-  zone_id = aws_route53_zone.pushparag.zone_id
-  name    = "airflow.pushparag.online"
-  type    = "A"
-
-  alias {
-    name                   = local.alb_dns_name
-    zone_id                = local.alb_zone_id
-    evaluate_target_health = true
-  }
-}
-
