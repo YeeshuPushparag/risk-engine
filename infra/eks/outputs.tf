@@ -25,3 +25,7 @@ output "airflow_s3_irsa_role_arn" {
 output "streaming_s3_irsa_role_arn" {
   value = aws_iam_role.streaming_s3_irsa_role.arn
 }
+
+output "ebs_csi_irsa_role_arn" {
+  value = aws_iam_role.ebs_csi_irsa_role.arn
+}

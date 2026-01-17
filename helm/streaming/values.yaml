@@ -28,6 +28,9 @@ replicas:
   sparkEquity: 0
   sparkFx: 0
 
+storageClassName: gp3
+kafkaStorageSize: 10Gi
+
 pvc:
   ivyCache:
     enabled: true

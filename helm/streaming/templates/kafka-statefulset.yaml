@@ -1,9 +1,10 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: kafka
   namespace: streaming
 spec:
+  serviceName: kafka
   replicas: {{ .Values.replicas.kafka }}
   selector:
     matchLabels:
@@ -30,16 +31,17 @@ spec:
               value: "PLAINTEXT://kafka.streaming.svc.cluster.local:9092"
             - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
               value: "1"
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: kafka
-  namespace: streaming
-spec:
-  selector:
-    app: kafka
-  ports:
-    - name: broker
-      port: 9092
-      targetPort: 9092
+            - name: KAFKA_LOG_DIRS
+              value: "/var/lib/kafka/data"
+          volumeMounts:
+            - name: kafka-data
+              mountPath: /var/lib/kafka/data
+  volumeClaimTemplates:
+    - metadata:
+        name: kafka-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ .Values.storageClassName }}
+        resources:
+          requests:
+            storage: {{ .Values.kafkaStorageSize }}
