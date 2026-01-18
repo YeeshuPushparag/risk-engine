@@ -4,7 +4,7 @@ metadata:
   name: spark-fx
   namespace: streaming
 spec:
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: spark-fx
@@ -18,16 +18,23 @@ spec:
         - name: spark-fx
           image: "871007552317.dkr.ecr.us-east-1.amazonaws.com/spark:latest"
           imagePullPolicy: Always
+
           envFrom:
             - secretRef:
                 name: streaming-infra-secret
+
+          env:
+            - name: SPARK_LOCAL_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
 
           command: ["/bin/bash", "-lc"]
           args:
             - >
               spark-submit
               --master local[*]
-              --conf spark.driver.host=spark-fx
+              --conf spark.driver.host=$(SPARK_LOCAL_IP)
               --conf spark.driver.bindAddress=0.0.0.0
               --conf spark.blockManager.port=7080
               --conf spark.network.timeout=600s
@@ -43,3 +50,20 @@ spec:
         - name: ivy-cache
           persistentVolumeClaim:
             claimName: spark-ivy-cache-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-fx
+  namespace: streaming
+spec:
+  selector:
+    app: spark-fx
+  ports:
+    - name: ui
+      port: 4040
+      targetPort: 4040
+    - name: blockmanager
+      port: 7080
+      targetPort: 7080

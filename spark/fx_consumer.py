@@ -41,7 +41,7 @@ s3 = boto3.client("s3")
 redis_client = redis.Redis(
     host=os.getenv("REDIS_HOST"),
     port=int(os.getenv("REDIS_PORT", 6379)), 
-    db=int(os.environ.get("REDIS_DB_STREAM", 1))     
+    db=int(os.environ.get("REDIS_DB_STREAM", 1)),     
     decode_responses=True
 )
 
