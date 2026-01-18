@@ -1,7 +1,8 @@
 pipeline {
   agent {
     kubernetes {
-      label 'eks-agent'
+      cloud 'kubernetes-cloud'
+      inheritFrom 'jenkins-agent'
       defaultContainer 'kaniko'
     }
   }
