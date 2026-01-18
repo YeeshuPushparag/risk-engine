@@ -5,7 +5,7 @@ metadata:
   namespace: streaming
 spec:
   serviceName: kafka
-  replicas: {{ .Values.replicas.kafka }}
+  replicas: 1
   selector:
     matchLabels:
       app: kafka
@@ -15,9 +15,19 @@ spec:
         app: kafka
     spec:
       serviceAccountName: streaming-sa
+
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: "OnRootMismatch"
+
       containers:
         - name: kafka
           image: confluentinc/cp-kafka:7.6.0
+
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+
           ports:
             - containerPort: 9092
           env:
@@ -41,7 +51,7 @@ spec:
         name: kafka-data
       spec:
         accessModes: ["ReadWriteOnce"]
-        storageClassName: {{ .Values.storageClassName }}
+        storageClassName: gp3
         resources:
           requests:
-            storage: {{ .Values.kafkaStorageSize }}
+            storage: 10Gi
