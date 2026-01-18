@@ -4,7 +4,7 @@ metadata:
   name: stop-spark-fx
   namespace: streaming
 spec:
-  schedule: "20 3 * * *"
+  schedule: "55 3 * * *"
   timeZone: "America/New_York"
   jobTemplate:
     spec:

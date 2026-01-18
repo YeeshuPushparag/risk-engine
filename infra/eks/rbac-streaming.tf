@@ -6,7 +6,7 @@ resource "kubernetes_role" "streaming_scaler" {
 
   rule {
     api_groups = ["apps"]
-    resources  = ["deployments"]
+    resources  = ["deployments", "deployments/scale"]
     verbs      = ["get", "list", "watch", "patch", "update"]
   }
 }
