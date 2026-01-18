@@ -1,7 +1,7 @@
 pipeline {
   agent {
     kubernetes {
-      label 'eks-agent'
+      inheritFrom 'jenkins-agent'
       defaultContainer 'kaniko'
     }
   }
@@ -11,7 +11,7 @@ pipeline {
     AWS_DEFAULT_REGION = 'us-east-1'
     AWS_ACCOUNT_ID     = '871007552317'
     ECR_REGISTRY       = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-    IMAGE_TAG          = "${env.BUILD_NUMBER}"
+    IMAGE_TAG          = "${BUILD_NUMBER}"
   }
 
   stages {
@@ -22,11 +22,11 @@ pipeline {
       }
     }
 
-    stage('Build & Push Images (Kaniko)') {
+    stage('Build & Push Images') {
       steps {
         container('kaniko') {
           sh '''
-            set -euo pipefail
+            set -e
 
             /kaniko/executor \
               --context=dir://${WORKSPACE}/airflow \
