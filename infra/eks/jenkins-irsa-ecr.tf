@@ -1,3 +1,6 @@
+# -------------------------------------------------------
+# IAM Policy: Allow Jenkins (Kaniko) to push/pull from ECR
+# -------------------------------------------------------
 resource "aws_iam_policy" "jenkins_ecr" {
   name        = "risk-eks-jenkins-ecr-policy"
   description = "ECR push/pull permissions for Jenkins Kaniko agents via IRSA"
@@ -31,6 +34,9 @@ resource "aws_iam_policy" "jenkins_ecr" {
   })
 }
 
+# -------------------------------------------------------
+# IAM Role: IRSA role for jenkins-agent ServiceAccount
+# -------------------------------------------------------
 resource "aws_iam_role" "jenkins_irsa" {
   name = "risk-eks-jenkins-irsa-role"
 
@@ -54,22 +60,11 @@ resource "aws_iam_role" "jenkins_irsa" {
   })
 }
 
+# -------------------------------------------------------
+# Attach ECR policy to IRSA role
+# -------------------------------------------------------
 resource "aws_iam_role_policy_attachment" "jenkins_ecr" {
   role       = aws_iam_role.jenkins_irsa.name
   policy_arn = aws_iam_policy.jenkins_ecr.arn
 }
 
-resource "kubernetes_service_account_v1" "jenkins_agent_irsa" {
-  metadata {
-    name      = kubernetes_service_account_v1.jenkins_agent.metadata[0].name
-    namespace = kubernetes_namespace.jenkins.metadata[0].name
-
-    annotations = {
-      "eks.amazonaws.com/role-arn" = aws_iam_role.jenkins_irsa.arn
-    }
-  }
-
-  depends_on = [
-    kubernetes_service_account_v1.jenkins_agent
-  ]
-}
