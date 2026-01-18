@@ -271,7 +271,7 @@ def process_batch(batch_df, batch_id):
     safe_rows = [{k: json_safe(v) for k, v in r.items()} for r in latest_rows]
     redis_client.set("fx_latest_snapshot", json.dumps(safe_rows))
     redis_client.publish("fx_stream", json.dumps(safe_rows))
-
+    print(f"[Redis] published latest snapshot | {len(safe_rows)} tickers")
     # ---------------- AWS S3 SAVE ----------------
     if minute_rows:
         df_out = pd.DataFrame(minute_rows)
