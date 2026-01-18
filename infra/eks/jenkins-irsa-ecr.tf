@@ -1,3 +1,14 @@
+# jenkins-irsa-ecr.tf
+
+# -------------------------------------------------------
+# Namespace for Jenkins agents
+# -------------------------------------------------------
+resource "kubernetes_namespace" "jenkins" {
+  metadata {
+    name = "jenkins"
+  }
+}
+
 # -------------------------------------------------------
 # IAM Policy: Allow Jenkins (Kaniko) to push/pull from ECR
 # -------------------------------------------------------
@@ -11,9 +22,7 @@ resource "aws_iam_policy" "jenkins_ecr" {
       {
         Sid    = "ECRAuth"
         Effect = "Allow"
-        Action = [
-          "ecr:GetAuthorizationToken"
-        ]
+        Action = ["ecr:GetAuthorizationToken"]
         Resource = "*"
       },
       {
@@ -53,13 +62,8 @@ resource "aws_iam_role" "jenkins_irsa" {
         Action = "sts:AssumeRoleWithWebIdentity"
         Condition = {
           StringEquals = {
-            (
-              "${replace(data.aws_eks_cluster.this.identity[0].oidc[0].issuer, "https://", "")}:sub"
-            ) = "system:serviceaccount:jenkins:jenkins-agent"
-
-            (
-              "${replace(data.aws_eks_cluster.this.identity[0].oidc[0].issuer, "https://", "")}:aud"
-            ) = "sts.amazonaws.com"
+            "${replace(data.aws_eks_cluster.this.identity[0].oidc[0].issuer, "https://", "")}:sub" = "system:serviceaccount:jenkins:jenkins-agent"
+            "${replace(data.aws_eks_cluster.this.identity[0].oidc[0].issuer, "https://", "")}:aud" = "sts.amazonaws.com"
           }
         }
       }
@@ -67,28 +71,21 @@ resource "aws_iam_role" "jenkins_irsa" {
   })
 }
 
-# -------------------------------------------------------
-# Attach ECR policy to IRSA role
-# -------------------------------------------------------
 resource "aws_iam_role_policy_attachment" "jenkins_ecr" {
   role       = aws_iam_role.jenkins_irsa.name
   policy_arn = aws_iam_policy.jenkins_ecr.arn
 }
 
 # -------------------------------------------------------
-# Annotate Jenkins ServiceAccount with IRSA role
+# Kubernetes ServiceAccount (ONLY ONE) with IRSA annotation
 # -------------------------------------------------------
-resource "kubernetes_service_account_v1" "jenkins_agent_irsa" {
+resource "kubernetes_service_account_v1" "jenkins_agent" {
   metadata {
-    name      = kubernetes_service_account.jenkins_agent.metadata[0].name
-    namespace = "jenkins"
+    name      = "jenkins-agent"
+    namespace = kubernetes_namespace.jenkins.metadata[0].name
 
     annotations = {
       "eks.amazonaws.com/role-arn" = aws_iam_role.jenkins_irsa.arn
     }
   }
-
-  depends_on = [
-    kubernetes_service_account.jenkins_agent
-  ]
 }
