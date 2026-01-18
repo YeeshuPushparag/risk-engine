@@ -39,30 +39,29 @@ resource "aws_iam_policy" "jenkins_ecr" {
 # -------------------------------------------------------
 # IAM Role: IRSA role for jenkins-agent ServiceAccount
 # -------------------------------------------------------
-resource "aws_iam_role" "jenkins_irsa" {
-  name = "risk-eks-jenkins-irsa-role"
+assume_role_policy = jsonencode({
+  Version = "2012-10-17"
+  Statement = [
+    {
+      Effect = "Allow"
+      Principal = {
+        Federated = aws_iam_openid_connect_provider.eks.arn
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          (
+            "${replace(data.aws_eks_cluster.this.identity[0].oidc[0].issuer, "https://", "")}:sub"
+          ) = "system:serviceaccount:jenkins:jenkins-agent"
 
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Principal = {
-          Federated = aws_iam_openid_connect_provider.eks.arn
-        }
-        Action = "sts:AssumeRoleWithWebIdentity"
-        Condition = {
-          StringEquals = {
-            "${replace(data.aws_eks_cluster.this.identity[0].oidc[0].issuer, "https://", "")}:sub" =
-              "system:serviceaccount:jenkins:jenkins-agent"
-            "${replace(data.aws_eks_cluster.this.identity[0].oidc[0].issuer, "https://", "")}:aud" =
-              "sts.amazonaws.com"
-          }
+          (
+            "${replace(data.aws_eks_cluster.this.identity[0].oidc[0].issuer, "https://", "")}:aud"
+          ) = "sts.amazonaws.com"
         }
       }
-    ]
-  })
-}
+    }
+  ]
+})
 
 # -------------------------------------------------------
 # Attach ECR policy to IRSA role
