@@ -1,4 +1,9 @@
-# jenkins-rbac.tf
+resource "kubernetes_service_account_v1" "jenkins_agent" {
+  metadata {
+    name      = "jenkins-agent"
+    namespace = kubernetes_namespace.jenkins.metadata[0].name
+  }
+}
 
 resource "kubernetes_cluster_role" "jenkins_agent_role" {
   metadata {
@@ -7,18 +12,8 @@ resource "kubernetes_cluster_role" "jenkins_agent_role" {
 
   rule {
     api_groups = [""]
-    resources  = [
-      "pods",
-      "pods/exec",
-      "pods/log",
-      "secrets",
-      "configmaps"
-    ]
-    verbs = [
-      "get", "list", "watch",
-      "create", "delete",
-      "patch", "update"
-    ]
+    resources  = ["pods", "pods/exec", "pods/log", "secrets", "configmaps"]
+    verbs      = ["get", "list", "watch", "create", "delete", "patch", "update"]
   }
 
   rule {
