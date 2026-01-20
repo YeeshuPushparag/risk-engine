@@ -6,8 +6,14 @@ resource "aws_eks_cluster" "this" {
   role_arn = aws_iam_role.eks_cluster_role.arn
 
   vpc_config {
-    subnet_ids = var.subnet_ids
-  }
+    subnet_ids              = var.subnet_ids
+    endpoint_public_access  = true
+    endpoint_private_access = true
+
+    # IMPORTANT: restrict access
+    public_access_cidrs = [
+      http://44.197.121.93:8080/
+    ]
 
   depends_on = [
     aws_iam_role_policy_attachment.eks_cluster_policy
