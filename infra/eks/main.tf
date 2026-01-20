@@ -6,20 +6,13 @@ resource "aws_eks_cluster" "this" {
   role_arn = aws_iam_role.eks_cluster_role.arn
 
   vpc_config {
-    subnet_ids              = var.subnet_ids
-    endpoint_public_access  = true
-    endpoint_private_access = true
-
-    public_access_cidrs = [
-      "44.197.121.93/32"
-    ]
+    subnet_ids = var.subnet_ids
   }
 
   depends_on = [
     aws_iam_role_policy_attachment.eks_cluster_policy
   ]
 }
-
 
 ############################################
 # Node Group 1: STREAMING (Kafka, ZK, Spark)
@@ -50,26 +43,54 @@ resource "aws_eks_node_group" "streaming" {
 }
 
 ############################################
-# Node Group 2: PLATFORM
-# Airflow, Django, Next.js, ArgoCD
-# 2 → 3 × t3.medium (AUTOSCALING)
+# Node Group 2: PLATFORM CORE
+# Airflow + ArgoCD
 ############################################
-resource "aws_eks_node_group" "platform" {
+resource "aws_eks_node_group" "platform_core" {
   cluster_name    = aws_eks_cluster.this.name
-  node_group_name = "${var.cluster_name}-platform"
+  node_group_name = "${var.cluster_name}-platform-core"
+  node_role_arn   = aws_iam_role.eks_node_role.arn
+  subnet_ids      = var.subnet_ids
+
+  instance_types = ["t3.large"]
+
+  scaling_config {
+    min_size     = 1
+    desired_size = 1
+    max_size     = 1
+  }
+
+  labels = {
+    role = "platform-core"
+  }
+  
+  tags = {
+    "k8s.io/cluster-autoscaler/enabled"              = "true"
+    "k8s.io/cluster-autoscaler/${var.cluster_name}" = "owned"
+  }
+}
+
+
+############################################
+# Node Group 3: WEB
+# Django + Next.js (ALWAYS ON)
+############################################
+resource "aws_eks_node_group" "web" {
+  cluster_name    = aws_eks_cluster.this.name
+  node_group_name = "${var.cluster_name}-web"
   node_role_arn   = aws_iam_role.eks_node_role.arn
   subnet_ids      = var.subnet_ids
 
   instance_types = ["t3.medium"]
 
   scaling_config {
-    min_size     = 2
-    desired_size = 2
-    max_size     = 3
+    min_size     = 1
+    desired_size = 1
+    max_size     = 1
   }
 
   labels = {
-    role = "platform"
+    role = "web"
   }
 
   tags = {
@@ -79,8 +100,8 @@ resource "aws_eks_node_group" "platform" {
 }
 
 ############################################
-# Node Group 3: MONITORING
-# Prometheus, Grafana (ON-DEMAND)
+# Node Group 4: MONITORING
+# Prometheus + Grafana (ON-DEMAND)
 ############################################
 resource "aws_eks_node_group" "monitoring" {
   cluster_name    = aws_eks_cluster.this.name
@@ -106,8 +127,9 @@ resource "aws_eks_node_group" "monitoring" {
   }
 }
 
+
 ############################################
-# Node Group 4: JENKINS AGENTS (ON-DEMAND)
+# Node Group 5: JENKINS AGENTS (ON-DEMAND)
 ############################################
 resource "aws_eks_node_group" "jenkins_agent" {
   cluster_name    = aws_eks_cluster.this.name
