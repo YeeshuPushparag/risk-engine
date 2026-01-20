@@ -13,6 +13,8 @@ spec:
       labels:
         app: zookeeper
     spec:
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
       serviceAccountName: streaming-sa
       containers:
         - name: zookeeper

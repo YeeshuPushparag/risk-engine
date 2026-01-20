@@ -37,3 +37,6 @@ pvc:
     name: spark-ivy-cache-pvc
     storageClassName: gp3
     size: 5Gi
+
+nodeSelector:
+  role: streaming

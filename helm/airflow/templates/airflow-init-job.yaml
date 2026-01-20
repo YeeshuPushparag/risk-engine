@@ -13,6 +13,8 @@ spec:
       labels:
         app: airflow-init
     spec:
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
       restartPolicy: OnFailure
       containers:
         - name: airflow-init

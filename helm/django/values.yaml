@@ -8,6 +8,9 @@ image:
 service:
   port: 8000
 
+nodeSelector:
+  role: web
+
 envFrom:
   configMapName: django-config
   secretName: django-secret

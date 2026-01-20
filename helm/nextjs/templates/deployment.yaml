@@ -12,6 +12,8 @@ spec:
       labels:
         app: nextjs
     spec:
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
       containers:
         - name: nextjs
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"

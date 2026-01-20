@@ -14,6 +14,9 @@ service:
   type: ClusterIP
   port: 8080
 
+nodeSelector:
+  role: platform-core
+
 ingress:
   enabled: true
   host: airflow.pushparag.online

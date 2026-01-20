@@ -9,7 +9,9 @@ spec:
   jobTemplate:
     spec:
       template:
-        spec:
+      spec:
+        nodeSelector:
+          {{- toYaml .Values.nodeSelector | nindent 8 }}
           restartPolicy: Never
           serviceAccountName: streaming-sa
           containers:
