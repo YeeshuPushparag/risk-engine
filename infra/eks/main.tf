@@ -10,10 +10,7 @@ resource "aws_eks_cluster" "this" {
     endpoint_public_access  = true
     endpoint_private_access = true
 
-    # IMPORTANT: restrict access
-    public_access_cidrs = [
-      http://44.197.121.93:8080/
-    ]
+    public_access_cidrs = ["44.197.121.93/32"]
 
   depends_on = [
     aws_iam_role_policy_attachment.eks_cluster_policy
