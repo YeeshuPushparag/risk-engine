@@ -20,6 +20,18 @@ spec:
         fsGroup: 1000
         fsGroupChangePolicy: "OnRootMismatch"
 
+      initContainers:
+        - name: wait-for-zookeeper
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z zookeeper 2181; do
+                echo "Waiting for Zookeeper..."
+                sleep 5
+              done
+
       containers:
         - name: kafka
           image: confluentinc/cp-kafka:7.6.0
@@ -46,6 +58,7 @@ spec:
           volumeMounts:
             - name: kafka-data
               mountPath: /var/lib/kafka/data
+
   volumeClaimTemplates:
     - metadata:
         name: kafka-data
