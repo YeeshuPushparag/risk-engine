@@ -10,13 +10,16 @@ resource "aws_eks_cluster" "this" {
     endpoint_public_access  = true
     endpoint_private_access = true
 
-    public_access_cidrs = ["44.197.121.93/32"]
+    public_access_cidrs = [
+      "44.197.121.93/32"
+    ]
+  }
 
   depends_on = [
     aws_iam_role_policy_attachment.eks_cluster_policy
   ]
 }
-}
+
 
 ############################################
 # Node Group 1: STREAMING (Kafka, ZK, Spark)
