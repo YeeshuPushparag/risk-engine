@@ -3,6 +3,27 @@ pipeline {
     kubernetes {
       inheritFrom 'jenkins-agent'
       defaultContainer 'kaniko'
+      yaml """
+apiVersion: v1
+kind: Pod
+spec:
+  nodeSelector:
+    role: jenkins-agent
+  containers:
+  - name: kaniko
+    resources:
+      requests:
+        cpu: "1000m"
+        memory: "2Gi"
+      limits:
+        cpu: "2000m"
+        memory: "4Gi"
+  - name: jnlp
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+"""
     }
   }
 
@@ -15,7 +36,6 @@ pipeline {
   }
 
   stages {
-
     stage('Checkout') {
       steps {
         checkout scm
