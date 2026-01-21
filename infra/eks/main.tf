@@ -36,10 +36,7 @@ resource "aws_eks_node_group" "streaming" {
     role = "streaming"
   }
 
-  tags = {
-    "k8s.io/cluster-autoscaler/enabled"              = "true"
-    "k8s.io/cluster-autoscaler/${var.cluster_name}" = "owned"
-  }
+
 }
 
 ############################################
@@ -64,10 +61,6 @@ resource "aws_eks_node_group" "platform_core" {
     role = "platform-core"
   }
   
-  tags = {
-    "k8s.io/cluster-autoscaler/enabled"              = "true"
-    "k8s.io/cluster-autoscaler/${var.cluster_name}" = "owned"
-  }
 }
 
 
@@ -93,10 +86,6 @@ resource "aws_eks_node_group" "web" {
     role = "web"
   }
 
-  tags = {
-    "k8s.io/cluster-autoscaler/enabled"              = "true"
-    "k8s.io/cluster-autoscaler/${var.cluster_name}" = "owned"
-  }
 }
 
 ############################################
@@ -120,10 +109,10 @@ resource "aws_eks_node_group" "monitoring" {
   labels = {
     role = "monitoring"
   }
-
   tags = {
     "k8s.io/cluster-autoscaler/enabled"              = "true"
     "k8s.io/cluster-autoscaler/${var.cluster_name}" = "owned"
+    "k8s.io/cluster-autoscaler/node-template/label/role" = "monitoring"
   }
 }
 
@@ -152,6 +141,7 @@ resource "aws_eks_node_group" "jenkins_agent" {
   tags = {
     "k8s.io/cluster-autoscaler/enabled"              = "true"
     "k8s.io/cluster-autoscaler/${var.cluster_name}" = "owned"
+    "k8s.io/cluster-autoscaler/node-template/label/role" = "jenkins-agent"
   }
 }
 
