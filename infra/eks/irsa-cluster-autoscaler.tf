@@ -1,10 +1,13 @@
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "autoscaling:DescribeAutoScalingGroups",
+resource "aws_iam_policy" "cluster_autoscaler" {
+  name = "risk-eks-cluster-autoscaler-policy"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "autoscaling:DescribeAutoScalingGroups",
         "autoscaling:DescribeAutoScalingInstances",
         "autoscaling:DescribeLaunchConfigurations",
         "autoscaling:DescribeTags",
@@ -19,8 +22,9 @@
         "eks:DescribeNodegroup",
         "eks:ListNodegroups",
         "eks:DescribeCluster"
-      ],
-      "Resource": "*"
-    }
-  ]
+        ]
+        Resource = "*"
+      }
+    ]
+  })
 }
