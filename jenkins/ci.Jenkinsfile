@@ -59,8 +59,7 @@ pipeline {
               --dockerfile=${WORKSPACE}/spark/Dockerfile \
               --destination=${ECR_REGISTRY}/spark:${IMAGE_TAG} \
               --destination=${ECR_REGISTRY}/spark:latest\
-              --cache=true \
-              --cache-repo=${ECR_REGISTRY}/kaniko-cache
+              --cache=false
 
 
             /kaniko/executor \
