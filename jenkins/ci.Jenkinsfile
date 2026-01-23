@@ -1,77 +1,24 @@
-pipeline {
-  agent {
-    kubernetes {
-      inheritFrom 'jenkins-agent'
-      defaultContainer 'kaniko'
-    }
-  }
+FROM python:3.12-slim
 
-  environment {
-    AWS_REGION         = 'us-east-1'
-    AWS_DEFAULT_REGION = 'us-east-1'
-    AWS_ACCOUNT_ID     = '871007552317'
-    ECR_REGISTRY       = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-    IMAGE_TAG          = "${BUILD_NUMBER}"
-  }
+WORKDIR /app
 
-  stages {
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
-    stage('Checkout') {
-      steps {
-        checkout scm
-      }
-    }
+COPY requirements.txt .
 
-    stage('Build & Push Images') {
-      steps {
-        container('kaniko') {
-          sh '''
-            set -e
+RUN echo "=== REQUIREMENTS FILE ===" && cat requirements.txt
 
-            /kaniko/executor \
-              --context=dir://${WORKSPACE}/airflow \
-              --dockerfile=${WORKSPACE}/airflow/Dockerfile \
-              --destination=${ECR_REGISTRY}/airflow:${IMAGE_TAG} \
-              --destination=${ECR_REGISTRY}/airflow:latest\
-              --cache=true \
-              --cache-repo=${ECR_REGISTRY}/kaniko-cache
+RUN python -m pip install --upgrade pip \
+ && python -m pip install --no-cache-dir -r requirements.txt -v
 
-            /kaniko/executor \
-              --context=dir://${WORKSPACE}/django \
-              --dockerfile=${WORKSPACE}/django/Dockerfile \
-              --destination=${ECR_REGISTRY}/django:${IMAGE_TAG} \
-              --destination=${ECR_REGISTRY}/django:latest\
-              --cache=true \
-              --cache-repo=${ECR_REGISTRY}/kaniko-cache
+RUN python -c "import django; print('Django OK:', django.get_version())"
+RUN python -c "import uvicorn; print('Uvicorn OK:', uvicorn.__version__)"
 
+COPY . .
 
-            /kaniko/executor \
-              --context=dir://${WORKSPACE}/nextjs \
-              --dockerfile=${WORKSPACE}/nextjs/Dockerfile \
-              --destination=${ECR_REGISTRY}/nextjs:${IMAGE_TAG} \
-              --destination=${ECR_REGISTRY}/nextjs:latest\
-              --cache=true \
-              --cache-repo=${ECR_REGISTRY}/kaniko-cache
+RUN python manage.py collectstatic --noinput
 
+EXPOSE 8000
 
-            /kaniko/executor \
-              --context=dir://${WORKSPACE}/spark \
-              --dockerfile=${WORKSPACE}/spark/Dockerfile \
-              --destination=${ECR_REGISTRY}/spark:${IMAGE_TAG} \
-              --destination=${ECR_REGISTRY}/spark:latest\
-              --cache=false
-
-
-            /kaniko/executor \
-              --context=dir://${WORKSPACE}/producers \
-              --dockerfile=${WORKSPACE}/producers/Dockerfile \
-              --destination=${ECR_REGISTRY}/producer:${IMAGE_TAG} \
-              --destination=${ECR_REGISTRY}/producer:latest\
-              --cache=true \
-              --cache-repo=${ECR_REGISTRY}/kaniko-cache
-          '''
-        }
-      }
-    }
-  }
-}
+CMD ["python", "-m", "uvicorn", "backend.asgi:application", "--host", "0.0.0.0", "--port", "8000"]
