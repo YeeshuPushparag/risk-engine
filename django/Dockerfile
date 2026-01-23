@@ -7,18 +7,13 @@ ENV PYTHONUNBUFFERED=1
 
 COPY requirements.txt .
 
-RUN echo "=== REQUIREMENTS FILE ===" && cat requirements.txt
-
-RUN python -m pip install --upgrade pip \
- && python -m pip install --no-cache-dir -r requirements.txt -v
-
-RUN python -c "import django; print('Django OK:', django.get_version())"
-RUN python -c "import uvicorn; print('Uvicorn OK:', uvicorn.__version__)"
+RUN /usr/local/bin/python -m pip install --upgrade pip \
+ && /usr/local/bin/python -m pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN python manage.py collectstatic --noinput
+RUN /usr/local/bin/python manage.py collectstatic --noinput
 
 EXPOSE 8000
 
-CMD ["python", "-m", "uvicorn", "backend.asgi:application", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/usr/local/bin/python", "-m", "uvicorn", "backend.asgi:application", "--host", "0.0.0.0", "--port", "8000"]
