@@ -32,31 +32,44 @@ pipeline {
               --context=dir://${WORKSPACE}/airflow \
               --dockerfile=${WORKSPACE}/airflow/Dockerfile \
               --destination=${ECR_REGISTRY}/airflow:${IMAGE_TAG} \
-              --destination=${ECR_REGISTRY}/airflow:latest
+              --destination=${ECR_REGISTRY}/airflow:latest\
+              --cache=true \
+              --cache-repo=${ECR_REGISTRY}/kaniko-cache
 
             /kaniko/executor \
               --context=dir://${WORKSPACE}/django \
               --dockerfile=${WORKSPACE}/django/Dockerfile \
               --destination=${ECR_REGISTRY}/django:${IMAGE_TAG} \
-              --destination=${ECR_REGISTRY}/django:latest
+              --destination=${ECR_REGISTRY}/django:latest\
+              --cache=true \
+              --cache-repo=${ECR_REGISTRY}/kaniko-cache
+
 
             /kaniko/executor \
               --context=dir://${WORKSPACE}/nextjs \
               --dockerfile=${WORKSPACE}/nextjs/Dockerfile \
               --destination=${ECR_REGISTRY}/nextjs:${IMAGE_TAG} \
-              --destination=${ECR_REGISTRY}/nextjs:latest
+              --destination=${ECR_REGISTRY}/nextjs:latest\
+              --cache=true \
+              --cache-repo=${ECR_REGISTRY}/kaniko-cache
+
 
             /kaniko/executor \
               --context=dir://${WORKSPACE}/spark \
               --dockerfile=${WORKSPACE}/spark/Dockerfile \
               --destination=${ECR_REGISTRY}/spark:${IMAGE_TAG} \
-              --destination=${ECR_REGISTRY}/spark:latest
+              --destination=${ECR_REGISTRY}/spark:latest\
+              --cache=true \
+              --cache-repo=${ECR_REGISTRY}/kaniko-cache
+
 
             /kaniko/executor \
               --context=dir://${WORKSPACE}/producers \
               --dockerfile=${WORKSPACE}/producers/Dockerfile \
               --destination=${ECR_REGISTRY}/producer:${IMAGE_TAG} \
-              --destination=${ECR_REGISTRY}/producer:latest
+              --destination=${ECR_REGISTRY}/producer:latest\
+              --cache=true \
+              --cache-repo=${ECR_REGISTRY}/kaniko-cache
           '''
         }
       }
