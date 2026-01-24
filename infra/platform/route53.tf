@@ -39,6 +39,11 @@ resource "aws_route53_record" "jenkins" {
   zone_id = aws_route53_zone.pushparag.zone_id
   name    = "jenkins.pushparag.online"
   type    = "A"
-  ttl     = 300
-  records = ["44.197.121.93"]
+
+  alias {
+    name                   = data.aws_lb.eks_alb.dns_name
+    zone_id                = data.aws_lb.eks_alb.zone_id
+    evaluate_target_health = true
+  }
 }
+
