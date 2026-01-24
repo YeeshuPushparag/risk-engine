@@ -16,7 +16,8 @@ data "aws_lb" "eks_alb" {
 }
 
 # ------------------------------------------------------------
-# Wildcard record -> routes ALL subdomains to same ALB
+# Wildcard record -> routes ALL subdomains to EKS ALB
+# (api.pushparag.online, airflow.pushparag.online, etc.)
 # ------------------------------------------------------------
 resource "aws_route53_record" "wildcard" {
   zone_id = aws_route53_zone.pushparag.zone_id
@@ -28,4 +29,16 @@ resource "aws_route53_record" "wildcard" {
     zone_id                = data.aws_lb.eks_alb.zone_id
     evaluate_target_health = true
   }
+}
+
+# ------------------------------------------------------------
+# Jenkins override -> routes ONLY jenkins.pushparag.online to EC2 Elastic IP
+# This will override the wildcard record
+# ------------------------------------------------------------
+resource "aws_route53_record" "jenkins" {
+  zone_id = aws_route53_zone.pushparag.zone_id
+  name    = "jenkins.pushparag.online"
+  type    = "A"
+  ttl     = 300
+  records = ["44.197.121.93"]
 }

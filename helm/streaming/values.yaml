@@ -8,15 +8,14 @@ envFrom:
   secretName: streaming-infra-secret
 
 image:
+  tag: "84"                     
+  pullPolicy: IfNotPresent
+
   producer:
     repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/producer
-    tag: latest
-    pullPolicy: Always
 
   spark:
     repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/spark
-    tag: latest
-    pullPolicy: Always
 
 replicas:
   zookeeper: 1

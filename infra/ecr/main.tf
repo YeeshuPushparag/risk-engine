@@ -42,3 +42,12 @@ resource "aws_ecr_repository" "producer" {
     scan_on_push = true
   }
 }
+
+resource "aws_ecr_repository" "kaniko_cache" {
+  name                 = "kaniko-cache"
+  image_tag_mutability = "MUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}

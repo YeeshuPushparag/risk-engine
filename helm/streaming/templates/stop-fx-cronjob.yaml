@@ -9,14 +9,14 @@ spec:
   jobTemplate:
     spec:
       template:
-      spec:
-        nodeSelector:
-          {{- toYaml .Values.nodeSelector | nindent 8 }}
+        spec:
+          nodeSelector:
+            {{- toYaml .Values.nodeSelector | nindent 12 }}
           restartPolicy: Never
           serviceAccountName: streaming-sa
           containers:
             - name: stop-fx
-              image: bitnami/kubectl:latest
+              image: bitnami/kubectl:1.30.0
               command:
                 - /bin/sh
                 - -c

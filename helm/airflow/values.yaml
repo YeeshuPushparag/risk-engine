@@ -7,8 +7,9 @@ replicaCount:
 
 image:
   repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/airflow
-  tag: latest
-  pullPolicy: Always
+  tag: "84"         
+  pullPolicy: IfNotPresent
+
 
 service:
   type: ClusterIP

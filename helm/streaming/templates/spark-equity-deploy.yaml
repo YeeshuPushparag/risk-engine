@@ -31,8 +31,8 @@ spec:
 
       containers:
         - name: spark-equity
-          image: "871007552317.dkr.ecr.us-east-1.amazonaws.com/spark:latest"
-          imagePullPolicy: Always
+          image: "{{ .Values.image.spark.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
 
           envFrom:
             - secretRef:
