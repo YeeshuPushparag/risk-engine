@@ -70,30 +70,28 @@ pipeline {
       }
     }
 
-stage('Update Helm Image Tags (One Commit)') {
-  steps {
-    container('git') {
-      withCredentials([usernamePassword(credentialsId: 'github-https', usernameVariable: 'GIT_USER', passwordVariable: 'GITHUB_TOKEN')]) {
-        sh '''
-          git config user.name "Pushparag"
-          git config user.email "pushparagyeeshu@gmail.com"
+    stage('Update Helm Image Tags (One Commit)') {
+      steps {
+        container('jnlp') {
+          withCredentials([usernamePassword(credentialsId: 'github-https', usernameVariable: 'GIT_USER', passwordVariable: 'GITHUB_TOKEN')]) {
+            sh '''
+              git config user.name "Pushparag"
+              git config user.email "pushparagyeeshu@gmail.com"
 
-          sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/django/values.yaml
-          sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/nextjs/values.yaml
-          sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/airflow/values.yaml
-          sed -i "s/^  tag: \\".*/  tag: \\"${IMAGE_TAG}\\"/" helm/streaming/values.yaml
+              sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/django/values.yaml
+              sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/nextjs/values.yaml
+              sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/airflow/values.yaml
+              sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/streaming/values.yaml
 
-          git add helm/*/values.yaml
-          git commit -m "deploy: update image tags to ${IMAGE_TAG}" || echo "No changes"
+              git add helm/*/values.yaml
+              git commit -m "deploy: update image tags to ${IMAGE_TAG}" || echo "No changes"
 
-          git remote set-url origin https://${GIT_USER}:${GITHUB_TOKEN}@github.com/YeeshuPushparag/risk-engine.git
-          git push origin HEAD:main
-        '''
+              git remote set-url origin https://${GIT_USER}:${GITHUB_TOKEN}@github.com/YeeshuPushparag/risk-engine.git
+              git push origin HEAD:main
+            '''
+          }
+        }
       }
     }
-  }
-}
-
-
   }
 }
