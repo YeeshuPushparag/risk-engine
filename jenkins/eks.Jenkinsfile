@@ -41,14 +41,21 @@ pipeline {
         }
       }
     }
-
     stage('Terraform Apply') {
       steps {
-        input message: 'Apply Terraform to create/update EKS?', ok: 'Apply'
         dir(env.TF_DIR) {
-          sh 'terraform apply -input=false tfplan'
+          sh 'terraform apply -auto-approve'
         }
       }
     }
+
+    // stage('Terraform Apply') {
+    //   steps {
+    //     input message: 'Apply Terraform to create/update EKS?', ok: 'Apply'
+    //     dir(env.TF_DIR) {
+    //       sh 'terraform apply -input=false tfplan'
+    //     }
+    //   }
+    // }
   }
 }
