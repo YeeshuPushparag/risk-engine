@@ -2,7 +2,7 @@ pipeline {
   agent {
     kubernetes {
       inheritFrom 'jenkins-agent'
-      defaultContainer 'kaniko'
+      defaultContainer 'jnlp'
     }
   }
 
@@ -12,8 +12,6 @@ pipeline {
     AWS_ACCOUNT_ID     = '871007552317'
     ECR_REGISTRY       = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
     IMAGE_TAG          = "${BUILD_NUMBER}"
-
-    // 👇 Kaniko cache repo
     KANIKO_CACHE_REPO  = "${ECR_REGISTRY}/kaniko-cache"
   }
 
@@ -74,10 +72,10 @@ pipeline {
 
     stage('Update Helm Image Tags (One Commit)') {
       steps {
-        container('kaniko') {
+        // 👇 IMPORTANT: run this in container that has git (jnlp usually has it)
+        container('jnlp') {
           sh '''
             set -e
-
             echo "Updating Helm tags to ${IMAGE_TAG}"
 
             sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/django/values.yaml
@@ -85,6 +83,7 @@ pipeline {
             sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/airflow/values.yaml
             sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/streaming/values.yaml
 
+            git status
             git add helm/*/values.yaml
             git commit -m "deploy: update image tags to ${IMAGE_TAG}" || echo "No changes"
             git push origin HEAD:main
