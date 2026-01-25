@@ -8,7 +8,7 @@ spec:
 
   source:
     repoURL: https://github.com/YeeshuPushparag/risk-engine.git
-    targetRevision: main
+    targetRevision: deploy
     path: helm/streaming
     helm:
       valueFiles:
