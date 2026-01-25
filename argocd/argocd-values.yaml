@@ -7,7 +7,7 @@ server:
   service:
     ports:
       http:
-        enabled: false        # disable HTTP to avoid redirect loops
+        enabled: false        
       https:
         enabled: true
 
