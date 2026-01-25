@@ -30,7 +30,7 @@ server:
 
 configs:
   cm:
-    url: https://argocd.pushparag.online  # your public HTTPS URL
+    url: https://argocd.pushparag.online  
   params:
     server.insecure: false
 
