@@ -25,7 +25,7 @@ resource "aws_route53_record" "wildcard" {
   }
 }
 
-# Jenkins record pointing to our ALB
+# Jenkins record pointing to It's ALB
 resource "aws_route53_record" "jenkins" {
   zone_id = aws_route53_zone.pushparag.zone_id
   name    = "jenkins.pushparag.online"
