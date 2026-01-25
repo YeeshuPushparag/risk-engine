@@ -1,6 +1,4 @@
-configs:
-  params:
-    server.insecure: true
+replicaCount: 1
 
 server:
   nodeSelector:
@@ -9,36 +7,42 @@ server:
   service:
     ports:
       http:
-        enabled: true
+        enabled: false        # disable HTTP to avoid redirect loops
       https:
-        enabled: false
+        enabled: true
 
   ingress:
     enabled: true
     ingressClassName: alb
+    hostname: argocd.pushparag.online
     annotations:
       kubernetes.io/ingress.class: alb
       alb.ingress.kubernetes.io/scheme: internet-facing
       alb.ingress.kubernetes.io/target-type: ip
-      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
       alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:871007552317:certificate/3ba64c9b-66cf-4dd6-b635-f92c1a8cdba9
+      alb.ingress.kubernetes.io/backend-protocol: HTTPS
       alb.ingress.kubernetes.io/ssl-redirect: "443"
       alb.ingress.kubernetes.io/group.name: risk-engine
-    hosts:
-      - host: argocd.pushparag.online
-        paths:
-          - path: /
-            pathType: Prefix
+
+  extraArgs:
+    - --insecure=false   # enforce HTTPS
+
+configs:
+  cm:
+    url: https://argocd.pushparag.online  # your public HTTPS URL
+  params:
+    server.insecure: false
 
 repoServer:
   nodeSelector:
     role: platform-core
 
-applicationSet:
+controller:
   nodeSelector:
     role: platform-core
 
-controller:
+applicationSet:
   nodeSelector:
     role: platform-core
 
