@@ -70,26 +70,30 @@ pipeline {
       }
     }
 
-    stage('Update Helm Image Tags (One Commit)') {
-      steps {
-        // 👇 IMPORTANT: run this in container that has git (jnlp usually has it)
-        container('jnlp') {
-          sh '''
-            set -e
-            echo "Updating Helm tags to ${IMAGE_TAG}"
+  stage('Update Helm Image Tags (One Commit)') {
+  steps {
+    container('kaniko') {
+      withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
+        sh '''
+          set -e
 
-            sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/django/values.yaml
-            sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/nextjs/values.yaml
-            sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/airflow/values.yaml
-            sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/streaming/values.yaml
+          git config user.name "Pushparag"
+          git config user.email "pushparagyeeshu@gmail.com"
 
-            git status
-            git add helm/*/values.yaml
-            git commit -m "deploy: update image tags to ${IMAGE_TAG}" || echo "No changes"
-            git push origin HEAD:main
-          '''
-        }
+          sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/django/values.yaml
+          sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/nextjs/values.yaml
+          sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/airflow/values.yaml
+          sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/streaming/values.yaml
+
+          git add helm/*/values.yaml
+          git commit -m "deploy: update image tags to ${IMAGE_TAG}" || echo "No changes"
+
+          git push https://YeeshuPushparag:${GITHUB_TOKEN}@github.com/YeeshuPushparag/risk-engine.git HEAD:main
+        '''
       }
     }
+  }
+}
+
   }
 }
