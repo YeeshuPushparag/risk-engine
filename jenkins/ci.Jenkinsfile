@@ -73,7 +73,7 @@ pipeline {
   stage('Update Helm Image Tags (One Commit)') {
   steps {
     container('kaniko') {
-      withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
+      withCredentials([usernamePassword(credentialsId: 'github-https', usernameVariable: 'GIT_USER', passwordVariable: 'GITHUB_TOKEN')]) {
         sh '''
           set -e
 
@@ -88,7 +88,7 @@ pipeline {
           git add helm/*/values.yaml
           git commit -m "deploy: update image tags to ${IMAGE_TAG}" || echo "No changes"
 
-          git push https://YeeshuPushparag:${GITHUB_TOKEN}@github.com/YeeshuPushparag/risk-engine.git HEAD:main
+          git push https://${GIT_USER}:${GITHUB_TOKEN}@github.com/YeeshuPushparag/risk-engine.git HEAD:main
         '''
       }
     }
