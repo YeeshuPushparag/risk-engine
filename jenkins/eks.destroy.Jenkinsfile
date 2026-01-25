@@ -25,6 +25,14 @@ pipeline {
         }
       }
     }
+    stage('Terraform Destroy') {
+      steps {
+        input message: 'DESTROY EKS CLUSTER? This cannot be undone.', ok: 'DESTROY'
+        dir(env.TF_DIR) {
+          sh 'terraform destroy -auto-approve'
+        }
+      }
+    }
 
     stage('Terraform Destroy') {
       steps {
