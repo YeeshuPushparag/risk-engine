@@ -70,30 +70,30 @@ pipeline {
       }
     }
 
-  stage('Update Helm Image Tags (One Commit)') {
+stage('Update Helm Image Tags (One Commit)') {
   steps {
-    container('kaniko') {
+    container('git') {
       withCredentials([usernamePassword(credentialsId: 'github-https', usernameVariable: 'GIT_USER', passwordVariable: 'GITHUB_TOKEN')]) {
         sh '''
-          set -e
-
           git config user.name "Pushparag"
           git config user.email "pushparagyeeshu@gmail.com"
 
           sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/django/values.yaml
           sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/nextjs/values.yaml
           sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/airflow/values.yaml
-          sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/streaming/values.yaml
+          sed -i "s/^  tag: \\".*/  tag: \\"${IMAGE_TAG}\\"/" helm/streaming/values.yaml
 
           git add helm/*/values.yaml
           git commit -m "deploy: update image tags to ${IMAGE_TAG}" || echo "No changes"
 
-          git push https://${GIT_USER}:${GITHUB_TOKEN}@github.com/YeeshuPushparag/risk-engine.git HEAD:main
+          git remote set-url origin https://${GIT_USER}:${GITHUB_TOKEN}@github.com/YeeshuPushparag/risk-engine.git
+          git push origin HEAD:main
         '''
       }
     }
   }
 }
+
 
   }
 }
