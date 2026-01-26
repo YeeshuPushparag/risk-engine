@@ -1,17 +1,16 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import TickerSearch from "@/components/TickerSearch";
 import ManagerSearch from "@/components/ManagerSearch";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import {
   Activity, TrendingUp, AlertTriangle, Clock,
-  ArrowUpRight, ArrowDownRight, ExternalLink, 
-  UserCheck, ChevronRight, Search
+  ArrowUpRight, ArrowDownRight
 } from "lucide-react";
 
-/* ---------------- FORMATTERS ---------------- */
+/* --- FORMATTERS --- */
 const currencyFormatter = new Intl.NumberFormat("en-US", {
   style: "currency", currency: "USD", maximumFractionDigits: 2,
 });
@@ -36,151 +35,76 @@ const fmtPct = (n?: number | null) => {
   );
 };
 
-const getSeverityClass = (severity: string) => {
-  const s = severity?.toLowerCase();
-  if (s === "critical") return "bg-red-500/10 border-red-500/40 text-red-500 shadow-[0_0_10px_rgba(239,68,68,0.1)]";
-  if (s === "high") return "bg-orange-500/10 border-orange-500/40 text-orange-500";
-  return "bg-blue-500/10 border-blue-500/40 text-blue-400";
-};
-
-/* ---------------- ANIMATION WRAPPER ---------------- */
-function FlashValue({ value, children, className = "" }: any) {
-  const [flash, setFlash] = useState("");
-  const prevValue = useRef(value);
-
-  useEffect(() => {
-    if (prevValue.current !== value) {
-      if (typeof value === "number" && typeof prevValue.current === "number") {
-        setFlash(value > prevValue.current ? "animate-flash-green" : "animate-flash-red");
-      } else {
-        setFlash("animate-pulse text-blue-400");
-      }
-      prevValue.current = value;
-      const timer = setTimeout(() => setFlash(""), 1000);
-      return () => clearTimeout(timer);
-    }
-  }, [value]);
-
-  return <span className={`${className} ${flash} transition-all duration-700 rounded px-1`}>{children}</span>;
-}
-
-/* ---------------- SUB-COMPONENTS ---------------- */
-function MetricCard({ label, value, numericValue, subValue }: any) {
-  return (
-    <div className="bg-slate-900/40 border border-slate-800 p-4 sm:p-6 rounded-2xl backdrop-blur-md">
-      <p className="text-[9px] sm:text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-2">{label}</p>
-      <div className="text-xl sm:text-2xl font-mono font-bold text-white tracking-tighter italic">
-        <FlashValue value={numericValue}>{value}</FlashValue>
-      </div>
-      {subValue && <p className="text-[8px] sm:text-[9px] font-bold text-slate-600 mt-1 uppercase tracking-widest">{subValue}</p>}
-    </div>
-  );
-}
-
-function TickerCard({ t }: { t: any }) {
-  return (
-    <article className="bg-slate-900/30 border border-slate-800 p-4 rounded-2xl hover:border-blue-500/40 transition-all group overflow-hidden">
-      <div className="flex items-start justify-between">
-        <div className="min-w-0">
-          <Link href={`/dashboard/equity/intraday/ticker/${t.ticker}/manager/${t.asset_manager}`} className="text-base sm:text-lg font-black text-white hover:text-blue-400 flex items-center gap-2 truncate">
-            {t.ticker}
-            <FlashValue value={t.return_1m}>
-              {t.return_1m >= 0 ? <ArrowUpRight className="w-3 h-3 text-emerald-500" /> : <ArrowDownRight className="w-3 h-3 text-red-500" />}
-            </FlashValue>
-          </Link>
-          <p className="text-[8px] font-bold text-slate-500 uppercase mt-1 truncate tracking-tighter">{t.asset_manager}</p>
-        </div>
-        <div className="text-right shrink-0">
-          <div className="text-xs sm:text-sm font-mono font-bold text-white">
-            <FlashValue value={t.portfolio_intraday_pnl}>{fmtCur(t.intraday_pnl)}</FlashValue>
-          </div>
-          <div className="text-[8px] sm:text-[9px] font-black mt-1 uppercase italic">
-            <FlashValue value={t.return_1m}>{fmtPct(t.return_1m)}</FlashValue>
-          </div>
-        </div>
-      </div>
-    </article>
-  );
-}
-
-/* ---------------- MAIN PAGE ---------------- */
+/* --- MAIN PAGE --- */
 export default function IntradayEquityOverview() {
-const [summary, setSummary] = useState<any>(null);
-const [topMovers, setTopMovers] = useState<any[]>([]);
-const [alerts, setAlerts] = useState<any[]>([]);
-const [tickers, setTickers] = useState<any[]>([]);
-const [managers, setManagers] = useState<any[]>([]);
-const [timeStamp, setTimestamp] = useState("");
+  const [summary, setSummary] = useState<any>(null);
+  const [topMovers, setTopMovers] = useState<any[]>([]);
+  const [alerts, setAlerts] = useState<any[]>([]);
+  const [tickers, setTickers] = useState<any[]>([]);
+  const [managers, setManagers] = useState<any[]>([]);
+  const [timeStamp, setTimestamp] = useState("");
 
-const [equityEnabled, setEquityEnabled] = useState(false);
-const [wsBaseUrl, setWsBaseUrl] = useState<string | null>(null);
+  const [equityEnabled, setEquityEnabled] = useState(false);
+  const [wsBaseUrl, setWsBaseUrl] = useState<string | null>(null);
 
-const updateState = (data: any) => {
-  if (!data) return;
-  setSummary(data.totals);
-  setTopMovers(data.top_movers);
-  setAlerts(data.active_alerts || []);
-  setTimestamp(data.timestamp);
-  setTickers(data.top_tickers_agg);
-  setManagers(data.top_managers_agg);
-};
+  const updateState = (data: any) => {
+    if (!data) return;
+    setSummary(data.totals);
+    setTopMovers(data.top_movers);
+    setAlerts(data.active_alerts || []);
+    setTimestamp(data.timestamp);
+    setTickers(data.top_tickers_agg);
+    setManagers(data.top_managers_agg);
+  };
 
-function isMarketTradingTime() {
-  const now = new Date();
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    weekday: "short",
-    hour: "numeric",
-    minute: "numeric",
-    hour12: false,
-  }).formatToParts(now);
+  function isMarketTradingTime() {
+    const now = new Date();
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      weekday: "short",
+      hour: "numeric",
+      minute: "numeric",
+      hour12: false,
+    }).formatToParts(now);
 
-  const weekday = parts.find(p => p.type === "weekday")!.value;
-  const hour = Number(parts.find(p => p.type === "hour")!.value);
-  const minute = Number(parts.find(p => p.type === "minute")!.value);
+    const weekday = parts.find(p => p.type === "weekday")!.value;
+    const hour = Number(parts.find(p => p.type === "hour")!.value);
+    const minute = Number(parts.find(p => p.type === "minute")!.value);
 
-  const totalMin = hour * 60 + minute;
-  const CLOSE_MIN = 960 + 2; // 16:02 ET
+    const totalMin = hour * 60 + minute;
+    const CLOSE_MIN = 16 * 60 + 2; // 16:02 ET
 
-  if (weekday === "Sat" || weekday === "Sun") return false;
-  return totalMin >= 570 && totalMin <= CLOSE_MIN; // 9:30 AM → 16:02 PM ET
-}
-
-// Fetch config and initial data
-useEffect(() => {
-  async function fetchConfigAndData() {
-    try {
-      const res = await fetch("/api/config");
-      const config = await res.json();
-
-      const enabled = config.forceStream || isMarketTradingTime();
-      setEquityEnabled(enabled);
-
-      if (!enabled) return;
-
-      setWsBaseUrl(config.wsBaseUrl);
-
-      const dataRes = await fetch("/api/equity/intraday/overview", { cache: "no-store" });
-      if (dataRes.ok) updateState(await dataRes.json());
-    } catch (e) {
-      console.error("Fetch failed", e);
-    }
+    if (weekday === "Sat" || weekday === "Sun") return false;
+    return totalMin >= 570 && totalMin <= CLOSE_MIN; // 9:30 → 16:02 ET
   }
 
-  fetchConfigAndData();
-}, []);
+  // Fetch config and initial data
+  useEffect(() => {
+    async function fetchConfigAndData() {
+      try {
+        const res = await fetch("/api/config");
+        const config = await res.json();
 
-// Connect WebSocket only after wsBaseUrl & equityEnabled are ready
-useEffect(() => {
-  if (!wsBaseUrl || !equityEnabled) return;
+        const enabled = config.forceStream || isMarketTradingTime();
+        setEquityEnabled(enabled);
 
-  const wsUrl = `${wsBaseUrl}/equity/overview/`;
-  console.log("Connecting Equity WS:", wsUrl, { equityEnabled, wsBaseUrl });
+        if (!enabled) return;
 
-  useWebSocket(wsUrl, true, updateState);
-}, [wsBaseUrl, equityEnabled]);
+        setWsBaseUrl(config.wsBaseUrl);
 
+        const dataRes = await fetch("/api/equity/intraday/overview", { cache: "no-store" });
+        if (dataRes.ok) updateState(await dataRes.json());
+      } catch (e) {
+        console.error("Fetch failed", e);
+      }
+    }
 
+    fetchConfigAndData();
+  }, []);
+
+  // --- USE WEBSOCKET HOOK ---
+  const wsUrl = wsBaseUrl ? `${wsBaseUrl}/equity/overview/` : null;
+  useWebSocket(wsUrl, equityEnabled, updateState);
 
   if (!equityEnabled) {
     return (

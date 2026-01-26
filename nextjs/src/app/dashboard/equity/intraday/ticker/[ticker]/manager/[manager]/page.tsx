@@ -1,20 +1,21 @@
 "use client";
 
-import { useParams } from "next/navigation";
+import React, { useState, useEffect } from "react";
 import Link from "next/link";
-import React, { useState, useEffect, useRef } from "react";
+import TickerSearch from "@/components/TickerSearch";
+import ManagerSearch from "@/components/ManagerSearch";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import {
-  ArrowLeft, Crosshair, ShieldAlert,
-  Layers, Gauge, TrendingUp, Clock
+  Activity, TrendingUp, AlertTriangle, Clock,
+  ArrowUpRight, ArrowDownRight
 } from "lucide-react";
 
-/* ================= FORMATTERS ================= */
+/* --- FORMATTERS --- */
 const currencyFormatter = new Intl.NumberFormat("en-US", {
   style: "currency", currency: "USD", maximumFractionDigits: 2,
 });
 
-const fmtUSD = (n?: number | null) => {
+const fmtCur = (n?: number | null) => {
   if (n == null || Number.isNaN(n)) return "—";
   const abs = Math.abs(n);
   if (abs >= 1e12) return `${currencyFormatter.format(n / 1e12)}T`;
@@ -24,9 +25,9 @@ const fmtUSD = (n?: number | null) => {
   return currencyFormatter.format(n);
 };
 
-const fmtPct = (v?: number | null) => {
-  if (v == null) return "—";
-  const val = v * 100;
+const fmtPct = (n?: number | null) => {
+  if (n == null) return "—";
+  const val = n * 100;
   return (
     <span className={val >= 0 ? "text-emerald-400" : "text-red-400"}>
       {val >= 0 ? "+" : ""}{val.toFixed(2)}%
@@ -34,157 +35,76 @@ const fmtPct = (v?: number | null) => {
   );
 };
 
-/* ================= UI COMPONENTS ================= */
-const getSeverityClass = (severity: string) => {
-  const s = severity?.toLowerCase();
-  switch (s) {
-    case "critical": return "bg-red-500/10 border-red-500/40 text-red-500 shadow-[0_0_10px_rgba(239,68,68,0.1)]";
-    case "high": return "bg-orange-500/10 border-orange-500/40 text-orange-500";
-    case "medium": return "bg-yellow-500/20 border-yellow-500/40 text-yellow-500";
-    case "low": return "bg-blue-500/10 border-blue-500/40 text-blue-400";
-    default: return "bg-slate-500/10 border-slate-500/40 text-slate-400";
+/* --- MAIN PAGE --- */
+export default function IntradayEquityOverview() {
+  const [summary, setSummary] = useState<any>(null);
+  const [topMovers, setTopMovers] = useState<any[]>([]);
+  const [alerts, setAlerts] = useState<any[]>([]);
+  const [tickers, setTickers] = useState<any[]>([]);
+  const [managers, setManagers] = useState<any[]>([]);
+  const [timeStamp, setTimestamp] = useState("");
+
+  const [equityEnabled, setEquityEnabled] = useState(false);
+  const [wsBaseUrl, setWsBaseUrl] = useState<string | null>(null);
+
+  const updateState = (data: any) => {
+    if (!data) return;
+    setSummary(data.totals);
+    setTopMovers(data.top_movers);
+    setAlerts(data.active_alerts || []);
+    setTimestamp(data.timestamp);
+    setTickers(data.top_tickers_agg);
+    setManagers(data.top_managers_agg);
+  };
+
+  function isMarketTradingTime() {
+    const now = new Date();
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      weekday: "short",
+      hour: "numeric",
+      minute: "numeric",
+      hour12: false,
+    }).formatToParts(now);
+
+    const weekday = parts.find(p => p.type === "weekday")!.value;
+    const hour = Number(parts.find(p => p.type === "hour")!.value);
+    const minute = Number(parts.find(p => p.type === "minute")!.value);
+
+    const totalMin = hour * 60 + minute;
+    const CLOSE_MIN = 16 * 60 + 2; // 16:02 ET
+
+    if (weekday === "Sat" || weekday === "Sun") return false;
+    return totalMin >= 570 && totalMin <= CLOSE_MIN; // 9:30 → 16:02 ET
   }
-};
 
-function FlashValue({ value, children, className = "" }: any) {
-  const [flash, setFlash] = useState("");
-  const prevValue = useRef(value);
-
+  // Fetch config and initial data
   useEffect(() => {
-    if (prevValue.current !== value) {
-      if (typeof value === "number" && typeof prevValue.current === "number") {
-        setFlash(value > prevValue.current ? "animate-flash-green" : "animate-flash-red");
+    async function fetchConfigAndData() {
+      try {
+        const res = await fetch("/api/config");
+        const config = await res.json();
+
+        const enabled = config.forceStream || isMarketTradingTime();
+        setEquityEnabled(enabled);
+
+        if (!enabled) return;
+
+        setWsBaseUrl(config.wsBaseUrl);
+
+        const dataRes = await fetch("/api/equity/intraday/overview", { cache: "no-store" });
+        if (dataRes.ok) updateState(await dataRes.json());
+      } catch (e) {
+        console.error("Fetch failed", e);
       }
-      prevValue.current = value;
-      const timer = setTimeout(() => setFlash(""), 1000);
-      return () => clearTimeout(timer);
     }
-  }, [value]);
 
-  return <span className={`${className} ${flash} transition-all duration-700 rounded px-1`}>{children}</span>;
-}
+    fetchConfigAndData();
+  }, []);
 
-function TacticalMetric({ label, value, numericValue }: any) {
-  const [flash, setFlash] = useState("");
-  const prevValue = useRef(numericValue);
-
-  useEffect(() => {
-    if (numericValue !== prevValue.current) {
-      if (numericValue > prevValue.current) setFlash("animate-flash-green");
-      else if (numericValue < prevValue.current) setFlash("animate-flash-red");
-      prevValue.current = numericValue;
-      const timer = setTimeout(() => setFlash(""), 1000);
-      return () => clearTimeout(timer);
-    }
-  }, [numericValue]);
-
-  return (
-    <div className={`bg-slate-900/40 border border-slate-800 p-4 rounded-xl transition-all duration-700 ${flash}`}>
-      <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">{label}</p>
-      <p className="text-lg font-mono font-bold text-white italic">{value}</p>
-    </div>
-  );
-}
-
-/* ================= MAIN PAGE ================= */
-export default function TickerManagerIntradayPage() {
-const params = useParams();
-const ticker = String(params.ticker).toUpperCase();
-const manager = decodeURIComponent(String(params.manager));
-
-const [timestamp, setTimestamp] = useState("");
-const [totals, setTotals] = useState<any>(null);
-const [signals, setSignals] = useState<any>(null);
-const [alerts, setAlerts] = useState<any[]>([]);
-
-const [equityEnabled, setEquityEnabled] = useState(false);
-const [wsBaseUrl, setWsBaseUrl] = useState<string | null>(null);
-
-// --- Market time check ---
-function isMarketTradingTime() {
-  const now = new Date();
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    weekday: "short",
-    hour: "numeric",
-    minute: "numeric",
-    hour12: false,
-  }).formatToParts(now);
-
-  const weekday = parts.find(p => p.type === "weekday")!.value;
-  const hour = Number(parts.find(p => p.type === "hour")!.value);
-  const minute = Number(parts.find(p => p.type === "minute")!.value);
-
-  const totalMin = hour * 60 + minute;
-  const CLOSE_MIN = 960 + 2; // 16:02 ET
-
-  if (weekday === "Sat" || weekday === "Sun") return false;
-  return totalMin >= 570 && totalMin <= CLOSE_MIN; // 9:30 → 16:02 ET
-}
-
-// --- Fetch config ---
-useEffect(() => {
-  async function fetchConfig() {
-    try {
-      const res = await fetch("/api/config");
-      const config = await res.json();
-
-      const enabled = config.forceStream || isMarketTradingTime();
-      setEquityEnabled(enabled);
-
-      if (!enabled) return;
-      setWsBaseUrl(config.wsBaseUrl);
-    } catch (e) {
-      console.error("Config fetch failed", e);
-    }
-  }
-
-  fetchConfig();
-}, []);
-
-// --- Fetch initial ticker_manager data ---
-useEffect(() => {
-  if (!equityEnabled || !ticker || !manager) return;
-
-  async function loadData() {
-    try {
-      const res = await fetch(
-        `/api/equity/intraday/ticker_manager?ticker=${ticker}&manager=${manager}`,
-        { cache: "no-store" }
-      );
-      if (!res.ok) return;
-      const json = await res.json();
-
-      setTimestamp(json.timestamp);
-      setTotals(json.totals);
-      setSignals(json.signals);
-      setAlerts(json.alerts ?? []);
-    } catch (e) {
-      console.error("Ticker manager data fetch failed", e);
-    }
-  }
-
-  loadData();
-}, [ticker, manager, equityEnabled]);
-
-// --- WebSocket connection ---
-useEffect(() => {
-  if (!equityEnabled || !wsBaseUrl || !ticker || !manager) return;
-
-  const wsUrl = `${wsBaseUrl}/equity/ticker_manager/${ticker}/${manager}/`;
-  console.log("Connecting WS:", wsUrl, { equityEnabled, ticker, manager });
-
-  useWebSocket(
-    wsUrl,
-    true, // already ensured enabled
-    (json) => {
-      setTimestamp(json.timestamp);
-      setTotals(json.totals);
-      setSignals(json.signals);
-      setAlerts(json.alerts ?? []);
-    }
-  );
-}, [equityEnabled, wsBaseUrl, ticker, manager]);
+  // --- USE WEBSOCKET HOOK ---
+  const wsUrl = wsBaseUrl ? `${wsBaseUrl}/equity/overview/` : null;
+  useWebSocket(wsUrl, equityEnabled, updateState);
 
 
 
