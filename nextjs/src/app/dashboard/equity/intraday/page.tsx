@@ -173,7 +173,7 @@ useEffect(() => {
 // WebSocket unchanged except env removal
 useWebSocket(
   wsBaseUrl ? `${wsBaseUrl}/equity/overview/` : null,
-  equityEnabled,   // <-- pass your flag here
+  equityEnabled,
   updateState
 );
 
