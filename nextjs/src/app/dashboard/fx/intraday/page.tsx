@@ -70,39 +70,65 @@ function FlashCell({ value, children, className = "" }: any) {
 /* --- MAIN PAGE --- */
 
 export default function FxIntradayMain() {
-    const [data, setData] = useState<any>(null);
-    const [wsUrl, setWsUrl] = useState<string | null>(null);
-    const prevDataRef = useRef<any>(null);
+const [data, setData] = useState<any>(null);
+const [wsUrl, setWsUrl] = useState<string | null>(null);
+const [fxEnabled, setFxEnabled] = useState(false); // <-- new state
+const prevDataRef = useRef<any>(null);
 
-    const handleDataUpdate = (update: any) => {
-      prevDataRef.current = data;
-      setData(update);
-    };
+const handleDataUpdate = (update: any) => {
+  prevDataRef.current = data;
+  setData(update);
+};
 
-    // Fetch runtime config from the server
-    useEffect(() => {
-      async function fetchConfig() {
-        try {
-          const res = await fetch("/api/config");
-          const config = await res.json();
-          const fxEnabled = config.forceStream || isFXTradingTime();
-          if (!fxEnabled) return;
+// Function to check if FX market is open
+function isFXTradingTime() {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    hour: "numeric",
+    minute: "numeric",
+    hour12: false,
+  }).formatToParts(now);
 
-          // Set WebSocket URL dynamically
-          setWsUrl(config.wsBaseUrl + "/fx/overview/");
+  const weekday = parts.find(p => p.type === "weekday")!.value;
+  const hour = Number(parts.find(p => p.type === "hour")!.value);
+  const minute = Number(parts.find(p => p.type === "minute")!.value);
 
-          // Load initial data
-          const initialRes = await fetch("/api/fx/intraday/overview", { cache: "no-store" });
-          if (initialRes.ok) handleDataUpdate(await initialRes.json());
-        } catch (err) {
-          console.error("Failed to load config or data:", err);
-        }
-      }
-      fetchConfig();
-    }, []);
+  const totalMin = hour * 60 + minute;
 
-    // Connect WebSocket only after wsUrl is set
-    useWebSocket(wsUrl, handleDataUpdate);
+  if (weekday === "Sat" || weekday === "Sun") return false;
+  return totalMin >= 0 && totalMin <= 24 * 60; // FX trades 24/5
+}
+
+// Fetch runtime config from the server
+useEffect(() => {
+  async function fetchConfig() {
+    try {
+      const res = await fetch("/api/config");
+      const config = await res.json();
+
+      const enabled = config.forceStream || isFXTradingTime();
+      setFxEnabled(enabled);
+
+      if (!enabled) return;
+
+      // Set WebSocket URL dynamically
+      setWsUrl(config.wsBaseUrl + "/fx/overview/");
+
+      // Load initial data
+      const initialRes = await fetch("/api/fx/intraday/overview", { cache: "no-store" });
+      if (initialRes.ok) handleDataUpdate(await initialRes.json());
+    } catch (err) {
+      console.error("Failed to load config or data:", err);
+    }
+  }
+  fetchConfig();
+}, []);
+
+// Connect WebSocket only after wsUrl is set and FX is enabled
+useWebSocket(wsUrl, fxEnabled, handleDataUpdate);
+
 
     if (!wsUrl) return <MarketClosedView />;
     if (!data) return <LoadingTerminal />;

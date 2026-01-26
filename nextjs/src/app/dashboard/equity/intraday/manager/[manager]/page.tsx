@@ -174,6 +174,7 @@ useWebSocket(
   equityEnabled && wsBaseUrl && rawManager
     ? `${wsBaseUrl}/equity/manager/${rawManager}/`
     : null,
+  equityEnabled && !!rawManager,  // <-- enabled flag
   (data) => {
     setSummary(data.totals);
     setHoldings(data.holdings);
@@ -181,6 +182,7 @@ useWebSocket(
     setTimestamp(data.timestamp);
   }
 );
+
 
 
   if (!equityEnabled) {

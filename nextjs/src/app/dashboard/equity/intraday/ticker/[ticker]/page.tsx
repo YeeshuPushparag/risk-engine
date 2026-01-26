@@ -193,6 +193,7 @@ useWebSocket(
   equityEnabled && wsBaseUrl && ticker
     ? `${wsBaseUrl}/equity/ticker/${ticker}/`
     : null,
+  equityEnabled && !!ticker, // <-- enabled flag
   (data) => {
     setTotals(data.totals);
     setMarket(data.market);
@@ -201,6 +202,7 @@ useWebSocket(
     setManagers(data.manager_breakdown || []);
   }
 );
+
 
 
   if (!equityEnabled) {

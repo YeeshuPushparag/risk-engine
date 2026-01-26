@@ -82,7 +82,7 @@ function MetricCard({
 
 /* ---------------- MAIN PAGE ---------------- */
 export default function TickerPage() {
- const { ticker } = useParams();
+const { ticker } = useParams();
 const [data, setData] = useState<any>(null);
 const [wsUrl, setWsUrl] = useState<string | null>(null);
 const [fxEnabled, setFxEnabled] = useState(false);
@@ -91,7 +91,28 @@ const handleUpdate = (update: any) => {
   setData(update);
 };
 
-// Fetch runtime config
+// Function to check if FX market is open
+function isFXTradingTime() {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    hour: "numeric",
+    minute: "numeric",
+    hour12: false,
+  }).formatToParts(now);
+
+  const weekday = parts.find(p => p.type === "weekday")!.value;
+  const hour = Number(parts.find(p => p.type === "hour")!.value);
+  const minute = Number(parts.find(p => p.type === "minute")!.value);
+
+  const totalMin = hour * 60 + minute;
+
+  if (weekday === "Sat" || weekday === "Sun") return false;
+  return totalMin >= 0 && totalMin <= 24 * 60; // FX trades 24/5
+}
+
+// Fetch runtime config and initial data
 useEffect(() => {
   if (!ticker) return;
 
@@ -109,10 +130,9 @@ useEffect(() => {
       setWsUrl(`${config.wsBaseUrl}/fx/ticker/${ticker}/`);
 
       // Load initial data
-      const initialRes = await fetch(
-        `/api/fx/intraday/ticker?ticker=${ticker}`,
-        { cache: "no-store" }
-      );
+      const initialRes = await fetch(`/api/fx/intraday/ticker?ticker=${ticker}`, {
+        cache: "no-store",
+      });
 
       if (initialRes.ok) handleUpdate(await initialRes.json());
     } catch (e) {
@@ -123,8 +143,9 @@ useEffect(() => {
   fetchConfigAndData();
 }, [ticker]);
 
-// Connect WebSocket only after wsUrl is set
-useWebSocket(wsUrl, handleUpdate);
+// Connect WebSocket only after wsUrl is set and FX is enabled
+useWebSocket(wsUrl, fxEnabled, handleUpdate);
+
 
 if (!fxEnabled) return <MarketClosedView />;
 if (!data) return <LoadingState />;

@@ -88,7 +88,7 @@ function TacticalMetric({ label, value, numericValue }: any) {
 
 /* ================= MAIN PAGE ================= */
 export default function TickerManagerIntradayPage() {
- const params = useParams();
+const params = useParams();
 const ticker = String(params.ticker).toUpperCase();
 const manager = decodeURIComponent(String(params.manager));
 
@@ -167,6 +167,7 @@ useWebSocket(
   equityEnabled && wsBaseUrl && ticker && manager
     ? `${wsBaseUrl}/equity/ticker_manager/${ticker}/${manager}/`
     : null,
+  equityEnabled && !!ticker && !!manager, // <-- enabled flag
   (json) => {
     setTimestamp(json.timestamp);
     setTotals(json.totals);
@@ -174,6 +175,7 @@ useWebSocket(
     setAlerts(json.alerts ?? []);
   }
 );
+
 
   if (!equityEnabled) {
     return (
