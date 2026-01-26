@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 
 export function useWebSocket(
   url: string | null,
+  enabled: boolean,             // <-- add enabled flag
   onMessage: (data: any) => void
 ) {
   const callbackRef = useRef(onMessage);
@@ -14,7 +15,7 @@ export function useWebSocket(
   }, [onMessage]);
 
   useEffect(() => {
-    if (!url) return; // early exit if no URL
+    if (!url || !enabled) return; // wait until both are set
 
     const ws = new WebSocket(url);
 
@@ -38,5 +39,5 @@ export function useWebSocket(
         ws.close();
       }
     };
-  }, [url]); // url only dependency
+  }, [url, enabled]); // <-- watch both url and enabled
 }
