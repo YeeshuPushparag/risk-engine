@@ -82,7 +82,7 @@ function isFXTradingTime() {
   return totalMin >= 0 && totalMin <= 24 * 60; // FX trades 24/5
 }
 
-// Fetch runtime config and initial data
+// Fetch config and initial data
 useEffect(() => {
   if (!currency) return;
 
@@ -107,15 +107,21 @@ useEffect(() => {
 
       if (initialRes.ok) handleUpdate(await initialRes.json());
     } catch (e) {
-      console.error(e);
+      console.error("Failed to load config or data:", e);
     }
   }
 
   fetchConfigAndData();
 }, [currency]);
 
-// Connect WebSocket only after wsUrl is set and FX is enabled
-useWebSocket(wsUrl, fxEnabled, handleUpdate);
+// Connect WebSocket only after wsUrl & fxEnabled are ready
+useEffect(() => {
+  if (!wsUrl || !fxEnabled) return;
+
+  console.log("Connecting WS for currency:", currency, { wsUrl, fxEnabled });
+  useWebSocket(wsUrl, true, handleUpdate);
+}, [wsUrl, fxEnabled, currency]);
+
 
 
 if (!fxEnabled) return <MarketClosedView />;

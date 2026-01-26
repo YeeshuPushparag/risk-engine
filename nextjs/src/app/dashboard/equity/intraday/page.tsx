@@ -127,7 +127,6 @@ const updateState = (data: any) => {
 
 function isMarketTradingTime() {
   const now = new Date();
-
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
     weekday: "short",
@@ -141,12 +140,13 @@ function isMarketTradingTime() {
   const minute = Number(parts.find(p => p.type === "minute")!.value);
 
   const totalMin = hour * 60 + minute;
-  const CLOSE_MIN = 960 + 2;
+  const CLOSE_MIN = 960 + 2; // 16:02 ET
 
   if (weekday === "Sat" || weekday === "Sun") return false;
-  return totalMin >= 570 && totalMin <= CLOSE_MIN;
+  return totalMin >= 570 && totalMin <= CLOSE_MIN; // 9:30 AM → 16:02 PM ET
 }
 
+// Fetch config and initial data
 useEffect(() => {
   async function fetchConfigAndData() {
     try {
@@ -170,12 +170,16 @@ useEffect(() => {
   fetchConfigAndData();
 }, []);
 
-// WebSocket unchanged except env removal
-useWebSocket(
-  equityEnabled && wsBaseUrl ? `${wsBaseUrl}/equity/overview/` : null,
-  equityEnabled,      // <-- this is missing
-  updateState
-);
+// Connect WebSocket only after wsBaseUrl & equityEnabled are ready
+useEffect(() => {
+  if (!wsBaseUrl || !equityEnabled) return;
+
+  const wsUrl = `${wsBaseUrl}/equity/overview/`;
+  console.log("Connecting Equity WS:", wsUrl, { equityEnabled, wsBaseUrl });
+
+  useWebSocket(wsUrl, true, updateState);
+}, [wsBaseUrl, equityEnabled]);
+
 
 
   if (!equityEnabled) {

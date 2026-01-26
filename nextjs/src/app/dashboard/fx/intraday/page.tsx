@@ -72,7 +72,7 @@ function FlashCell({ value, children, className = "" }: any) {
 export default function FxIntradayMain() {
 const [data, setData] = useState<any>(null);
 const [wsUrl, setWsUrl] = useState<string | null>(null);
-const [fxEnabled, setFxEnabled] = useState(false); // <-- new state
+const [fxEnabled, setFxEnabled] = useState(false);
 const prevDataRef = useRef<any>(null);
 
 const handleDataUpdate = (update: any) => {
@@ -80,7 +80,7 @@ const handleDataUpdate = (update: any) => {
   setData(update);
 };
 
-// Function to check if FX market is open
+// Check if FX market is open
 function isFXTradingTime() {
   const now = new Date();
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -101,7 +101,7 @@ function isFXTradingTime() {
   return totalMin >= 0 && totalMin <= 24 * 60; // FX trades 24/5
 }
 
-// Fetch runtime config from the server
+// Fetch runtime config and initial data
 useEffect(() => {
   async function fetchConfig() {
     try {
@@ -123,17 +123,18 @@ useEffect(() => {
       console.error("Failed to load config or data:", err);
     }
   }
+
   fetchConfig();
 }, []);
 
-// Connect WebSocket only after wsUrl is set and FX is enabled
-console.log("fxEnabled:", fxEnabled, "wsUrl:", wsUrl);
+// Connect WebSocket **only after wsUrl is ready and fxEnabled is true**
+useEffect(() => {
+  if (!wsUrl || !fxEnabled) return; // wait until both are set
 
-useWebSocket(
-  "wss://api.pushparag.online/ws/fx/overview/", // hardcoded for testing
-  true,                                        // hardcoded enabled
-  handleDataUpdate
-);
+  console.log("Connecting WS with:", { wsUrl, fxEnabled });
+
+  useWebSocket(wsUrl, true, handleDataUpdate);
+}, [wsUrl, fxEnabled]);
 
 
 

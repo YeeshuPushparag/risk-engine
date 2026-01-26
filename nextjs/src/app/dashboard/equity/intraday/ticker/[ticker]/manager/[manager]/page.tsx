@@ -100,9 +100,9 @@ const [alerts, setAlerts] = useState<any[]>([]);
 const [equityEnabled, setEquityEnabled] = useState(false);
 const [wsBaseUrl, setWsBaseUrl] = useState<string | null>(null);
 
+// --- Market time check ---
 function isMarketTradingTime() {
   const now = new Date();
-
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
     weekday: "short",
@@ -116,12 +116,13 @@ function isMarketTradingTime() {
   const minute = Number(parts.find(p => p.type === "minute")!.value);
 
   const totalMin = hour * 60 + minute;
-  const CLOSE_MIN = 960 + 2;
+  const CLOSE_MIN = 960 + 2; // 16:02 ET
 
   if (weekday === "Sat" || weekday === "Sun") return false;
-  return totalMin >= 570 && totalMin <= CLOSE_MIN;
+  return totalMin >= 570 && totalMin <= CLOSE_MIN; // 9:30 → 16:02 ET
 }
 
+// --- Fetch config ---
 useEffect(() => {
   async function fetchConfig() {
     try {
@@ -132,19 +133,20 @@ useEffect(() => {
       setEquityEnabled(enabled);
 
       if (!enabled) return;
-
       setWsBaseUrl(config.wsBaseUrl);
     } catch (e) {
-      console.error(e);
+      console.error("Config fetch failed", e);
     }
   }
 
   fetchConfig();
 }, []);
 
+// --- Fetch initial ticker_manager data ---
 useEffect(() => {
   if (!equityEnabled || !ticker || !manager) return;
-  async function load() {
+
+  async function loadData() {
     try {
       const res = await fetch(
         `/api/equity/intraday/ticker_manager?ticker=${ticker}&manager=${manager}`,
@@ -152,29 +154,38 @@ useEffect(() => {
       );
       if (!res.ok) return;
       const json = await res.json();
+
       setTimestamp(json.timestamp);
       setTotals(json.totals);
       setSignals(json.signals);
       setAlerts(json.alerts ?? []);
     } catch (e) {
-      console.error(e);
+      console.error("Ticker manager data fetch failed", e);
     }
   }
-  load();
+
+  loadData();
 }, [ticker, manager, equityEnabled]);
 
-useWebSocket(
-  equityEnabled && wsBaseUrl && ticker && manager
-    ? `${wsBaseUrl}/equity/ticker_manager/${ticker}/${manager}/`
-    : null,
-  equityEnabled && !!ticker && !!manager, // <-- enabled flag
-  (json) => {
-    setTimestamp(json.timestamp);
-    setTotals(json.totals);
-    setSignals(json.signals);
-    setAlerts(json.alerts ?? []);
-  }
-);
+// --- WebSocket connection ---
+useEffect(() => {
+  if (!equityEnabled || !wsBaseUrl || !ticker || !manager) return;
+
+  const wsUrl = `${wsBaseUrl}/equity/ticker_manager/${ticker}/${manager}/`;
+  console.log("Connecting WS:", wsUrl, { equityEnabled, ticker, manager });
+
+  useWebSocket(
+    wsUrl,
+    true, // already ensured enabled
+    (json) => {
+      setTimestamp(json.timestamp);
+      setTotals(json.totals);
+      setSignals(json.signals);
+      setAlerts(json.alerts ?? []);
+    }
+  );
+}, [equityEnabled, wsBaseUrl, ticker, manager]);
+
 
 
   if (!equityEnabled) {

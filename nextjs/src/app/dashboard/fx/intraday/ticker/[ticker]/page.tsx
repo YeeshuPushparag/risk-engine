@@ -91,7 +91,7 @@ const handleUpdate = (update: any) => {
   setData(update);
 };
 
-// Function to check if FX market is open
+// Check if FX market is open
 function isFXTradingTime() {
   const now = new Date();
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -112,7 +112,7 @@ function isFXTradingTime() {
   return totalMin >= 0 && totalMin <= 24 * 60; // FX trades 24/5
 }
 
-// Fetch runtime config and initial data
+// Fetch config and initial data
 useEffect(() => {
   if (!ticker) return;
 
@@ -126,14 +126,11 @@ useEffect(() => {
 
       if (!enabled) return;
 
-      // Set WebSocket URL dynamically
+      // Dynamic WebSocket URL
       setWsUrl(`${config.wsBaseUrl}/fx/ticker/${ticker}/`);
 
-      // Load initial data
-      const initialRes = await fetch(`/api/fx/intraday/ticker?ticker=${ticker}`, {
-        cache: "no-store",
-      });
-
+      // Initial data fetch
+      const initialRes = await fetch(`/api/fx/intraday/ticker?ticker=${ticker}`, { cache: "no-store" });
       if (initialRes.ok) handleUpdate(await initialRes.json());
     } catch (e) {
       console.error("Failed to load config or data:", e);
@@ -143,8 +140,14 @@ useEffect(() => {
   fetchConfigAndData();
 }, [ticker]);
 
-// Connect WebSocket only after wsUrl is set and FX is enabled
-useWebSocket(wsUrl, fxEnabled, handleUpdate);
+// Only connect WS after wsUrl & fxEnabled are ready
+useEffect(() => {
+  if (!wsUrl || !fxEnabled) return;
+
+  console.log("Connecting WS with:", { wsUrl, fxEnabled });
+  useWebSocket(wsUrl, true, handleUpdate);
+}, [wsUrl, fxEnabled]);
+
 
 
 if (!fxEnabled) return <MarketClosedView />;
