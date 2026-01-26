@@ -1,0 +1,23 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: start-spark-equity
+  namespace: streaming
+spec:
+  schedule: "55 8 * * 1-5"
+  timeZone: "America/New_York"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          nodeSelector:
+            {{- toYaml .Values.nodeSelector | nindent 12 }}
+          restartPolicy: Never
+          serviceAccountName: streaming-sa
+          containers:
+            - name: start-equity
+              image: bitnami/kubectl:1.30.0
+              command:
+                - /bin/sh
+                - -c
+                - kubectl -n streaming scale deployment spark-equity --replicas=1

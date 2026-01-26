@@ -42,7 +42,8 @@ spec:
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["airflow"]
-          args: ["celery", "worker"]
+          args: ["celery", "worker", "--log-server-port", "8793"]
+
           ports:
             - name: logs
               containerPort: 8793

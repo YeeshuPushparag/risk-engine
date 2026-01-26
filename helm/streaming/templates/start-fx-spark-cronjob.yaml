@@ -1,10 +1,10 @@
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: stop-spark-fx
+  name: start-spark-fx
   namespace: streaming
 spec:
-  schedule: "55 3 * * *"
+  schedule: "55 16 * * 0"
   timeZone: "America/New_York"
   jobTemplate:
     spec:
@@ -15,9 +15,9 @@ spec:
           restartPolicy: Never
           serviceAccountName: streaming-sa
           containers:
-            - name: stop-fx
+            - name: start-fx
               image: bitnami/kubectl:1.30.0
               command:
                 - /bin/sh
                 - -c
-                - kubectl -n streaming scale deployment spark-fx --replicas=0
+                - kubectl -n streaming scale deployment spark-fx --replicas=1
