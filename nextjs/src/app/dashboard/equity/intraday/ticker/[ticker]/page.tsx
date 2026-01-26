@@ -141,12 +141,13 @@ function isMarketTradingTime() {
   const minute = Number(parts.find(p => p.type === "minute")!.value);
 
   const totalMin = hour * 60 + minute;
-  const CLOSE_MIN = 960 + 2;
+  const CLOSE_MIN = 960 + 2; // 16:02 ET
 
   if (weekday === "Sat" || weekday === "Sun") return false;
   return totalMin >= 570 && totalMin <= CLOSE_MIN;
 }
 
+// fetch config
 useEffect(() => {
   async function fetchConfig() {
     try {
@@ -156,9 +157,9 @@ useEffect(() => {
       const enabled = config.forceStream || isMarketTradingTime();
       setEquityEnabled(enabled);
 
-      if (!enabled) return;
-
-      setWsBaseUrl(config.wsBaseUrl);
+      if (enabled) {
+        setWsBaseUrl(config.wsBaseUrl);
+      }
     } catch (e) {
       console.error(e);
     }
@@ -167,8 +168,10 @@ useEffect(() => {
   fetchConfig();
 }, []);
 
+// load initial REST data
 useEffect(() => {
   if (!equityEnabled || !ticker) return;
+
   async function load() {
     try {
       const res = await fetch(
@@ -176,6 +179,7 @@ useEffect(() => {
         { cache: "no-store" }
       );
       if (!res.ok) return;
+
       const json = await res.json();
       setTotals(json.totals || {});
       setMarket(json.market || {});
@@ -186,21 +190,24 @@ useEffect(() => {
       console.error(e);
     }
   }
+
   load();
 }, [ticker, equityEnabled]);
 
-useWebSocket(
+// websocket (NO useEffect wrapper)
+const wsUrl =
   equityEnabled && wsBaseUrl && ticker
     ? `${wsBaseUrl}/equity/ticker/${ticker}/`
-    : null,
-  (data) => {
-    setTotals(data.totals);
-    setMarket(data.market);
-    setFundamentals(data.fundamentals);
-    setAlerts(data.alerts || []);
-    setManagers(data.manager_breakdown || []);
-  }
-);
+    : null;
+
+useWebSocket(wsUrl, equityEnabled && !!ticker, (data) => {
+  setTotals(data.totals);
+  setMarket(data.market);
+  setFundamentals(data.fundamentals);
+  setAlerts(data.alerts || []);
+  setManagers(data.manager_breakdown || []);
+});
+
 
 
   if (!equityEnabled) {

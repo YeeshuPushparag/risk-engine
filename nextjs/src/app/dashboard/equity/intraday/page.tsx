@@ -147,6 +147,7 @@ function isMarketTradingTime() {
   return totalMin >= 570 && totalMin <= CLOSE_MIN;
 }
 
+// fetch config + initial data
 useEffect(() => {
   async function fetchConfigAndData() {
     try {
@@ -156,12 +157,14 @@ useEffect(() => {
       const enabled = config.forceStream || isMarketTradingTime();
       setEquityEnabled(enabled);
 
-      if (!enabled) return;
+      if (enabled) {
+        setWsBaseUrl(config.wsBaseUrl);
 
-      setWsBaseUrl(config.wsBaseUrl);
-
-      const dataRes = await fetch("/api/equity/intraday/overview", { cache: "no-store" });
-      if (dataRes.ok) updateState(await dataRes.json());
+        const dataRes = await fetch("/api/equity/intraday/overview", {
+          cache: "no-store",
+        });
+        if (dataRes.ok) updateState(await dataRes.json());
+      }
     } catch (e) {
       console.error("Fetch failed", e);
     }
@@ -170,11 +173,14 @@ useEffect(() => {
   fetchConfigAndData();
 }, []);
 
-// WebSocket unchanged except env removal
-useWebSocket(
-  equityEnabled && wsBaseUrl ? `${wsBaseUrl}/equity/overview/` : null,
-  updateState
-);
+// websocket (always called, connects only when ready)
+const wsUrl =
+  equityEnabled && wsBaseUrl
+    ? `${wsBaseUrl}/equity/overview/`
+    : null;
+
+useWebSocket(wsUrl, equityEnabled, updateState);
+
 
   if (!equityEnabled) {
     return (
