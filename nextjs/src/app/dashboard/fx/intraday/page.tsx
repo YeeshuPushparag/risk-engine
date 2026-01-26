@@ -20,121 +20,48 @@ const fmt = (v?: number) => {
 
 const fmtFX = (n?: number) => n == null ? "—" : n.toFixed(4);
 
-/* --- ANIMATED COMPONENTS --- */
-
-function StatCard({ label, value, numericValue, trend, color }: any) {
-  const [flash, setFlash] = useState("");
-  const prevValue = useRef(numericValue);
-
-  useEffect(() => {
-    if (numericValue !== prevValue.current) {
-      if (numericValue > prevValue.current) setFlash("animate-flash-green");
-      else if (numericValue < prevValue.current) setFlash("animate-flash-red");
-      prevValue.current = numericValue;
-      const timer = setTimeout(() => setFlash(""), 1000);
-      return () => clearTimeout(timer);
-    }
-  }, [numericValue]);
-
-  return (
-    <div className={`bg-slate-900 border border-slate-800 p-5 rounded-2xl transition-all duration-500 ${flash}`}>
-      <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-3">{label}</p>
-      <div className="flex items-end justify-between">
-        <h3 className={`text-xl sm:text-2xl font-black tracking-tighter ${color || 'text-white'}`}>{value}</h3>
-        {trend && (
-          <span className={trend === 'up' ? 'text-emerald-500' : 'text-red-500'}>
-            {trend === 'up' ? <TrendingUp className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />}
-          </span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function FlashCell({ value, children, className = "" }: any) {
-  const [flash, setFlash] = useState("");
-  const prevValue = useRef(value);
-
-  useEffect(() => {
-    if (value !== prevValue.current) {
-      setFlash(value > prevValue.current ? "bg-emerald-500/10" : "bg-red-500/10");
-      prevValue.current = value;
-      const timer = setTimeout(() => setFlash(""), 800);
-      return () => clearTimeout(timer);
-    }
-  }, [value]);
-
-  return <td className={`${className} ${flash} transition-colors duration-500`}>{children}</td>;
-}
-
 /* --- MAIN PAGE --- */
 
 export default function FxIntradayMain() {
-const [data, setData] = useState<any>(null);
-const [wsUrl, setWsUrl] = useState<string | null>(null);
-const [fxEnabled, setFxEnabled] = useState(false);
-const prevDataRef = useRef<any>(null);
+  const [data, setData] = useState<any>(null);
+  const [wsUrl, setWsUrl] = useState<string | null>(null);
+  const [fxEnabled, setFxEnabled] = useState(false);
+  const prevDataRef = useRef<any>(null);
 
-const handleDataUpdate = (update: any) => {
-  prevDataRef.current = data;
-  setData(update);
-};
+  const handleDataUpdate = (update: any) => {
+    prevDataRef.current = data;
+    setData(update);
+  };
 
-// Check if FX market is open
-function isFXTradingTime() {
-  const now = new Date();
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    weekday: "short",
-    hour: "numeric",
-    minute: "numeric",
-    hour12: false,
-  }).formatToParts(now);
+  // Fetch runtime config and initial data
+  useEffect(() => {
+    async function fetchConfig() {
+      try {
+        const res = await fetch("/api/config");
+        const config = await res.json();
 
-  const weekday = parts.find(p => p.type === "weekday")!.value;
-  const hour = Number(parts.find(p => p.type === "hour")!.value);
-  const minute = Number(parts.find(p => p.type === "minute")!.value);
+        const enabled = config.forceStream || isFXTradingTime();
+        setFxEnabled(enabled);
 
-  const totalMin = hour * 60 + minute;
+        if (!enabled) return;
 
-  if (weekday === "Sat" || weekday === "Sun") return false;
-  return totalMin >= 0 && totalMin <= 24 * 60; // FX trades 24/5
-}
+        // Set WebSocket URL dynamically
+        setWsUrl(config.wsBaseUrl + "/fx/overview/");
 
-// Fetch runtime config and initial data
-useEffect(() => {
-  async function fetchConfig() {
-    try {
-      const res = await fetch("/api/config");
-      const config = await res.json();
-
-      const enabled = config.forceStream || isFXTradingTime();
-      setFxEnabled(enabled);
-
-      if (!enabled) return;
-
-      // Set WebSocket URL dynamically
-      setWsUrl(config.wsBaseUrl + "/fx/overview/");
-
-      // Load initial data
-      const initialRes = await fetch("/api/fx/intraday/overview", { cache: "no-store" });
-      if (initialRes.ok) handleDataUpdate(await initialRes.json());
-    } catch (err) {
-      console.error("Failed to load config or data:", err);
+        // Load initial data
+        const initialRes = await fetch("/api/fx/intraday/overview", { cache: "no-store" });
+        if (initialRes.ok) handleDataUpdate(await initialRes.json());
+      } catch (err) {
+        console.error("Failed to load config or data:", err);
+      }
     }
-  }
 
-  fetchConfig();
-}, []);
+    fetchConfig();
+  }, []);
 
-// Connect WebSocket **only after wsUrl is ready and fxEnabled is true**
-useEffect(() => {
-  if (!wsUrl || !fxEnabled) return; // wait until both are set
-
-  console.log("Connecting WS with:", { wsUrl, fxEnabled });
-
-  useWebSocket(wsUrl, true, handleDataUpdate);
-}, [wsUrl, fxEnabled]);
+  // --- USE WEBSOCKET HOOK ---
+  // Call the hook directly, it will wait until wsUrl & fxEnabled are ready
+  useWebSocket(wsUrl, fxEnabled, handleDataUpdate);
 
 
 
