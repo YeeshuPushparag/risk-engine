@@ -127,7 +127,14 @@ useEffect(() => {
 }, []);
 
 // Connect WebSocket only after wsUrl is set and FX is enabled
-useWebSocket(wsUrl, fxEnabled, handleDataUpdate);
+console.log("fxEnabled:", fxEnabled, "wsUrl:", wsUrl);
+
+useWebSocket(
+  "wss://api.pushparag.online/ws/fx/overview/", // hardcoded for testing
+  true,                                        // hardcoded enabled
+  handleDataUpdate
+);
+
 
 
     if (!wsUrl) return <MarketClosedView />;
