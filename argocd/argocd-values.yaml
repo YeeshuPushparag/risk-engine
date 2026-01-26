@@ -24,6 +24,8 @@ server:
       alb.ingress.kubernetes.io/backend-protocol: HTTPS
       alb.ingress.kubernetes.io/ssl-redirect: "443"
       alb.ingress.kubernetes.io/group.name: risk-engine
+      alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=3600
+
 
   extraArgs:
     - --insecure=false   # enforce HTTPS
