@@ -8,7 +8,7 @@ envFrom:
   secretName: streaming-infra-secret
 
 image:
-  tag: "12"
+  tag: "25"
   pullPolicy: IfNotPresent
 
   producer:
