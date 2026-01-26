@@ -107,9 +107,9 @@ const [timeStamp, setTimestamp] = useState("");
 const [equityEnabled, setEquityEnabled] = useState(false);
 const [wsBaseUrl, setWsBaseUrl] = useState<string | null>(null);
 
-// --- Market time check ---
 function isMarketTradingTime() {
   const now = new Date();
+
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
     weekday: "short",
@@ -123,13 +123,12 @@ function isMarketTradingTime() {
   const minute = Number(parts.find(p => p.type === "minute")!.value);
 
   const totalMin = hour * 60 + minute;
-  const CLOSE_MIN = 960 + 2; // 16:02 ET
+  const CLOSE_MIN = 960 + 2;
 
   if (weekday === "Sat" || weekday === "Sun") return false;
-  return totalMin >= 570 && totalMin <= CLOSE_MIN; // 9:30 → 16:02 ET
+  return totalMin >= 570 && totalMin <= CLOSE_MIN;
 }
 
-// --- Fetch config ---
 useEffect(() => {
   async function fetchConfig() {
     try {
@@ -140,20 +139,19 @@ useEffect(() => {
       setEquityEnabled(enabled);
 
       if (!enabled) return;
+
       setWsBaseUrl(config.wsBaseUrl);
     } catch (e) {
-      console.error("Config fetch failed", e);
+      console.error(e);
     }
   }
 
   fetchConfig();
 }, []);
 
-// --- Fetch initial manager data ---
 useEffect(() => {
   if (!equityEnabled || !rawManager) return;
-
-  async function loadManagerData() {
+  async function load() {
     try {
       const res = await fetch(
         `/api/equity/intraday/manager?manager=${rawManager}`,
@@ -161,38 +159,28 @@ useEffect(() => {
       );
       if (!res.ok) return;
       const json = await res.json();
-
       setSummary(json.totals);
       setHoldings(json.holdings);
       setAlerts(json.alerts || []);
       setTimestamp(json.timestamp);
     } catch (e) {
-      console.error("Manager data fetch failed", e);
+      console.error(e);
     }
   }
-
-  loadManagerData();
+  load();
 }, [rawManager, equityEnabled]);
 
-// --- WebSocket connection ---
-useEffect(() => {
-  if (!equityEnabled || !wsBaseUrl || !rawManager) return;
-
-  const wsUrl = `${wsBaseUrl}/equity/manager/${rawManager}/`;
-  console.log("Connecting WS:", wsUrl, { equityEnabled, rawManager });
-
-  useWebSocket(
-    wsUrl,
-    true, // already ensured enabled
-    (data) => {
-      setSummary(data.totals);
-      setHoldings(data.holdings);
-      setAlerts(data.alerts || []);
-      setTimestamp(data.timestamp);
-    }
-  );
-}, [equityEnabled, wsBaseUrl, rawManager]);
-
+useWebSocket(
+  equityEnabled && wsBaseUrl && rawManager
+    ? `${wsBaseUrl}/equity/manager/${rawManager}/`
+    : null,
+  (data) => {
+    setSummary(data.totals);
+    setHoldings(data.holdings);
+    setAlerts(data.alerts || []);
+    setTimestamp(data.timestamp);
+  }
+);
 
 
   if (!equityEnabled) {
