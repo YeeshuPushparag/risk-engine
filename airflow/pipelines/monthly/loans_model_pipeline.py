@@ -94,6 +94,7 @@ def run_loans_model_pipeline():
     macro_obj = s3.get_object(Bucket=S3_BUCKET, Key="macro_data.csv")
     macro = pd.read_csv(BytesIO(macro_obj["Body"].read()))
 
+    # Use fast parsing method from previous code
     loans["date"] = pd.to_datetime(loans["date"], dayfirst=True, errors="coerce")
     macro["date"] = pd.to_datetime(macro["date"], dayfirst=True, errors="coerce")
 
@@ -119,10 +120,10 @@ def run_loans_model_pipeline():
         print("No new data in Snowflake. Done.")
         return "NO_NEW_DATA"
 
-
     print("Processing new window:")
-    print(new_rows["date"].min(), new_rows["date"].max())
+    print(f"Date range: {new_rows['date'].min()} -> {new_rows['date'].max()}")
 
+    # Merge with macro data
     macro = macro.drop(columns=["date"])
     new_rows = new_rows.merge(macro, on="month_year", how="left").drop(columns=["month_year"])
 
@@ -216,7 +217,7 @@ def run_loans_model_pipeline():
     new_final = new_final.fillna(0)
 
     # ===================== ML =====================
-    print("Loading ML from S3...")
+    print("Loading ML model from S3...")
 
     model_obj = s3.get_object(Bucket=S3_BUCKET, Key="loans_model_creditspread_xgb.json")
     booster = xgb.XGBRegressor()
@@ -297,13 +298,11 @@ def run_loans_model_pipeline():
         with get_postgre_conn() as pg_conn:
             with pg_conn.cursor() as pg_cur:
 
-                pg_cur.execute("""
-                    SELECT column_name
-                    FROM information_schema.columns
-                    WHERE table_schema='public'
-                      AND table_name='loan_data'
-                    ORDER BY ordinal_position
-                """)
+                pg_cur.execute("""SELECT column_name
+                                  FROM information_schema.columns
+                                  WHERE table_schema='public'
+                                  AND table_name='loan_data'
+                                  ORDER BY ordinal_position""")
 
                 pg_cols_order = [r[0] for r in pg_cur.fetchall() if r[0] != "id"]
 
