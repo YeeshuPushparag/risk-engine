@@ -9,6 +9,7 @@ export function useWebSocket(
   const callbackRef = useRef(onMessage);
 
   // Always keep latest callback
+  
   useEffect(() => {
     callbackRef.current = onMessage;
   }, [onMessage]);

@@ -31,7 +31,7 @@ pipeline {
             echo "Detecting app changes..."
             git fetch origin
 
-            CHANGED=$(git diff --name-only origin/main...HEAD || true)
+            CHANGED=$(git diff --name-only "$GIT_PREVIOUS_SUCCESSFUL_COMMIT" "$GIT_COMMIT" || true)
             echo "$CHANGED"
 
             echo "false" > build_airflow
