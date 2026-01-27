@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/nextjs
-  tag: "31"
+  tag: "42"
   pullPolicy: IfNotPresent
 
 service:
