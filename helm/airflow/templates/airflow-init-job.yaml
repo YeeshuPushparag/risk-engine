@@ -6,9 +6,10 @@ metadata:
   labels:
     app: airflow-init
   annotations:
+    # Ensures ArgoCD deletes and recreates the Job every sync
     argocd.argoproj.io/sync-options: Replace=true
 spec:
-  ttlSecondsAfterFinished: 180
+  ttlSecondsAfterFinished: 180   # Cleanup finished jobs after 3 minutes
   backoffLimit: 5
   template:
     metadata:
@@ -21,11 +22,9 @@ spec:
       containers:
         - name: airflow-init
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-
+          imagePullPolicy: Always    # <-- Force Kubernetes to always fetch latest image
           command: ["/entrypoint"]
           args: ["airflow", "db", "migrate"]
-
           envFrom:
             - configMapRef:
                 name: {{ .Values.envFrom.configMapName }}
