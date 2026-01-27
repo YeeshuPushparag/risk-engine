@@ -2,7 +2,7 @@
 
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import {
   ArrowLeft, Activity, TrendingUp, AlertTriangle,
@@ -122,8 +122,17 @@ const [fundamentals, setFundamentals] = useState<any>({});
 const [alerts, setAlerts] = useState<any[]>([]);
 const [managers, setManagers] = useState<any[]>([]);
 
-const [equityEnabled, setEquityEnabled] = useState(false);
-const [wsBaseUrl, setWsBaseUrl] = useState<string | null>(null);
+const [wsUrl, setWsUrl] = useState<string | null>(null);
+
+// stable callback
+const handleUpdate = useCallback((data: any) => {
+  if (!data) return;
+  setTotals(data.totals || {});
+  setMarket(data.market || {});
+  setFundamentals(data.fundamentals || {});
+  setAlerts(data.alerts || []);
+  setManagers(data.manager_breakdown || []);
+}, []);
 
 function isMarketTradingTime() {
   const now = new Date();
@@ -141,73 +150,42 @@ function isMarketTradingTime() {
   const minute = Number(parts.find(p => p.type === "minute")!.value);
 
   const totalMin = hour * 60 + minute;
-  const CLOSE_MIN = 960 + 2; // 16:02 ET
+  const CLOSE_MIN = 960 + 2;
 
   if (weekday === "Sat" || weekday === "Sun") return false;
   return totalMin >= 570 && totalMin <= CLOSE_MIN;
 }
 
-// fetch config
 useEffect(() => {
-  async function fetchConfig() {
+  if (!ticker) return;
+
+  async function fetchConfigAndData() {
     try {
       const res = await fetch("/api/config");
       const config = await res.json();
 
       const enabled = config.forceStream || isMarketTradingTime();
-      setEquityEnabled(enabled);
+      if (!enabled) return;
 
-      if (enabled) {
-        setWsBaseUrl(config.wsBaseUrl);
+      setWsUrl(`${config.wsBaseUrl}/equity/ticker/${ticker}/`);
+
+      const resData = await fetch(
+        `/api/equity/intraday/ticker?ticker=${ticker}`,
+        { cache: "no-store" }
+      );
+
+      if (resData.ok) {
+        handleUpdate(await resData.json());
       }
     } catch (e) {
       console.error(e);
     }
   }
 
-  fetchConfig();
-}, []);
+  fetchConfigAndData();
+}, [ticker, handleUpdate]);
 
-// load initial REST data
-useEffect(() => {
-  if (!equityEnabled || !ticker) return;
-
-  async function load() {
-    try {
-      const res = await fetch(
-        `/api/equity/intraday/ticker?ticker=${ticker}`,
-        { cache: "no-store" }
-      );
-      if (!res.ok) return;
-
-      const json = await res.json();
-      setTotals(json.totals || {});
-      setMarket(json.market || {});
-      setFundamentals(json.fundamentals || {});
-      setAlerts(json.alerts || []);
-      setManagers(json.manager_breakdown || []);
-    } catch (e) {
-      console.error(e);
-    }
-  }
-
-  load();
-}, [ticker, equityEnabled]);
-
-// websocket (NO useEffect wrapper)
-const wsUrl =
-  equityEnabled && wsBaseUrl && ticker
-    ? `${wsBaseUrl}/equity/ticker/${ticker}/`
-    : null;
-
-useWebSocket(wsUrl, equityEnabled && !!ticker, (data) => {
-  setTotals(data.totals);
-  setMarket(data.market);
-  setFundamentals(data.fundamentals);
-  setAlerts(data.alerts || []);
-  setManagers(data.manager_breakdown || []);
-});
-
+useWebSocket(wsUrl, handleUpdate);
 
 
   if (!equityEnabled) {

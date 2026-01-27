@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import {
@@ -83,36 +83,15 @@ function MetricCard({
 /* ---------------- MAIN PAGE ---------------- */
 export default function TickerPage() {
 const { ticker } = useParams();
+
 const [data, setData] = useState<any>(null);
 const [wsUrl, setWsUrl] = useState<string | null>(null);
-const [fxEnabled, setFxEnabled] = useState(false);
 
-const handleUpdate = (update: any) => {
+//  stable callback
+const handleUpdate = useCallback((update: any) => {
   setData(update);
-};
+}, []);
 
-// Check if FX market is open
-function isFXTradingTime() {
-  const now = new Date();
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    weekday: "short",
-    hour: "numeric",
-    minute: "numeric",
-    hour12: false,
-  }).formatToParts(now);
-
-  const weekday = parts.find(p => p.type === "weekday")!.value;
-  const hour = Number(parts.find(p => p.type === "hour")!.value);
-  const minute = Number(parts.find(p => p.type === "minute")!.value);
-
-  const totalMin = hour * 60 + minute;
-
-  if (weekday === "Sat" || weekday === "Sun") return false;
-  return totalMin >= 0 && totalMin <= 24 * 60; // FX trades 24/5
-}
-
-// Fetch config and initial data
 useEffect(() => {
   if (!ticker) return;
 
@@ -122,16 +101,20 @@ useEffect(() => {
       const config = await res.json();
 
       const enabled = config.forceStream || isFXTradingTime();
-      setFxEnabled(enabled);
-
       if (!enabled) return;
 
-      // Dynamic WebSocket URL
+      //  set WS URL (can be delayed, hook will wait)
       setWsUrl(`${config.wsBaseUrl}/fx/ticker/${ticker}/`);
 
-      // Initial data fetch
-      const initialRes = await fetch(`/api/fx/intraday/ticker?ticker=${ticker}`, { cache: "no-store" });
-      if (initialRes.ok) handleUpdate(await initialRes.json());
+      //  initial HTTP fetch
+      const initialRes = await fetch(
+        `/api/fx/intraday/ticker?ticker=${ticker}`,
+        { cache: "no-store" }
+      );
+
+      if (initialRes.ok) {
+        setData(await initialRes.json());
+      }
     } catch (e) {
       console.error("Failed to load config or data:", e);
     }
@@ -140,14 +123,8 @@ useEffect(() => {
   fetchConfigAndData();
 }, [ticker]);
 
-// Only connect WS after wsUrl & fxEnabled are ready
-useEffect(() => {
-  if (!wsUrl || !fxEnabled) return;
-
-  console.log("Connecting WS with:", { wsUrl, fxEnabled });
-  useWebSocket(wsUrl, true, handleUpdate);
-}, [wsUrl, fxEnabled]);
-
+//  always call hook, it safely waits for wsUrl
+useWebSocket(wsUrl, handleUpdate);
 
 
 if (!fxEnabled) return <MarketClosedView />;

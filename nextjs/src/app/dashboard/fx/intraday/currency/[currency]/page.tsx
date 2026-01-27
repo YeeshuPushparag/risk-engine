@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback} from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useWebSocket } from "@/hooks/useWebSocket";
@@ -51,38 +51,15 @@ function MetricCard({ label, value, trigger }: { label: string; value: React.Rea
 /* ---------------- MAIN PAGE ---------------- */
 export default function CurrencyPage() {
 const { currency } = useParams();
+
 const [data, setData] = useState<any>(null);
 const [wsUrl, setWsUrl] = useState<string | null>(null);
-const [fxEnabled, setFxEnabled] = useState(false);
-const prevTickersRef = useRef<any>(null);
 
-const handleUpdate = (update: any) => {
-  prevTickersRef.current = data?.tickers;
+// stable callback
+const handleUpdate = useCallback((update: any) => {
   setData(update);
-};
+}, []);
 
-// Function to check if FX market is open
-function isFXTradingTime() {
-  const now = new Date();
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    weekday: "short",
-    hour: "numeric",
-    minute: "numeric",
-    hour12: false,
-  }).formatToParts(now);
-
-  const weekday = parts.find(p => p.type === "weekday")!.value;
-  const hour = Number(parts.find(p => p.type === "hour")!.value);
-  const minute = Number(parts.find(p => p.type === "minute")!.value);
-
-  const totalMin = hour * 60 + minute;
-
-  if (weekday === "Sat" || weekday === "Sun") return false;
-  return totalMin >= 0 && totalMin <= 24 * 60; // FX trades 24/5
-}
-
-// Fetch config and initial data
 useEffect(() => {
   if (!currency) return;
 
@@ -92,36 +69,27 @@ useEffect(() => {
       const config = await res.json();
 
       const enabled = config.forceStream || isFXTradingTime();
-      setFxEnabled(enabled);
-
       if (!enabled) return;
 
-      // Set WebSocket URL dynamically
       setWsUrl(`${config.wsBaseUrl}/fx/currency/${currency}/`);
 
-      // Load initial data
       const initialRes = await fetch(
         `/api/fx/intraday/currency/?currency=${currency}`,
         { cache: "no-store" }
       );
 
-      if (initialRes.ok) handleUpdate(await initialRes.json());
+      if (initialRes.ok) {
+        setData(await initialRes.json());
+      }
     } catch (e) {
-      console.error("Failed to load config or data:", e);
+      console.error(e);
     }
   }
 
   fetchConfigAndData();
 }, [currency]);
 
-// Connect WebSocket only after wsUrl & fxEnabled are ready
-useEffect(() => {
-  if (!wsUrl || !fxEnabled) return;
-
-  console.log("Connecting WS for currency:", currency, { wsUrl, fxEnabled });
-  useWebSocket(wsUrl, true, handleUpdate);
-}, [wsUrl, fxEnabled, currency]);
-
+useWebSocket(wsUrl, handleUpdate);
 
 
 if (!fxEnabled) return <MarketClosedView />;

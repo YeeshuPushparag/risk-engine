@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback} from "react";
 import Link from "next/link";
 import TickerSearch from "@/components/TickerSearch";
 import ManagerSearch from "@/components/ManagerSearch";
@@ -112,10 +112,10 @@ const [tickers, setTickers] = useState<any[]>([]);
 const [managers, setManagers] = useState<any[]>([]);
 const [timeStamp, setTimestamp] = useState("");
 
-const [equityEnabled, setEquityEnabled] = useState(false);
-const [wsBaseUrl, setWsBaseUrl] = useState<string | null>(null);
+const [wsUrl, setWsUrl] = useState<string | null>(null);
 
-const updateState = (data: any) => {
+// stable callback
+const updateState = useCallback((data: any) => {
   if (!data) return;
   setSummary(data.totals);
   setTopMovers(data.top_movers);
@@ -123,7 +123,7 @@ const updateState = (data: any) => {
   setTimestamp(data.timestamp);
   setTickers(data.top_tickers_agg);
   setManagers(data.top_managers_agg);
-};
+}, []);
 
 function isMarketTradingTime() {
   const now = new Date();
@@ -147,7 +147,6 @@ function isMarketTradingTime() {
   return totalMin >= 570 && totalMin <= CLOSE_MIN;
 }
 
-// fetch config + initial data
 useEffect(() => {
   async function fetchConfigAndData() {
     try {
@@ -155,15 +154,17 @@ useEffect(() => {
       const config = await res.json();
 
       const enabled = config.forceStream || isMarketTradingTime();
-      setEquityEnabled(enabled);
+      if (!enabled) return;
 
-      if (enabled) {
-        setWsBaseUrl(config.wsBaseUrl);
+      setWsUrl(`${config.wsBaseUrl}/equity/overview/`);
 
-        const dataRes = await fetch("/api/equity/intraday/overview", {
-          cache: "no-store",
-        });
-        if (dataRes.ok) updateState(await dataRes.json());
+      const dataRes = await fetch(
+        "/api/equity/intraday/overview",
+        { cache: "no-store" }
+      );
+
+      if (dataRes.ok) {
+        updateState(await dataRes.json());
       }
     } catch (e) {
       console.error("Fetch failed", e);
@@ -173,13 +174,8 @@ useEffect(() => {
   fetchConfigAndData();
 }, []);
 
-// websocket (always called, connects only when ready)
-const wsUrl =
-  equityEnabled && wsBaseUrl
-    ? `${wsBaseUrl}/equity/overview/`
-    : null;
-
-useWebSocket(wsUrl, equityEnabled, updateState);
+// always call the hook
+useWebSocket(wsUrl, updateState);
 
 
   if (!equityEnabled) {

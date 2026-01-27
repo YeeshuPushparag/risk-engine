@@ -2,7 +2,7 @@
 
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useCallback} from "react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { 
   ArrowLeft, Activity, AlertTriangle, 
@@ -104,12 +104,20 @@ const [holdings, setHoldings] = useState<any[]>([]);
 const [alerts, setAlerts] = useState<any[]>([]);
 const [timeStamp, setTimestamp] = useState("");
 
-const [equityEnabled, setEquityEnabled] = useState(false);
-const [wsBaseUrl, setWsBaseUrl] = useState<string | null>(null);
+const [wsUrl, setWsUrl] = useState<string | null>(null);
 
-// --- Market time check ---
+// stable callback
+const handleUpdate = useCallback((data: any) => {
+  if (!data) return;
+  setSummary(data.totals);
+  setHoldings(data.holdings);
+  setAlerts(data.alerts || []);
+  setTimestamp(data.timestamp);
+}, []);
+
 function isMarketTradingTime() {
   const now = new Date();
+
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
     weekday: "short",
@@ -123,76 +131,42 @@ function isMarketTradingTime() {
   const minute = Number(parts.find(p => p.type === "minute")!.value);
 
   const totalMin = hour * 60 + minute;
-  const CLOSE_MIN = 960 + 2; // 16:02 ET
+  const CLOSE_MIN = 960 + 2;
 
   if (weekday === "Sat" || weekday === "Sun") return false;
-  return totalMin >= 570 && totalMin <= CLOSE_MIN; // 9:30 → 16:02 ET
+  return totalMin >= 570 && totalMin <= CLOSE_MIN;
 }
 
-// --- Fetch config ---
 useEffect(() => {
-  async function fetchConfig() {
+  if (!rawManager) return;
+
+  async function fetchConfigAndData() {
     try {
       const res = await fetch("/api/config");
       const config = await res.json();
 
       const enabled = config.forceStream || isMarketTradingTime();
-      setEquityEnabled(enabled);
-
       if (!enabled) return;
-      setWsBaseUrl(config.wsBaseUrl);
-    } catch (e) {
-      console.error("Config fetch failed", e);
-    }
-  }
 
-  fetchConfig();
-}, []);
+      setWsUrl(`${config.wsBaseUrl}/equity/manager/${rawManager}/`);
 
-// --- Fetch initial manager data ---
-useEffect(() => {
-  if (!equityEnabled || !rawManager) return;
-
-  async function loadManagerData() {
-    try {
-      const res = await fetch(
+      const resData = await fetch(
         `/api/equity/intraday/manager?manager=${rawManager}`,
         { cache: "no-store" }
       );
-      if (!res.ok) return;
-      const json = await res.json();
 
-      setSummary(json.totals);
-      setHoldings(json.holdings);
-      setAlerts(json.alerts || []);
-      setTimestamp(json.timestamp);
+      if (resData.ok) {
+        handleUpdate(await resData.json());
+      }
     } catch (e) {
-      console.error("Manager data fetch failed", e);
+      console.error(e);
     }
   }
 
-  loadManagerData();
-}, [rawManager, equityEnabled]);
+  fetchConfigAndData();
+}, [rawManager, handleUpdate]);
 
-// --- WebSocket connection ---
-useEffect(() => {
-  if (!equityEnabled || !wsBaseUrl || !rawManager) return;
-
-  const wsUrl = `${wsBaseUrl}/equity/manager/${rawManager}/`;
-  console.log("Connecting WS:", wsUrl, { equityEnabled, rawManager });
-
-  useWebSocket(
-    wsUrl,
-    true, // already ensured enabled
-    (data) => {
-      setSummary(data.totals);
-      setHoldings(data.holdings);
-      setAlerts(data.alerts || []);
-      setTimestamp(data.timestamp);
-    }
-  );
-}, [equityEnabled, wsBaseUrl, rawManager]);
-
+useWebSocket(wsUrl, handleUpdate);
 
 
   if (!equityEnabled) {
