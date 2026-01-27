@@ -1,6 +1,5 @@
 import time
 import pandas as pd
-import numpy as np
 import boto3
 from io import BytesIO
 from connections.snowflake_conn import get_snowflake_conn
@@ -16,28 +15,28 @@ s3 = boto3.client("s3")
 # =========================
 
 def fast_parse_dates(series, chunk_size=250_000):
-    """Chunked date parsing to avoid heartbeat timeout and log spam."""
+    """Chunked date parsing to avoid memory/heartbeat issues."""
     result = []
     for i in range(0, len(series), chunk_size):
-        chunk = series.iloc[i:i+chunk_size]
+        chunk = series.iloc[i:i + chunk_size]
         parsed = pd.to_datetime(chunk, errors="coerce", dayfirst=True)
         mask = parsed.isna()
         if mask.any():
             parsed[mask] = pd.to_datetime(chunk[mask], format="%d-%m-%Y", errors="coerce")
         result.append(parsed)
-        time.sleep(0.01)  # heartbeat
+        time.sleep(0.01)
     return pd.concat(result, ignore_index=True)
 
 def chunked_groupby(df, group_cols, agg_dict, chunk_size=250_000):
-    """Perform groupby in chunks to avoid memory spikes."""
-    result_chunks = []
+    """Memory-safe groupby aggregation in chunks."""
+    chunks = []
     for start in range(0, len(df), chunk_size):
-        chunk = df.iloc[start:start+chunk_size]
+        chunk = df.iloc[start:start + chunk_size]
         grouped = chunk.groupby(group_cols, as_index=False).agg(agg_dict)
-        result_chunks.append(grouped)
-        time.sleep(0.01)  # heartbeat
-    combined = pd.concat(result_chunks, ignore_index=True)
-    # Re-aggregate in case groups were split across chunks
+        chunks.append(grouped)
+        time.sleep(0.01)
+    combined = pd.concat(chunks, ignore_index=True)
+    # Re-aggregate to merge same groups across chunks
     return combined.groupby(group_cols, as_index=False).agg(agg_dict)
 
 def read_s3_parquet(key):
@@ -54,7 +53,7 @@ def write_s3_parquet(df, key):
     s3.put_object(Bucket=S3_BUCKET, Key=key, Body=buf)
 
 def load_snowflake_table(name, last_month, chunk_size=500_000):
-    """Load Snowflake table in chunks based on primary key (id) to avoid huge memory load."""
+    """Load Snowflake table in chunks to avoid memory spikes."""
     where_clause = ""
     params = ()
     if last_month is not None:
@@ -69,7 +68,6 @@ def load_snowflake_table(name, last_month, chunk_size=500_000):
     with get_snowflake_conn() as ctx:
         cur = ctx.cursor()
         cur.execute(query, params)
-        # Fetch in chunks
         dfs = []
         while True:
             chunk = cur.fetchmany(chunk_size)
@@ -92,11 +90,9 @@ def run_enrich_loans_pipeline():
     if loans is None:
         raise RuntimeError("loan_synthetic_base.parquet not found in S3")
 
-    # Chunked date parsing
     loans["issue_date"] = fast_parse_dates(loans["issue_date"])
     loans["maturity_date"] = fast_parse_dates(loans["maturity_date"])
 
-    # Load previous output
     prev = read_s3_parquet(OUTPUT_KEY)
     last_processed_month = None
     if prev is not None:
@@ -111,7 +107,7 @@ def run_enrich_loans_pipeline():
     deriv = load_snowflake_table("DERIVATIVES", last_processed_month)
     collateral = load_snowflake_table("COLLATERAL", last_processed_month)
 
-    # Chunked date parsing for Snowflake data
+    # Chunked date parsing
     for df in [fx, bonds, commod, deriv, collateral]:
         if not df.empty:
             df["date"] = fast_parse_dates(df["date"])
@@ -129,11 +125,12 @@ def run_enrich_loans_pipeline():
         print("No new data to process.")
         return "NO_NEW_DATA"
 
-    print("Aggregating monthly data...")
-    fx_month = chunked_groupby(fx, ["ticker", "month_year"], 
+    print("Aggregating monthly data (chunked)...")
+    fx_month = chunked_groupby(fx, ["ticker", "month_year"],
                                {"fx_rate": "mean", "fx_volatility": "mean", "carry_daily": "mean"})
     bonds_month = chunked_groupby(bonds, ["ticker", "month_year"],
-                                  {"credit_spread": "mean", "yield_to_maturity": "mean",
+                                  {"credit_spread": "mean",
+                                   "yield_to_maturity": "mean",
                                    "credit_rating": lambda x: x.mode().iloc[0] if not x.mode().empty else None})
     commod_month = chunked_groupby(commod, ["sector", "month_year"],
                                    {"close": "mean", "vol_20d": "mean"})
@@ -141,7 +138,7 @@ def run_enrich_loans_pipeline():
                                   {"notional": "mean", "exposure_before_collateral": "mean",
                                    "collateral_value": "mean", "net_exposure": "mean",
                                    "collateral_ratio": "mean",
-                                   "margin_call_flag": lambda x: int((x == 1).any()),
+                                   "margin_call_flag": lambda x: int((x==1).any()),
                                    "pnl": "mean"})
     collat_month = chunked_groupby(collateral, ["ticker", "month_year"],
                                    {"counterparty": lambda x: "|".join(sorted(set(map(str, x)))[:3]),
@@ -158,9 +155,8 @@ def run_enrich_loans_pipeline():
     month_df = pd.DataFrame({"month_year": month_years})
     month_df["month_start"] = month_df["month_year"].dt.to_timestamp()
 
-    # Streamed expansion to avoid memory explosion
     expanded_chunks = []
-    chunk_size = 500  # adjust as needed
+    chunk_size = 500
     for start in range(0, len(loans), chunk_size):
         loans_chunk = loans.iloc[start:start+chunk_size]
         chunk_rows = []
@@ -179,7 +175,7 @@ def run_enrich_loans_pipeline():
     loans_expanded["date"] = loans_expanded["month_start"].dt.date
 
     # =========================
-    # Safe merging in chunks
+    # Safe merging (chunked)
     # =========================
     merged = loans_expanded.copy()
     merge_pairs = [(fx_month, ["ticker"]), (bonds_month, ["ticker"]),
@@ -187,7 +183,6 @@ def run_enrich_loans_pipeline():
                    (collat_month, ["ticker"])]
     for df, on_cols in merge_pairs:
         if not df.empty:
-            # Merge in chunks
             merged_chunks = []
             chunk_size = 250_000
             for start in range(0, len(merged), chunk_size):
@@ -199,7 +194,6 @@ def run_enrich_loans_pipeline():
 
     merged.drop(columns=["month_year", "month_start"], inplace=True)
 
-    # Append previous data if exists
     if prev is not None:
         merged = pd.concat([prev, merged], ignore_index=True)
         merged.drop_duplicates(subset=["loan_id", "date"], inplace=True)
