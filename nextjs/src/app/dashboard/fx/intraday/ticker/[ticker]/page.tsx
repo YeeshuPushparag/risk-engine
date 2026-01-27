@@ -15,10 +15,7 @@ import Link from "next/link";
 
 /* ---------------- FORMATTERS ---------------- */
 
-const rangePercent =
-  data.high != null && data.low != null && data.close != null && data.high !== data.low
-    ? ((data.close - data.low) / (data.high - data.low)) * 100
-    : 0;
+
 
 const fmtCur = (v?: number | null) => {
   if (v == null) return "—";
@@ -76,8 +73,8 @@ function MetricCard({
         {label}
       </p>
       <div className={`text-xl sm:text-2xl font-mono font-bold tracking-tighter ${variant === "pnl"
-          ? (flashTrigger ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"
-          : "text-white"
+        ? (flashTrigger ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"
+        : "text-white"
         }`}>
         {value}
       </div>
@@ -90,7 +87,7 @@ export default function TickerPage() {
   const { ticker } = useParams();
   const [data, setData] = useState<any>(null);
   const [wsUrl, setWsUrl] = useState<string | null>(null);
-  const [fxEnabled, setFxEnabled] = useState<boolean | null>(null); 
+  const [fxEnabled, setFxEnabled] = useState<boolean | null>(null);
 
   const handleUpdate = (update: any) => {
     setData(update);
@@ -134,7 +131,10 @@ export default function TickerPage() {
   if (fxEnabled === false) return <MarketClosedView />;
   if (!data) return <LoadingState />;
 
-
+  const rangePercent =
+    data.high != null && data.low != null && data.close != null && data.high !== data.low
+      ? ((data.close - data.low) / (data.high - data.low)) * 100
+      : 0;
   return (
     <main className="min-h-screen bg-[#020617] text-slate-300 p-4 sm:p-6 lg:p-12 space-y-8">
 
