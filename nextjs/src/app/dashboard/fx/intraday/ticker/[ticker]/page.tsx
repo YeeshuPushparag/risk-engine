@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams } from "next/navigation";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import {
@@ -14,6 +14,12 @@ import {
 import Link from "next/link";
 
 /* ---------------- FORMATTERS ---------------- */
+
+const rangePercent =
+  data.high != null && data.low != null && data.close != null && data.high !== data.low
+    ? ((data.close - data.low) / (data.high - data.low)) * 100
+    : 0;
+
 const fmtCur = (v?: number | null) => {
   if (v == null) return "—";
   const abs = Math.abs(v);
@@ -55,7 +61,7 @@ function MetricCard({
       const timer = setTimeout(() => setFlash(null), 800);
       return () => clearTimeout(timer);
     }
-    
+
     // Update baseline for next socket tick
     if (flashTrigger !== null && flashTrigger !== undefined) {
       prevValue.current = flashTrigger;
@@ -69,10 +75,9 @@ function MetricCard({
       <p className="text-[9px] font-black text-slate-500 uppercase tracking-[0.2em] mb-2">
         {label}
       </p>
-      <div className={`text-xl sm:text-2xl font-mono font-bold tracking-tighter ${
-          variant === "pnl"
-            ? (flashTrigger ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"
-            : "text-white"
+      <div className={`text-xl sm:text-2xl font-mono font-bold tracking-tighter ${variant === "pnl"
+          ? (flashTrigger ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"
+          : "text-white"
         }`}>
         {value}
       </div>
@@ -86,12 +91,13 @@ const { ticker } = useParams();
 
 const [data, setData] = useState<any>(null);
 const [wsUrl, setWsUrl] = useState<string | null>(null);
+const [fxEnabled, setFxEnabled] = useState<boolean | null>(null);
 
-//  stable callback
-const handleUpdate = useCallback((update: any) => {
+const handleUpdate = (update: any) => {
   setData(update);
-}, []);
+};
 
+// Fetch runtime config
 useEffect(() => {
   if (!ticker) return;
 
@@ -101,19 +107,20 @@ useEffect(() => {
       const config = await res.json();
 
       const enabled = config.forceStream || isFXTradingTime();
-      if (!enabled) return;
+      setFxEnabled(enabled);
 
-      //  set WS URL (can be delayed, hook will wait)
-      setWsUrl(`${config.wsBaseUrl}/fx/ticker/${ticker}/`);
+      if (enabled) {
+        const url = `${config.wsBaseUrl}/fx/ticker/${ticker}/`;
+        setWsUrl(url);
 
-      //  initial HTTP fetch
-      const initialRes = await fetch(
-        `/api/fx/intraday/ticker?ticker=${ticker}`,
-        { cache: "no-store" }
-      );
+        const initialRes = await fetch(
+          `/api/fx/intraday/ticker?ticker=${ticker}`,
+          { cache: "no-store" }
+        );
 
-      if (initialRes.ok) {
-        setData(await initialRes.json());
+        if (initialRes.ok) {
+          setData(await initialRes.json());
+        }
       }
     } catch (e) {
       console.error("Failed to load config or data:", e);
@@ -123,21 +130,21 @@ useEffect(() => {
   fetchConfigAndData();
 }, [ticker]);
 
-//  always call hook, it safely waits for wsUrl
+// WebSocket runs ONLY when wsUrl exists
 useWebSocket(wsUrl, handleUpdate);
 
+/* ---- SINGLE, CLEAR RETURN LOGIC ---- */
+if (fxEnabled === null) return <LoadingState />;
 
 if (!fxEnabled) return <MarketClosedView />;
+
 if (!data) return <LoadingState />;
 
-  const rangePercent =
-    data.high != null && data.low != null && data.close != null && data.high !== data.low
-      ? ((data.close - data.low) / (data.high - data.low)) * 100
-      : 0;
+
 
   return (
     <main className="min-h-screen bg-[#020617] text-slate-300 p-4 sm:p-6 lg:p-12 space-y-8">
-      
+
       {/* HEADER - RESPONSIVE SIZING */}
       <header className="space-y-4">
         <Link

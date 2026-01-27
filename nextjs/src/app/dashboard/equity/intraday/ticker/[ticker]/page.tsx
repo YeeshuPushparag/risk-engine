@@ -2,7 +2,7 @@
 
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import React, { useEffect, useState, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import {
   ArrowLeft, Activity, TrendingUp, AlertTriangle,
@@ -116,102 +116,86 @@ export default function TickerIntradayPage() {
 const { ticker: raw } = useParams();
 const ticker = typeof raw === "string" ? raw.toUpperCase() : "";
 
-const [totals, setTotals] = useState<any>({});
-const [market, setMarket] = useState<any>({});
-const [fundamentals, setFundamentals] = useState<any>({});
+const [totals, setTotals] = useState<any>(null);
+const [market, setMarket] = useState<any>(null);
+const [fundamentals, setFundamentals] = useState<any>(null);
 const [alerts, setAlerts] = useState<any[]>([]);
 const [managers, setManagers] = useState<any[]>([]);
 
-const [wsUrl, setWsUrl] = useState<string | null>(null);
-
-// stable callback
-const handleUpdate = useCallback((data: any) => {
-  if (!data) return;
-  setTotals(data.totals || {});
-  setMarket(data.market || {});
-  setFundamentals(data.fundamentals || {});
-  setAlerts(data.alerts || []);
-  setManagers(data.manager_breakdown || []);
-}, []);
-
-function isMarketTradingTime() {
-  const now = new Date();
-
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    weekday: "short",
-    hour: "numeric",
-    minute: "numeric",
-    hour12: false,
-  }).formatToParts(now);
-
-  const weekday = parts.find(p => p.type === "weekday")!.value;
-  const hour = Number(parts.find(p => p.type === "hour")!.value);
-  const minute = Number(parts.find(p => p.type === "minute")!.value);
-
-  const totalMin = hour * 60 + minute;
-  const CLOSE_MIN = 960 + 2;
-
-  if (weekday === "Sat" || weekday === "Sun") return false;
-  return totalMin >= 570 && totalMin <= CLOSE_MIN;
-}
+const [equityEnabled, setEquityEnabled] = useState<boolean | null>(null);
+const [wsBaseUrl, setWsBaseUrl] = useState<string | null>(null);
 
 useEffect(() => {
-  if (!ticker) return;
-
   async function fetchConfigAndData() {
     try {
       const res = await fetch("/api/config");
       const config = await res.json();
 
       const enabled = config.forceStream || isMarketTradingTime();
-      if (!enabled) return;
+      setEquityEnabled(enabled);
 
-      setWsUrl(`${config.wsBaseUrl}/equity/ticker/${ticker}/`);
+      if (enabled) {
+        setWsBaseUrl(config.wsBaseUrl);
 
-      const resData = await fetch(
-        `/api/equity/intraday/ticker?ticker=${ticker}`,
-        { cache: "no-store" }
-      );
+        const dataRes = await fetch(
+          `/api/equity/intraday/ticker?ticker=${ticker}`,
+          { cache: "no-store" }
+        );
 
-      if (resData.ok) {
-        handleUpdate(await resData.json());
+        if (dataRes.ok) {
+          const json = await dataRes.json();
+          setTotals(json.totals);
+          setMarket(json.market);
+          setFundamentals(json.fundamentals);
+          setAlerts(json.alerts || []);
+          setManagers(json.manager_breakdown || []);
+        }
       }
     } catch (e) {
       console.error(e);
     }
   }
 
-  fetchConfigAndData();
-}, [ticker, handleUpdate]);
+  if (ticker) fetchConfigAndData();
+}, [ticker]);
 
-useWebSocket(wsUrl, handleUpdate);
-
-
-  if (!equityEnabled) {
-    return (
-      <div className="min-h-screen bg-[#020617] flex items-center justify-center p-12 text-center">
-        <div className="space-y-4 max-w-md">
-          <Clock className="w-12 h-12 text-slate-700 mx-auto" />
-          <h2 className="text-xl font-black text-white uppercase tracking-tight">Market Closed</h2>
-          <p className="text-slate-400 text-sm leading-relaxed">
-            U.S. equity markets operate <strong>Monday through Friday</strong>,
-            from <strong>9:30 AM to 4:00 PM (EST)</strong>.
-            <br />
-            <span className="block mt-1 text-slate-500">
-              This corresponds to <strong>8:00 PM – 2:30 AM (IST)</strong>.
-            </span>
-          </p>
-          <Link
-            href="/dashboard/equity/daily"
-            className="inline-block mt-4 text-blue-500 text-[10px] font-black uppercase tracking-widest border border-blue-500/30 px-6 py-2 rounded-lg hover:bg-blue-500/10 transition"
-          >
-            ← View Daily Equity Data
-          </Link>
-        </div>
-      </div>
-    );
+useWebSocket(
+  wsBaseUrl && ticker ? `${wsBaseUrl}/equity/ticker/${ticker}/` : null,
+  (data) => {
+    setTotals(data.totals);
+    setMarket(data.market);
+    setFundamentals(data.fundamentals);
+    setAlerts(data.alerts || []);
+    setManagers(data.manager_breakdown || []);
   }
+);
+
+// ---- RETURN LOGIC (SAME AS OVERVIEW) ----
+if (equityEnabled === null) return <LoadingState />;
+
+if (equityEnabled === false) {
+  return (
+    <div className="min-h-screen bg-[#020617] flex items-center justify-center p-12 text-center">
+      <div className="space-y-4 max-w-md">
+        <Clock className="w-12 h-12 text-slate-700 mx-auto" />
+        <h2 className="text-xl font-black text-white uppercase tracking-tight">
+          Market Closed
+        </h2>
+        <p className="text-slate-400 text-sm leading-relaxed">
+          U.S. equity markets operate Monday–Friday, 9:30 AM to 4:00 PM (EST).
+        </p>
+        <Link
+          href="/dashboard/equity/daily"
+          className="inline-block mt-4 text-blue-500 text-[10px] font-black uppercase tracking-widest border border-blue-500/30 px-6 py-2 rounded-lg hover:bg-blue-500/10 transition"
+        >
+          ← View Daily Equity Data
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+
 
   if (!market?.close) {
     return (

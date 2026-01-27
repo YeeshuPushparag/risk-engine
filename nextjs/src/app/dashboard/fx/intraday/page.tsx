@@ -1,8 +1,15 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback} from "react";
+import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
-import { Activity, Clock, TrendingUp, TrendingDown, Globe, MoveHorizontal } from "lucide-react";
+import {
+  Activity,
+  Clock,
+  TrendingUp,
+  TrendingDown,
+  Globe,
+  MoveHorizontal,
+} from "lucide-react";
 import TickerSearch from "@/components/TickerSearch";
 import { useWebSocket } from "@/hooks/useWebSocket";
 
@@ -18,98 +25,65 @@ const fmt = (v?: number) => {
   return `${sign}$${abs.toFixed(0)}`;
 };
 
-const fmtFX = (n?: number) => n == null ? "—" : n.toFixed(4);
-
-/* --- ANIMATED COMPONENTS --- */
-
-function StatCard({ label, value, numericValue, trend, color }: any) {
-  const [flash, setFlash] = useState("");
-  const prevValue = useRef(numericValue);
-
-  useEffect(() => {
-    if (numericValue !== prevValue.current) {
-      if (numericValue > prevValue.current) setFlash("animate-flash-green");
-      else if (numericValue < prevValue.current) setFlash("animate-flash-red");
-      prevValue.current = numericValue;
-      const timer = setTimeout(() => setFlash(""), 1000);
-      return () => clearTimeout(timer);
-    }
-  }, [numericValue]);
-
-  return (
-    <div className={`bg-slate-900 border border-slate-800 p-5 rounded-2xl transition-all duration-500 ${flash}`}>
-      <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-3">{label}</p>
-      <div className="flex items-end justify-between">
-        <h3 className={`text-xl sm:text-2xl font-black tracking-tighter ${color || 'text-white'}`}>{value}</h3>
-        {trend && (
-          <span className={trend === 'up' ? 'text-emerald-500' : 'text-red-500'}>
-            {trend === 'up' ? <TrendingUp className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />}
-          </span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function FlashCell({ value, children, className = "" }: any) {
-  const [flash, setFlash] = useState("");
-  const prevValue = useRef(value);
-
-  useEffect(() => {
-    if (value !== prevValue.current) {
-      setFlash(value > prevValue.current ? "bg-emerald-500/10" : "bg-red-500/10");
-      prevValue.current = value;
-      const timer = setTimeout(() => setFlash(""), 800);
-      return () => clearTimeout(timer);
-    }
-  }, [value]);
-
-  return <td className={`${className} ${flash} transition-colors duration-500`}>{children}</td>;
-}
+const fmtFX = (n?: number) => (n == null ? "—" : n.toFixed(4));
 
 /* --- MAIN PAGE --- */
 
 export default function FxIntradayMain() {
-const [data, setData] = useState<any>(null);
-const [wsUrl, setWsUrl] = useState<string | null>(null);
+  const [data, setData] = useState<any>(null);
+  const [wsUrl, setWsUrl] = useState<string | null>(null);
+  const [fxEnabled, setFxEnabled] = useState<boolean | null>(null);
 
-const handleDataUpdate = useCallback((update: any) => {
-  setData(update);
-}, []);
+  const handleDataUpdate = (update: any) => {
+    setData(update);
+  };
 
-useEffect(() => {
-  async function fetchConfig() {
-    try {
-      const res = await fetch("/api/config");
-      const config = await res.json();
+  useEffect(() => {
+    async function init() {
+      try {
+        const res = await fetch("/api/config");
+        const config = await res.json();
 
-      const fxEnabled = config.forceStream || isFXTradingTime();
-      if (!fxEnabled) return;
+        const enabled = config.forceStream || isFXTradingTime();
+        setFxEnabled(enabled);
 
-      setWsUrl(config.wsBaseUrl + "/fx/overview/");
+        if (enabled) {
+          const url = `${config.wsBaseUrl}/fx/overview/`;
+          setWsUrl(url);
 
-      const initialRes = await fetch("/api/fx/intraday/overview", {
-        cache: "no-store",
-      });
+          const initialRes = await fetch("/api/fx/intraday/overview", {
+            cache: "no-store",
+          });
 
-      if (initialRes.ok) {
-        setData(await initialRes.json());
+          if (initialRes.ok) {
+            setData(await initialRes.json());
+          }
+        }
+      } catch (e) {
+        console.error(e);
       }
-    } catch (err) {
-      console.error(err);
     }
+
+    init();
+  }, []);
+
+  // 🔑 WebSocket ONLY runs when wsUrl exists
+  useWebSocket(wsUrl, handleDataUpdate);
+
+  // 🔑 SINGLE loading state
+  if (fxEnabled === null) {
+    return <LoadingTerminal />;
   }
 
-  fetchConfig();
-}, []);
+  if (!fxEnabled) {
+    return <MarketClosedView />;
+  }
 
-useWebSocket(wsUrl, handleDataUpdate);
+  if (!data) {
+    return <LoadingTerminal />;
+  }
 
-
-    if (!wsUrl) return <MarketClosedView />;
-    if (!data) return <LoadingTerminal />;
-
-
+ 
     return (
       <main className="min-h-screen bg-[#020617] text-slate-200 p-6 lg:p-10 font-sans overflow-x-hidden">
 

@@ -2,7 +2,7 @@
 
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import {
   ArrowLeft, Crosshair, ShieldAlert,
@@ -97,16 +97,8 @@ const [totals, setTotals] = useState<any>(null);
 const [signals, setSignals] = useState<any>(null);
 const [alerts, setAlerts] = useState<any[]>([]);
 
-const [wsUrl, setWsUrl] = useState<string | null>(null);
-
-// stable callback
-const handleUpdate = useCallback((json: any) => {
-  if (!json) return;
-  setTimestamp(json.timestamp);
-  setTotals(json.totals);
-  setSignals(json.signals);
-  setAlerts(json.alerts ?? []);
-}, []);
+const [equityEnabled, setEquityEnabled] = useState<boolean | null>(null);
+const [wsBaseUrl, setWsBaseUrl] = useState<string | null>(null);
 
 function isMarketTradingTime() {
   const now = new Date();
@@ -130,64 +122,97 @@ function isMarketTradingTime() {
   return totalMin >= 570 && totalMin <= CLOSE_MIN;
 }
 
+// -------- CONFIG + INITIAL DATA --------
 useEffect(() => {
-  if (!ticker || !manager) return;
-
   async function fetchConfigAndData() {
     try {
       const res = await fetch("/api/config");
       const config = await res.json();
 
       const enabled = config.forceStream || isMarketTradingTime();
-      if (!enabled) return;
+      setEquityEnabled(enabled);
 
-      setWsUrl(
-        `${config.wsBaseUrl}/equity/ticker_manager/${ticker}/${manager}/`
-      );
+      if (enabled) {
+        setWsBaseUrl(config.wsBaseUrl);
 
-      const resData = await fetch(
-        `/api/equity/intraday/ticker_manager?ticker=${ticker}&manager=${manager}`,
-        { cache: "no-store" }
-      );
+        const dataRes = await fetch(
+          `/api/equity/intraday/ticker_manager?ticker=${ticker}&manager=${manager}`,
+          { cache: "no-store" }
+        );
 
-      if (resData.ok) {
-        handleUpdate(await resData.json());
+        if (dataRes.ok) {
+          const json = await dataRes.json();
+          setTimestamp(json.timestamp);
+          setTotals(json.totals);
+          setSignals(json.signals);
+          setAlerts(json.alerts ?? []);
+        }
       }
     } catch (e) {
       console.error(e);
     }
   }
 
-  fetchConfigAndData();
-}, [ticker, manager, handleUpdate]);
+  if (ticker && manager) fetchConfigAndData();
+}, [ticker, manager]);
 
-useWebSocket(wsUrl, handleUpdate);
-
-
-  if (!equityEnabled) {
-    return (
-      <div className="min-h-screen bg-[#020617] flex items-center justify-center p-12 text-center">
-        <div className="space-y-4 max-w-md">
-          <Clock className="w-12 h-12 text-slate-700 mx-auto" />
-          <h2 className="text-xl font-black text-white uppercase tracking-tight">Market Closed</h2>
-          <p className="text-slate-400 text-sm leading-relaxed">
-            U.S. equity markets operate <strong>Monday through Friday</strong>, 9:30 AM to 4:00 PM (EST).
-          </p>
-          <Link href="/dashboard/equity/daily" className="inline-block mt-4 text-blue-500 text-[10px] font-black uppercase tracking-widest border border-blue-500/30 px-6 py-2 rounded-lg hover:bg-blue-500/10 transition">
-            ← View Daily Equity Data
-          </Link>
-        </div>
-      </div>
-    );
+// -------- WEBSOCKET --------
+useWebSocket(
+  wsBaseUrl && ticker && manager
+    ? `${wsBaseUrl}/equity/ticker_manager/${ticker}/${manager}/`
+    : null,
+  (json) => {
+    setTimestamp(json.timestamp);
+    setTotals(json.totals);
+    setSignals(json.signals);
+    setAlerts(json.alerts ?? []);
   }
+);
 
-  if (!totals || !signals) {
-    return (
-      <div className="p-8 bg-[#020617] min-h-screen flex items-center justify-center">
-        <div className="text-blue-500 font-black animate-pulse tracking-widest text-xs uppercase">Initialising Tactical Engine...</div>
+// -------- RETURN LOGIC (SAME AS OVERVIEW) --------
+if (equityEnabled === null) {
+  return (
+    <div className="p-8 bg-[#020617] min-h-screen flex items-center justify-center">
+      <div className="text-blue-500 font-black animate-pulse tracking-widest text-xs uppercase">
+        Initialising Tactical Engine...
       </div>
-    );
-  }
+    </div>
+  );
+}
+
+if (equityEnabled === false) {
+  return (
+    <div className="min-h-screen bg-[#020617] flex items-center justify-center p-12 text-center">
+      <div className="space-y-4 max-w-md">
+        <Clock className="w-12 h-12 text-slate-700 mx-auto" />
+        <h2 className="text-xl font-black text-white uppercase tracking-tight">
+          Market Closed
+        </h2>
+        <p className="text-slate-400 text-sm leading-relaxed">
+          U.S. equity markets operate Monday through Friday, 9:30 AM to 4:00 PM (EST).
+        </p>
+        <Link
+          href="/dashboard/equity/daily"
+          className="inline-block mt-4 text-blue-500 text-[10px] font-black uppercase tracking-widest border border-blue-500/30 px-6 py-2 rounded-lg hover:bg-blue-500/10 transition"
+        >
+          ← View Daily Equity Data
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+if (!totals || !signals) {
+  return (
+    <div className="p-8 bg-[#020617] min-h-screen flex items-center justify-center">
+      <div className="text-blue-500 font-black animate-pulse tracking-widest text-xs uppercase">
+        Initialising Tactical Engine...
+      </div>
+    </div>
+  );
+}
+
+
 
   return (
     <main className="min-h-screen bg-[#020617] text-slate-300 p-6 lg:p-12 space-y-12">

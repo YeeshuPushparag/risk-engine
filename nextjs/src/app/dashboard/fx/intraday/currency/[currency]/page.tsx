@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback} from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useWebSocket } from "@/hooks/useWebSocket";
@@ -54,12 +54,16 @@ const { currency } = useParams();
 
 const [data, setData] = useState<any>(null);
 const [wsUrl, setWsUrl] = useState<string | null>(null);
+const [fxEnabled, setFxEnabled] = useState<boolean | null>(null);
 
-// stable callback
-const handleUpdate = useCallback((update: any) => {
+const prevTickersRef = useRef<any>(null);
+
+const handleUpdate = (update: any) => {
+  prevTickersRef.current = data?.tickers;
   setData(update);
-}, []);
+};
 
+// Fetch runtime config and initial data
 useEffect(() => {
   if (!currency) return;
 
@@ -69,17 +73,19 @@ useEffect(() => {
       const config = await res.json();
 
       const enabled = config.forceStream || isFXTradingTime();
-      if (!enabled) return;
+      setFxEnabled(enabled);
 
-      setWsUrl(`${config.wsBaseUrl}/fx/currency/${currency}/`);
+      if (enabled) {
+        setWsUrl(`${config.wsBaseUrl}/fx/currency/${currency}/`);
 
-      const initialRes = await fetch(
-        `/api/fx/intraday/currency/?currency=${currency}`,
-        { cache: "no-store" }
-      );
+        const initialRes = await fetch(
+          `/api/fx/intraday/currency/?currency=${currency}`,
+          { cache: "no-store" }
+        );
 
-      if (initialRes.ok) {
-        setData(await initialRes.json());
+        if (initialRes.ok) {
+          setData(await initialRes.json());
+        }
       }
     } catch (e) {
       console.error(e);
@@ -89,11 +95,14 @@ useEffect(() => {
   fetchConfigAndData();
 }, [currency]);
 
+// WebSocket runs ONLY after wsUrl exists
 useWebSocket(wsUrl, handleUpdate);
 
-
+// ---- RETURN LOGIC ----
+if (fxEnabled === null) return <LoadingState />;
 if (!fxEnabled) return <MarketClosedView />;
 if (!data) return <LoadingState />;
+
 
 
   return (

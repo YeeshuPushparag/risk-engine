@@ -8,40 +8,35 @@ export function useWebSocket(
 ) {
   const callbackRef = useRef(onMessage);
 
-  // Always keep latest callback
-  
+  // keep ref updated so latest callback is used
   useEffect(() => {
     callbackRef.current = onMessage;
   }, [onMessage]);
 
   useEffect(() => {
-    if (!url) return;
+    if (!url) return; // early exit if no URL
 
     const ws = new WebSocket(url);
 
-    ws.onopen = () => {
-      console.log("WS connected:", url);
-    };
+    ws.onopen = () => console.log("WS connected:", url);
 
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
         callbackRef.current(data);
-      } catch (err) {
-        console.warn("WS parse error:", event.data);
+      } catch {
+        console.warn("WS parse error", event.data);
       }
     };
 
-    ws.onerror = (err) => {
-      console.error("WS error:", err);
-    };
+    ws.onerror = (err) => console.error("WS error:", err);
 
-    ws.onclose = () => {
-      console.log("WS closed:", url);
-    };
+    ws.onclose = () => console.log("WS closed:", url);
 
     return () => {
-      ws.close();
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
     };
-  }, [url]);
+  }, [url]); // url only dependency
 }
