@@ -1,4 +1,4 @@
-import os
+import time
 import pandas as pd
 import numpy as np
 import boto3
@@ -17,32 +17,53 @@ s3 = boto3.client("s3")
 # =========================
 # HELPERS
 # =========================
-def fast_parse_dates(series):
-    s = pd.to_datetime(series, errors="coerce", dayfirst=True)
-    mask = s.isna()
-    if mask.any():
-        s[mask] = pd.to_datetime(series[mask], format="%d-%m-%Y", errors="coerce")
-    return s
+
+def fast_parse_dates(series, chunk_size=250_000):
+    """
+    Chunked date parsing to avoid:
+    - Airflow heartbeat timeout
+    - Log spam
+    - CPU lockups
+    """
+    result = []
+
+    for i in range(0, len(series), chunk_size):
+        chunk = series.iloc[i:i + chunk_size]
+
+        parsed = pd.to_datetime(chunk, errors="coerce", dayfirst=True)
+        mask = parsed.isna()
+        if mask.any():
+            parsed[mask] = pd.to_datetime(
+                chunk[mask],
+                format="%d-%m-%Y",
+                errors="coerce"
+            )
+
+        result.append(parsed)
+
+        # Yield to Celery so heartbeat continues
+        time.sleep(0.01)
+
+    return pd.concat(result, ignore_index=True)
 
 
 def load_snowflake_table(name, last_month):
-    """Load data incrementally from Snowflake."""
     where_clause = ""
     params = ()
 
     if last_month is not None:
         param_date = f"{last_month.year}-{last_month.month:02d}-01"
-        where_clause = '''
+        where_clause = """
             WHERE DATE_TRUNC('MONTH', TO_DATE("date", 'YYYY-MM-DD'))
                   > DATE_TRUNC('MONTH', TO_DATE(%s, 'YYYY-MM-DD'))
-        '''
+        """
         params = (param_date,)
 
-    query = f'''
+    query = f"""
         SELECT *
         FROM "{name}"
         {where_clause}
-    '''
+    """
 
     with get_snowflake_conn() as ctx:
         cur = ctx.cursor()
@@ -51,37 +72,35 @@ def load_snowflake_table(name, last_month):
 
     return df
 
+
 def read_s3_parquet(key):
-    """Read parquet data from S3."""
     try:
         obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
         return pd.read_parquet(BytesIO(obj["Body"].read()))
     except s3.exceptions.NoSuchKey:
         return None
 
+
 def write_s3_parquet(df, key):
-    """Write parquet data to S3."""
     buf = BytesIO()
     df.to_parquet(buf, index=False)
     buf.seek(0)
     s3.put_object(Bucket=S3_BUCKET, Key=key, Body=buf)
 
 # =========================
-# AIRFLOW CALLABLE
+# AIRFLOW PIPELINE
 # =========================
+
 def run_enrich_loans_pipeline():
-    """Main pipeline function to enrich loans data."""
-    # Load base loans from S3
-    print("Loading loan_synthetic_base from S3...")
+    print("Loading base loans from S3...")
     loans = read_s3_parquet(LOAN_BASE_KEY)
     if loans is None:
         raise RuntimeError("loan_synthetic_base.parquet not found in S3")
 
-    # Parse dates
+    # Parse loan dates (chunked)
     loans["issue_date"] = fast_parse_dates(loans["issue_date"])
     loans["maturity_date"] = fast_parse_dates(loans["maturity_date"])
 
-    # Load previous enriched dataset
     prev = read_s3_parquet(OUTPUT_KEY)
 
     last_processed_month = None
@@ -90,20 +109,18 @@ def run_enrich_loans_pipeline():
         last_processed_month = prev["date"].dt.to_period("M").max()
         print(f"Last processed month: {last_processed_month}")
 
-    # Load incremental Snowflake data
-    print("Loading incremental data from Snowflake...")
+    print("Loading incremental Snowflake data...")
     fx = load_snowflake_table("FX", last_processed_month)
     bonds = load_snowflake_table("BONDS", last_processed_month)
     commod = load_snowflake_table("COMMODITY", last_processed_month)
     deriv = load_snowflake_table("DERIVATIVES", last_processed_month)
     collateral = load_snowflake_table("COLLATERAL", last_processed_month)
 
-    # Parse dates for Snowflake data
-    for df in [fx, bonds, commod, deriv, collateral]:
+    # Parse Snowflake dates (chunked)
+    for df in (fx, bonds, commod, deriv, collateral):
         df["date"] = fast_parse_dates(df["date"])
         df["month_year"] = df["date"].dt.to_period("M")
 
-    # If incremental, filter out old data
     if last_processed_month is not None:
         fx = fx[fx["month_year"] > last_processed_month]
         bonds = bonds[bonds["month_year"] > last_processed_month]
@@ -111,71 +128,82 @@ def run_enrich_loans_pipeline():
         deriv = deriv[deriv["month_year"] > last_processed_month]
         collateral = collateral[collateral["month_year"] > last_processed_month]
 
-    if fx.empty and bonds.empty and commod.empty and deriv.empty and collateral.empty:
-        print("No new data for processing.")
+    if all(df.empty for df in (fx, bonds, commod, deriv, collateral)):
+        print("No new data to process.")
         return "NO_NEW_DATA"
 
-    # Aggregation (simple log for aggregation progress)
-    print("Aggregating data by month...")
-    fx_month = fx.groupby(["ticker", "month_year"], as_index=False).agg({
-        "fx_rate": "mean",
-        "fx_volatility": "mean",
-        "carry_daily": "mean"
-    })
+    print("Aggregating monthly data...")
+    fx_month = fx.groupby(["ticker", "month_year"], as_index=False).agg(
+        fx_rate=("fx_rate", "mean"),
+        fx_volatility=("fx_volatility", "mean"),
+        carry_daily=("carry_daily", "mean"),
+    )
 
-    bonds_month = bonds.groupby(["ticker", "month_year"], as_index=False).agg({
-        "credit_spread": "mean",
-        "yield_to_maturity": "mean",
-        "credit_rating": lambda x: x.mode()[0] if len(x.mode()) else None
-    })
+    bonds_month = bonds.groupby(["ticker", "month_year"], as_index=False).agg(
+        credit_spread=("credit_spread", "mean"),
+        yield_to_maturity=("yield_to_maturity", "mean"),
+        credit_rating=("credit_rating", lambda x: x.mode().iloc[0] if not x.mode().empty else None),
+    )
 
-    commod_month = commod.groupby(["sector", "month_year"], as_index=False).agg({
-        "close": "mean",
-        "vol_20d": "mean"
-    })
+    commod_month = commod.groupby(["sector", "month_year"], as_index=False).agg(
+        close=("close", "mean"),
+        vol_20d=("vol_20d", "mean"),
+    )
 
-    deriv_month = deriv.groupby(["ticker", "month_year"], as_index=False).agg({
-        "notional": "mean",
-        "exposure_before_collateral": "mean",
-        "collateral_value": "mean",
-        "net_exposure": "mean",
-        "collateral_ratio": "mean",
-        "margin_call_flag": lambda x: 1 if (x == 1).any() else 0,
-        "pnl": "mean"
-    })
+    deriv_month = deriv.groupby(["ticker", "month_year"], as_index=False).agg(
+        notional=("notional", "mean"),
+        exposure_before_collateral=("exposure_before_collateral", "mean"),
+        collateral_value=("collateral_value", "mean"),
+        net_exposure=("net_exposure", "mean"),
+        collateral_ratio=("collateral_ratio", "mean"),
+        margin_call_flag=("margin_call_flag", lambda x: int((x == 1).any())),
+        pnl=("pnl", "mean"),
+    )
 
-    collat_month = collateral.groupby(["ticker", "month_year"], as_index=False).agg({
-        "counterparty": lambda x: '|'.join(sorted(set(map(str, x)))[:3]),
-        "funding_cost": "mean",
-        "liquidity_score": "mean",
-        "margin_call_amount": "mean"
-    })
+    collat_month = collateral.groupby(["ticker", "month_year"], as_index=False).agg(
+        counterparty=("counterparty", lambda x: "|".join(sorted(set(map(str, x)))[:3])),
+        funding_cost=("funding_cost", "mean"),
+        liquidity_score=("liquidity_score", "mean"),
+        margin_call_amount=("margin_call_amount", "mean"),
+    )
 
-    # Build Loan × Month panel
-    month_df = pd.DataFrame({"month_year": fx_month["month_year"].append(bonds_month["month_year"]).append(commod_month["month_year"]).append(deriv_month["month_year"]).append(collat_month["month_year"]).unique()})
+    # Build month panel (NO append)
+    month_years = pd.concat([
+        fx_month["month_year"],
+        bonds_month["month_year"],
+        commod_month["month_year"],
+        deriv_month["month_year"],
+        collat_month["month_year"],
+    ]).unique()
+
+    month_df = pd.DataFrame({"month_year": month_years})
     month_df["month_start"] = month_df["month_year"].dt.to_timestamp()
 
-    loans_expanded = loans.assign(key=1).merge(month_df.assign(key=1), on="key").drop("key", axis=1)
+    loans_expanded = loans.assign(key=1).merge(
+        month_df.assign(key=1), on="key"
+    ).drop("key", axis=1)
+
     loans_expanded = loans_expanded[
-        (loans_expanded["month_start"] >= loans_expanded["issue_date"]) & (loans_expanded["month_start"] <= loans_expanded["maturity_date"])
+        (loans_expanded["month_start"] >= loans_expanded["issue_date"]) &
+        (loans_expanded["month_start"] <= loans_expanded["maturity_date"])
     ]
 
     loans_expanded["date"] = loans_expanded["month_start"].dt.date
 
-    # Merge enrichments
+    time.sleep(0.1)  # heartbeat safety
+
     print("Merging enrichment data...")
-    merged = loans_expanded \
-        .merge(fx_month, on=["ticker", "month_year"], how="inner") \
-        .merge(bonds_month, on=["ticker", "month_year"], how="left") \
-        .merge(commod_month, on=["sector", "month_year"], how="left") \
-        .merge(deriv_month, on=["ticker", "month_year"], how="left") \
+    merged = (
+        loans_expanded
+        .merge(fx_month, on=["ticker", "month_year"], how="inner")
+        .merge(bonds_month, on=["ticker", "month_year"], how="left")
+        .merge(commod_month, on=["sector", "month_year"], how="left")
+        .merge(deriv_month, on=["ticker", "month_year"], how="left")
         .merge(collat_month, on=["ticker", "month_year"], how="left")
+    )
 
     merged.drop(columns=["month_year", "month_start"], inplace=True)
 
-    print(f"Merged data shape: {merged.shape}")
-
-    # Save merged data back to S3
     if prev is not None:
         merged = pd.concat([prev, merged], ignore_index=True)
         merged.drop_duplicates(subset=["loan_id", "date"], inplace=True)
