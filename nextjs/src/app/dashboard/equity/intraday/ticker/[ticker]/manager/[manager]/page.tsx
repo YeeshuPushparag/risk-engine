@@ -202,13 +202,7 @@ if (equityEnabled === false) {
 }
 
 if (!totals || !signals) {
-  return (
-    <div className="p-8 bg-[#020617] min-h-screen flex items-center justify-center">
-      <div className="text-blue-500 font-black animate-pulse tracking-widest text-xs uppercase">
-        Initialising Tactical Engine...
-      </div>
-    </div>
-  );
+ return <LoadingState />;
 }
 
 
@@ -332,5 +326,15 @@ if (!totals || !signals) {
         </Link>
       </footer>
     </main>
+  );
+}
+
+function LoadingState() {
+  return (
+      <div className="p-8 bg-[#020617] min-h-screen flex items-center justify-center">
+      <div className="text-blue-500 font-black animate-pulse tracking-widest text-xs uppercase">
+        Initialising Tactical Engine...
+      </div>
+    </div>
   );
 }

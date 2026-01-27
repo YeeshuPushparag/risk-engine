@@ -209,13 +209,7 @@ if (equityEnabled === false) {
 }
 
 if (!summary) {
-  return (
-    <div className="p-8 bg-[#020617] min-h-screen flex items-center justify-center">
-      <div className="text-blue-500 font-black animate-pulse tracking-widest text-xs uppercase italic">
-        Synchronizing Manager Data...
-      </div>
-    </div>
-  );
+  return <LoadingState />;
 }
 
 
@@ -358,5 +352,16 @@ if (!summary) {
         .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
       `}</style>
     </main>
+  );
+}
+
+
+function LoadingState() {
+  return (
+     <div className="p-8 bg-[#020617] min-h-screen flex items-center justify-center">
+      <div className="text-blue-500 font-black animate-pulse tracking-widest text-xs uppercase italic">
+        Synchronizing Manager Data...
+      </div>
+    </div>
   );
 }

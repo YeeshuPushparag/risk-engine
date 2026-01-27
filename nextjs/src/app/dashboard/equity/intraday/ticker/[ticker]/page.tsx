@@ -232,29 +232,7 @@ if (equityEnabled === false) {
 }
 
 if (!market?.close) {
-  return (
-    <div className="p-8 bg-[#020617] min-h-screen flex flex-col gap-6 font-mono">
-      <div className="flex justify-between items-center border-b border-slate-800 pb-6">
-        <div className="space-y-2">
-          <div className="flex items-center gap-2">
-            <div className="w-3 h-3 bg-blue-500 animate-ping rounded-full" />
-            <span className="text-blue-500 font-black uppercase tracking-[0.3em] text-xl">Intraday Engine</span>
-          </div>
-          <div className="h-4 w-64 bg-slate-900 animate-pulse rounded border border-slate-800" />
-        </div>
-      </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        {[1, 2, 3, 4].map((i) => (
-          <div key={i} className="h-32 bg-[#0a0f1d] border border-slate-800 rounded-2xl p-4 animate-pulse" />
-        ))}
-      </div>
-      <div className="flex-1 bg-[#0a0f1d] border border-slate-800 rounded-3xl flex items-center justify-center">
-        <div className="text-slate-800 text-[10px] uppercase tracking-[0.5em] font-black animate-pulse">
-          Establishing WebSocket Connection...
-        </div>
-      </div>
-    </div>
-  );
+  return <LoadingState />;
 }
 
   return (
@@ -456,5 +434,32 @@ if (!market?.close) {
         .animate-flash-red { animation: flash-red 1s ease-out; }
       `}</style>
     </main>
+  );
+}
+
+
+function LoadingState() {
+  return (
+     <div className="p-8 bg-[#020617] min-h-screen flex flex-col gap-6 font-mono">
+      <div className="flex justify-between items-center border-b border-slate-800 pb-6">
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <div className="w-3 h-3 bg-blue-500 animate-ping rounded-full" />
+            <span className="text-blue-500 font-black uppercase tracking-[0.3em] text-xl">Intraday Engine</span>
+          </div>
+          <div className="h-4 w-64 bg-slate-900 animate-pulse rounded border border-slate-800" />
+        </div>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        {[1, 2, 3, 4].map((i) => (
+          <div key={i} className="h-32 bg-[#0a0f1d] border border-slate-800 rounded-2xl p-4 animate-pulse" />
+        ))}
+      </div>
+      <div className="flex-1 bg-[#0a0f1d] border border-slate-800 rounded-3xl flex items-center justify-center">
+        <div className="text-slate-800 text-[10px] uppercase tracking-[0.5em] font-black animate-pulse">
+          Establishing WebSocket Connection...
+        </div>
+      </div>
+    </div>
   );
 }
