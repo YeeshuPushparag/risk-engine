@@ -15,7 +15,7 @@ s3 = boto3.client("s3")
 # =========================
 
 def fast_parse_dates(series, chunk_size=250_000):
-    """Chunked date parsing to avoid memory/heartbeat issues."""
+    """Chunked date parsing to avoid memory spikes."""
     result = []
     for i in range(0, len(series), chunk_size):
         chunk = series.iloc[i:i + chunk_size]
@@ -26,18 +26,6 @@ def fast_parse_dates(series, chunk_size=250_000):
         result.append(parsed)
         time.sleep(0.01)
     return pd.concat(result, ignore_index=True)
-
-def chunked_groupby(df, group_cols, agg_dict, chunk_size=250_000):
-    """Memory-safe groupby aggregation in chunks."""
-    chunks = []
-    for start in range(0, len(df), chunk_size):
-        chunk = df.iloc[start:start + chunk_size]
-        grouped = chunk.groupby(group_cols, as_index=False).agg(agg_dict)
-        chunks.append(grouped)
-        time.sleep(0.01)
-    combined = pd.concat(chunks, ignore_index=True)
-    # Re-aggregate to merge same groups across chunks
-    return combined.groupby(group_cols, as_index=False).agg(agg_dict)
 
 def read_s3_parquet(key):
     try:
@@ -53,7 +41,7 @@ def write_s3_parquet(df, key):
     s3.put_object(Bucket=S3_BUCKET, Key=key, Body=buf)
 
 def load_snowflake_table(name, last_month, chunk_size=500_000):
-    """Load Snowflake table in chunks to avoid memory spikes."""
+    """Load Snowflake table in chunks."""
     where_clause = ""
     params = ()
     if last_month is not None:
@@ -93,6 +81,7 @@ def run_enrich_loans_pipeline():
     loans["issue_date"] = fast_parse_dates(loans["issue_date"])
     loans["maturity_date"] = fast_parse_dates(loans["maturity_date"])
 
+    # Load previously processed data to find last month
     prev = read_s3_parquet(OUTPUT_KEY)
     last_processed_month = None
     if prev is not None:
@@ -107,13 +96,15 @@ def run_enrich_loans_pipeline():
     deriv = load_snowflake_table("DERIVATIVES", last_processed_month)
     collateral = load_snowflake_table("COLLATERAL", last_processed_month)
 
-    # Chunked date parsing
+    # =========================
+    # Step 1: Parse dates and create month column
+    # =========================
     for df in [fx, bonds, commod, deriv, collateral]:
         if not df.empty:
             df["date"] = fast_parse_dates(df["date"])
             df["month_year"] = df["date"].dt.to_period("M")
 
-    # Filter already processed months
+    # Filter out already processed months
     if last_processed_month is not None:
         fx = fx[fx["month_year"] > last_processed_month]
         bonds = bonds[bonds["month_year"] > last_processed_month]
@@ -125,33 +116,49 @@ def run_enrich_loans_pipeline():
         print("No new data to process.")
         return "NO_NEW_DATA"
 
-    print("Aggregating monthly data (chunked)...")
-    fx_month = chunked_groupby(fx, ["ticker", "month_year"],
-                               {"fx_rate": "mean", "fx_volatility": "mean", "carry_daily": "mean"})
-    bonds_month = chunked_groupby(bonds, ["ticker", "month_year"],
-                                  {"credit_spread": "mean",
-                                   "yield_to_maturity": "mean",
-                                   "credit_rating": lambda x: x.mode().iloc[0] if not x.mode().empty else None})
-    commod_month = chunked_groupby(commod, ["sector", "month_year"],
-                                   {"close": "mean", "vol_20d": "mean"})
-    deriv_month = chunked_groupby(deriv, ["ticker", "month_year"],
-                                  {"notional": "mean", "exposure_before_collateral": "mean",
-                                   "collateral_value": "mean", "net_exposure": "mean",
-                                   "collateral_ratio": "mean",
-                                   "margin_call_flag": lambda x: int((x==1).any()),
-                                   "pnl": "mean"})
-    collat_month = chunked_groupby(collateral, ["ticker", "month_year"],
-                                   {"counterparty": lambda x: "|".join(sorted(set(map(str, x)))[:3]),
-                                    "funding_cost": "mean",
-                                    "liquidity_score": "mean",
-                                    "margin_call_amount": "mean"})
+    # =========================
+    # Step 2: Aggregate daily data to monthly to reduce memory
+    # =========================
+    print("Aggregating daily data to monthly (memory-safe)...")
+
+    fx_month = fx.groupby(["ticker", "month_year"], as_index=False).agg({
+        "fx_rate": "mean", "fx_volatility": "mean", "carry_daily": "mean"
+    })
+
+    bonds_month = bonds.groupby(["ticker", "month_year"], as_index=False).agg({
+        "credit_spread": "mean",
+        "yield_to_maturity": "mean",
+        "credit_rating": lambda x: x.mode().iloc[0] if not x.mode().empty else None
+    })
+
+    commod_month = commod.groupby(["sector", "month_year"], as_index=False).agg({
+        "close": "mean", "vol_20d": "mean"
+    })
+
+    deriv_month = deriv.groupby(["ticker", "month_year"], as_index=False).agg({
+        "notional": "mean",
+        "exposure_before_collateral": "mean",
+        "collateral_value": "mean",
+        "net_exposure": "mean",
+        "collateral_ratio": "mean",
+        "margin_call_flag": lambda x: int((x==1).any()),
+        "pnl": "mean"
+    })
+
+    collat_month = collateral.groupby(["ticker", "month_year"], as_index=False).agg({
+        "counterparty": lambda x: "|".join(sorted(set(map(str, x)))[:3]),
+        "funding_cost": "mean",
+        "liquidity_score": "mean",
+        "margin_call_amount": "mean"
+    })
 
     # =========================
-    # Safe loans × month expansion (chunked)
+    # Step 3: Expand loans by months only (monthly expansion, not daily)
     # =========================
     month_years = pd.concat([fx_month["month_year"], bonds_month["month_year"],
                              commod_month["month_year"], deriv_month["month_year"],
-                             collat_month["month_year"]]).unique()
+                             collat_month["month_year"]]).drop_duplicates()
+
     month_df = pd.DataFrame({"month_year": month_years})
     month_df["month_start"] = month_df["month_year"].dt.to_timestamp()
 
@@ -175,12 +182,17 @@ def run_enrich_loans_pipeline():
     loans_expanded["date"] = loans_expanded["month_start"].dt.date
 
     # =========================
-    # Safe merging (chunked)
+    # Step 4: Merge aggregated monthly data safely in chunks
     # =========================
     merged = loans_expanded.copy()
-    merge_pairs = [(fx_month, ["ticker"]), (bonds_month, ["ticker"]),
-                   (commod_month, ["sector"]), (deriv_month, ["ticker"]),
-                   (collat_month, ["ticker"])]
+    merge_pairs = [
+        (fx_month, ["ticker"]),
+        (bonds_month, ["ticker"]),
+        (commod_month, ["sector"]),
+        (deriv_month, ["ticker"]),
+        (collat_month, ["ticker"])
+    ]
+
     for df, on_cols in merge_pairs:
         if not df.empty:
             merged_chunks = []
@@ -194,6 +206,7 @@ def run_enrich_loans_pipeline():
 
     merged.drop(columns=["month_year", "month_start"], inplace=True)
 
+    # Append previous data if exists
     if prev is not None:
         merged = pd.concat([prev, merged], ignore_index=True)
         merged.drop_duplicates(subset=["loan_id", "date"], inplace=True)
