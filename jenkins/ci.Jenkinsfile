@@ -138,39 +138,68 @@ pipeline {
       }
     }
 
-    stage('Update Helm Image Tags') {
-      steps {
-        script {
-          if (env.BUILD_IMAGES == 'true') {
-            container('jnlp') {
-              withCredentials([usernamePassword(
-                credentialsId: 'github-https',
-                usernameVariable: 'GIT_USER',
-                passwordVariable: 'GITHUB_TOKEN'
-              )]) {
-                sh '''
-                  set -e
-                  git config user.name "Pushparag"
-                  git config user.email "pushparagyeeshu@gmail.com"
-                  git remote set-url origin https://${GIT_USER}:${GITHUB_TOKEN}@github.com/YeeshuPushparag/risk-engine.git
-                  git fetch origin
-                  git checkout main
-                  git reset --hard origin/main || true
+stage('Update Helm Image Tags') {
+  steps {
+    script {
+      if (env.BUILD_IMAGES == 'true') {
+        container('jnlp') {
+          withCredentials([usernamePassword(
+            credentialsId: 'github-https',
+            usernameVariable: 'GIT_USER',
+            passwordVariable: 'GITHUB_TOKEN'
+          )]) {
+            sh '''
+              set -e
+              git config user.name "Pushparag"
+              git config user.email "pushparagyeeshu@gmail.com"
+              git remote set-url origin https://${GIT_USER}:${GITHUB_TOKEN}@github.com/YeeshuPushparag/risk-engine.git
+              git fetch origin
+              git checkout main
+              git reset --hard origin/main || true
 
-                  sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/*/values.yaml
+              # Update Helm charts based on app changes
 
-                  git add helm/*/values.yaml
-                  git commit -m "deploy: update image tags to ${IMAGE_TAG} [skip ci]" || true
-                  git push origin main
-                '''
-              }
-            }
-          } else {
-            echo "Skipping Helm update: no app changes detected."
+              CHARTS_UPDATED=""
+
+              if [ "${BUILD_AIRFLOW}" = "true" ]; then
+                sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/airflow/values.yaml
+                CHARTS_UPDATED="${CHARTS_UPDATED} helm/airflow/values.yaml"
+              fi
+
+              if [ "${BUILD_DJANGO}" = "true" ]; then
+                sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/django/values.yaml
+                CHARTS_UPDATED="${CHARTS_UPDATED} helm/django/values.yaml"
+              fi
+
+              # NextJS updates its own chart
+              if [ "${BUILD_NEXTJS}" = "true" ]; then
+                sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/nextjs/values.yaml
+                CHARTS_UPDATED="${CHARTS_UPDATED} helm/nextjs/values.yaml"
+              fi
+
+              # Producer or Spark changes → streaming chart
+              if [ "${BUILD_PRODUCERS}" = "true" ] || [ "${BUILD_SPARK}" = "true" ]; then
+                sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/streaming/values.yaml
+                CHARTS_UPDATED="${CHARTS_UPDATED} helm/streaming/values.yaml"
+              fi
+
+              # Only commit changed charts
+              if [ ! -z "${CHARTS_UPDATED}" ]; then
+                git add ${CHARTS_UPDATED}
+                git commit -m "deploy: update image tags to ${IMAGE_TAG} [skip ci]" || true
+                git push origin main
+              else
+                echo "No Helm charts to update."
+              fi
+            '''
           }
         }
+      } else {
+        echo "Skipping Helm update: no app changes detected."
       }
     }
+  }
+}
 
   }
 }

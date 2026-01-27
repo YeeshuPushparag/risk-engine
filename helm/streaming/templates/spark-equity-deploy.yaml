@@ -4,7 +4,7 @@ metadata:
   name: spark-equity
   namespace: streaming
 spec:
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: spark-equity

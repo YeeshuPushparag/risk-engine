@@ -292,9 +292,9 @@ function isFXTradingTime() {
   const minute = Number(parts.find(p => p.type === "minute")!.value);
 
   const totalMin = hour * 60 + minute;
-  const CLOSE_MIN = 17 * 60 + 2; // 5:02 PM ET
+  const CLOSE_MIN = 17 * 60 + 3; // 5:03 PM ET
 
-  // FX market: Sun 5:00 PM → Fri 5:02 PM ET
+  // FX market: Sun 5:00 PM → Fri 5:03 PM ET
   if (weekday === "Sun" && totalMin >= 17 * 60) return true;
   if (weekday !== "Sat" && weekday !== "Sun" && weekday !== "Fri") return true;
   if (weekday === "Fri" && totalMin <= CLOSE_MIN) return true;

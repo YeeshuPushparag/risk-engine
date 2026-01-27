@@ -6,7 +6,7 @@ from pendulum import timezone
 US_TZ = timezone("America/New_York")
 
 
-# === Lazy imports inside callables ===
+# == Lazy imports inside callables ==
 def run_feature_update():
     from pipelines.daily.market_features_s3 import update_market_features
     df, msg = update_market_features()

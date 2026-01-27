@@ -15,9 +15,9 @@ KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092")
 
 running = True
 
-# ==================================================
+# =================================================
 # Graceful Stop (for Kubernetes / Docker)
-# ==================================================
+# =================================================
 def stop_signal(signum, frame):
     global running
     print("Stop signal received. Stopping Equity Producer...")
@@ -26,9 +26,9 @@ def stop_signal(signum, frame):
 signal.signal(signal.SIGTERM, stop_signal)
 signal.signal(signal.SIGINT, stop_signal)
 
-# ==================================================
+# =================================================
 # Load tickers from S3
-# ==================================================
+# =================================================
 s3 = boto3.client("s3")
 bucket_name = "daily-equity-portfolio"
 key = "historical-equity/tickers50.csv"

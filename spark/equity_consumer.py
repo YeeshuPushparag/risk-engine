@@ -10,9 +10,9 @@ from pyspark.sql.functions import col, from_json, explode
 from pyspark.sql.types import StructType, StructField, StringType, FloatType, ArrayType
 import redis
 
-# =====================================================
+# =================================================
 # REDIS
-# =====================================================
+# =================================================
 redis_client = redis.Redis(
     host=os.getenv("REDIS_HOST"),  
     port=int(os.getenv("REDIS_PORT", 6379)),

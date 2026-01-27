@@ -4,7 +4,7 @@ metadata:
   name: equity-producer
   namespace: streaming
 spec:
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: equity-producer
