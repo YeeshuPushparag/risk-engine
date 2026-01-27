@@ -9,11 +9,15 @@ def run_enrich_loans():
     from pipelines.monthly.enrich_loans_pipeline import run_enrich_loans_pipeline
     return run_enrich_loans_pipeline() or "OK"
 
+def run_loans_model():
+    from pipelines.monthly.loans_model_pipeline import run_loans_model_pipeline
+    return run_loans_model_pipeline() or "OK"
+
 default_args = {
     "owner": "airflow",
-    "retries": 1,
+    "retries": 2,
     "retry_delay": timedelta(minutes=5),
-    "execution_timeout": timedelta(minutes=10),  # Give it 10 minutes
+    "execution_timeout": timedelta(minutes=15),  # Increased to 15 minutes
 }
 
 with DAG(
@@ -29,8 +33,8 @@ with DAG(
     enrich_loans = PythonOperator(
         task_id="enrich_loans_dataset",
         python_callable=run_enrich_loans,
-        execution_timeout=timedelta(minutes=10),  # 10 minutes total
-        task_concurrency=1,  # Run one at a time
+        execution_timeout=timedelta(minutes=15),  # 15 minutes
+        pool="high_memory_pool",  # Optional: use a dedicated pool
     )
 
     loans_model = PythonOperator(
