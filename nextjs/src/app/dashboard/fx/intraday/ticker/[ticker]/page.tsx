@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import {
@@ -87,31 +87,29 @@ function MetricCard({
 
 /* ---------------- MAIN PAGE ---------------- */
 export default function TickerPage() {
-const { ticker } = useParams();
+  const { ticker } = useParams();
+  const [data, setData] = useState<any>(null);
+  const [wsUrl, setWsUrl] = useState<string | null>(null);
+  const [fxEnabled, setFxEnabled] = useState<boolean | null>(null); 
 
-const [data, setData] = useState<any>(null);
-const [wsUrl, setWsUrl] = useState<string | null>(null);
-const [fxEnabled, setFxEnabled] = useState<boolean | null>(null);
+  const handleUpdate = (update: any) => {
+    setData(update);
+  };
 
-const handleUpdate = (update: any) => {
-  setData(update);
-};
+  useEffect(() => {
+    if (!ticker) return;
 
-// Fetch runtime config
-useEffect(() => {
-  if (!ticker) return;
+    async function fetchConfigAndData() {
+      try {
+        const res = await fetch("/api/config");
+        const config = await res.json();
 
-  async function fetchConfigAndData() {
-    try {
-      const res = await fetch("/api/config");
-      const config = await res.json();
+        const enabled = config.forceStream || isFXTradingTime();
+        setFxEnabled(enabled);
 
-      const enabled = config.forceStream || isFXTradingTime();
-      setFxEnabled(enabled);
+        if (!enabled) return;
 
-      if (enabled) {
-        const url = `${config.wsBaseUrl}/fx/ticker/${ticker}/`;
-        setWsUrl(url);
+        setWsUrl(`${config.wsBaseUrl}/fx/ticker/${ticker}/`);
 
         const initialRes = await fetch(
           `/api/fx/intraday/ticker?ticker=${ticker}`,
@@ -119,27 +117,22 @@ useEffect(() => {
         );
 
         if (initialRes.ok) {
-          setData(await initialRes.json());
+          handleUpdate(await initialRes.json());
         }
+      } catch (e) {
+        console.error("Failed to load config or data:", e);
       }
-    } catch (e) {
-      console.error("Failed to load config or data:", e);
     }
-  }
 
-  fetchConfigAndData();
-}, [ticker]);
+    fetchConfigAndData();
+  }, [ticker]);
 
-// WebSocket runs ONLY when wsUrl exists
-useWebSocket(wsUrl, handleUpdate);
+  useWebSocket(wsUrl, handleUpdate);
 
-/* ---- SINGLE, CLEAR RETURN LOGIC ---- */
-if (fxEnabled === null) return <LoadingState />;
-
-if (!fxEnabled) return <MarketClosedView />;
-
-if (!data) return <LoadingState />;
-
+  // ---- RETURN LOGIC (FIXED) ----
+  if (fxEnabled === null) return <LoadingState />;
+  if (fxEnabled === false) return <MarketClosedView />;
+  if (!data) return <LoadingState />;
 
 
   return (

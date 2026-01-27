@@ -27,7 +27,6 @@ const formatCurrency = (v?: number) => {
   const sign = v < 0 ? "-" : "";
 
   const format = (n: number, decimals: number) => {
-    // Remove trailing zeros and decimal point if not needed
     const s = n.toFixed(decimals);
     return s.endsWith(".00") ? s.slice(0, -3) : s;
   };
@@ -38,7 +37,6 @@ const formatCurrency = (v?: number) => {
   if (abs >= 1e3) return `${sign}$${format(abs / 1e3, 0)}K`;
   return `${sign}$${abs.toFixed(2)}`;
 };
-
 
 const pctFmt = (v?: number | null) => {
   if (v == null) return "—";
@@ -116,17 +114,40 @@ export default function TickerIntradayPage() {
 const { ticker: raw } = useParams();
 const ticker = typeof raw === "string" ? raw.toUpperCase() : "";
 
-const [totals, setTotals] = useState<any>(null);
-const [market, setMarket] = useState<any>(null);
-const [fundamentals, setFundamentals] = useState<any>(null);
+const [totals, setTotals] = useState<any>({});
+const [market, setMarket] = useState<any>({});
+const [fundamentals, setFundamentals] = useState<any>({});
 const [alerts, setAlerts] = useState<any[]>([]);
 const [managers, setManagers] = useState<any[]>([]);
 
+// FX-style change
 const [equityEnabled, setEquityEnabled] = useState<boolean | null>(null);
 const [wsBaseUrl, setWsBaseUrl] = useState<string | null>(null);
 
+function isMarketTradingTime() {
+  const now = new Date();
+
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    hour: "numeric",
+    minute: "numeric",
+    hour12: false,
+  }).formatToParts(now);
+
+  const weekday = parts.find(p => p.type === "weekday")!.value;
+  const hour = Number(parts.find(p => p.type === "hour")!.value);
+  const minute = Number(parts.find(p => p.type === "minute")!.value);
+
+  const totalMin = hour * 60 + minute;
+  const CLOSE_MIN = 960 + 2;
+
+  if (weekday === "Sat" || weekday === "Sun") return false;
+  return totalMin >= 570 && totalMin <= CLOSE_MIN;
+}
+
 useEffect(() => {
-  async function fetchConfigAndData() {
+  async function fetchConfig() {
     try {
       const res = await fetch("/api/config");
       const config = await res.json();
@@ -134,33 +155,43 @@ useEffect(() => {
       const enabled = config.forceStream || isMarketTradingTime();
       setEquityEnabled(enabled);
 
-      if (enabled) {
-        setWsBaseUrl(config.wsBaseUrl);
+      if (!enabled) return;
 
-        const dataRes = await fetch(
-          `/api/equity/intraday/ticker?ticker=${ticker}`,
-          { cache: "no-store" }
-        );
-
-        if (dataRes.ok) {
-          const json = await dataRes.json();
-          setTotals(json.totals);
-          setMarket(json.market);
-          setFundamentals(json.fundamentals);
-          setAlerts(json.alerts || []);
-          setManagers(json.manager_breakdown || []);
-        }
-      }
+      setWsBaseUrl(config.wsBaseUrl);
     } catch (e) {
       console.error(e);
     }
   }
 
-  if (ticker) fetchConfigAndData();
-}, [ticker]);
+  fetchConfig();
+}, []);
+
+useEffect(() => {
+  if (!equityEnabled || !ticker) return;
+  async function load() {
+    try {
+      const res = await fetch(
+        `/api/equity/intraday/ticker?ticker=${ticker}`,
+        { cache: "no-store" }
+      );
+      if (!res.ok) return;
+      const json = await res.json();
+      setTotals(json.totals || {});
+      setMarket(json.market || {});
+      setFundamentals(json.fundamentals || {});
+      setAlerts(json.alerts || []);
+      setManagers(json.manager_breakdown || []);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  load();
+}, [ticker, equityEnabled]);
 
 useWebSocket(
-  wsBaseUrl && ticker ? `${wsBaseUrl}/equity/ticker/${ticker}/` : null,
+  equityEnabled && wsBaseUrl && ticker
+    ? `${wsBaseUrl}/equity/ticker/${ticker}/`
+    : null,
   (data) => {
     setTotals(data.totals);
     setMarket(data.market);
@@ -170,19 +201,24 @@ useWebSocket(
   }
 );
 
-// ---- RETURN LOGIC (SAME AS OVERVIEW) ----
-if (equityEnabled === null) return <LoadingState />;
+// FX-style return logic
+if (equityEnabled === null) {
+  return <LoadingState />;
+}
 
 if (equityEnabled === false) {
   return (
     <div className="min-h-screen bg-[#020617] flex items-center justify-center p-12 text-center">
       <div className="space-y-4 max-w-md">
         <Clock className="w-12 h-12 text-slate-700 mx-auto" />
-        <h2 className="text-xl font-black text-white uppercase tracking-tight">
-          Market Closed
-        </h2>
+        <h2 className="text-xl font-black text-white uppercase tracking-tight">Market Closed</h2>
         <p className="text-slate-400 text-sm leading-relaxed">
-          U.S. equity markets operate Monday–Friday, 9:30 AM to 4:00 PM (EST).
+          U.S. equity markets operate <strong>Monday through Friday</strong>,
+          from <strong>9:30 AM to 4:00 PM (EST)</strong>.
+          <br />
+          <span className="block mt-1 text-slate-500">
+            This corresponds to <strong>8:00 PM – 2:30 AM (IST)</strong>.
+          </span>
         </p>
         <Link
           href="/dashboard/equity/daily"
@@ -195,31 +231,31 @@ if (equityEnabled === false) {
   );
 }
 
-
-
-  if (!market?.close) {
-    return (
-      <div className="p-8 bg-[#020617] min-h-screen flex flex-col gap-6 font-mono">
-        <div className="flex justify-between items-center border-b border-slate-800 pb-6">
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              <div className="w-3 h-3 bg-blue-500 animate-ping rounded-full" />
-              <span className="text-blue-500 font-black uppercase tracking-[0.3em] text-xl">Intraday Engine</span>
-            </div>
-            <div className="h-4 w-64 bg-slate-900 animate-pulse rounded border border-slate-800" />
+if (!market?.close) {
+  return (
+    <div className="p-8 bg-[#020617] min-h-screen flex flex-col gap-6 font-mono">
+      <div className="flex justify-between items-center border-b border-slate-800 pb-6">
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <div className="w-3 h-3 bg-blue-500 animate-ping rounded-full" />
+            <span className="text-blue-500 font-black uppercase tracking-[0.3em] text-xl">Intraday Engine</span>
           </div>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="h-32 bg-[#0a0f1d] border border-slate-800 rounded-2xl p-4 animate-pulse" />
-          ))}
-        </div>
-        <div className="flex-1 bg-[#0a0f1d] border border-slate-800 rounded-3xl flex items-center justify-center">
-            <div className="text-slate-800 text-[10px] uppercase tracking-[0.5em] font-black animate-pulse">Establishing WebSocket Connection...</div>
+          <div className="h-4 w-64 bg-slate-900 animate-pulse rounded border border-slate-800" />
         </div>
       </div>
-    );
-  }
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        {[1, 2, 3, 4].map((i) => (
+          <div key={i} className="h-32 bg-[#0a0f1d] border border-slate-800 rounded-2xl p-4 animate-pulse" />
+        ))}
+      </div>
+      <div className="flex-1 bg-[#0a0f1d] border border-slate-800 rounded-3xl flex items-center justify-center">
+        <div className="text-slate-800 text-[10px] uppercase tracking-[0.5em] font-black animate-pulse">
+          Establishing WebSocket Connection...
+        </div>
+      </div>
+    </div>
+  );
+}
 
   return (
     <main className="min-h-screen bg-[#020617] text-slate-300 p-6 lg:p-12 space-y-10">

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback} from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useWebSocket } from "@/hooks/useWebSocket";
@@ -50,32 +50,30 @@ function MetricCard({ label, value, trigger }: { label: string; value: React.Rea
 
 /* ---------------- MAIN PAGE ---------------- */
 export default function CurrencyPage() {
-const { currency } = useParams();
+  const { currency } = useParams();
+  const [data, setData] = useState<any>(null);
+  const [wsUrl, setWsUrl] = useState<string | null>(null);
+  const [fxEnabled, setFxEnabled] = useState<boolean | null>(null); 
+  const prevTickersRef = useRef<any>(null);
 
-const [data, setData] = useState<any>(null);
-const [wsUrl, setWsUrl] = useState<string | null>(null);
-const [fxEnabled, setFxEnabled] = useState<boolean | null>(null);
+  const handleUpdate = (update: any) => {
+    prevTickersRef.current = data?.tickers;
+    setData(update);
+  };
 
-const prevTickersRef = useRef<any>(null);
+  useEffect(() => {
+    if (!currency) return;
 
-const handleUpdate = (update: any) => {
-  prevTickersRef.current = data?.tickers;
-  setData(update);
-};
+    async function fetchConfigAndData() {
+      try {
+        const res = await fetch("/api/config");
+        const config = await res.json();
 
-// Fetch runtime config and initial data
-useEffect(() => {
-  if (!currency) return;
+        const enabled = config.forceStream || isFXTradingTime();
+        setFxEnabled(enabled);
 
-  async function fetchConfigAndData() {
-    try {
-      const res = await fetch("/api/config");
-      const config = await res.json();
+        if (!enabled) return;
 
-      const enabled = config.forceStream || isFXTradingTime();
-      setFxEnabled(enabled);
-
-      if (enabled) {
         setWsUrl(`${config.wsBaseUrl}/fx/currency/${currency}/`);
 
         const initialRes = await fetch(
@@ -84,26 +82,22 @@ useEffect(() => {
         );
 
         if (initialRes.ok) {
-          setData(await initialRes.json());
+          handleUpdate(await initialRes.json());
         }
+      } catch (e) {
+        console.error(e);
       }
-    } catch (e) {
-      console.error(e);
     }
-  }
 
-  fetchConfigAndData();
-}, [currency]);
+    fetchConfigAndData();
+  }, [currency]);
 
-// WebSocket runs ONLY after wsUrl exists
-useWebSocket(wsUrl, handleUpdate);
+  useWebSocket(wsUrl, handleUpdate);
 
-// ---- RETURN LOGIC ----
-if (fxEnabled === null) return <LoadingState />;
-if (!fxEnabled) return <MarketClosedView />;
-if (!data) return <LoadingState />;
-
-
+  // ---- RETURN LOGIC (CONSISTENT) ----
+  if (fxEnabled === null) return <LoadingState />;
+  if (fxEnabled === false) return <MarketClosedView />;
+  if (!data) return <LoadingState />;
 
   return (
     <main className="min-h-screen bg-[#020617] text-slate-300 p-4 sm:p-6 lg:p-12 space-y-8 sm:space-y-10">

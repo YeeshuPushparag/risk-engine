@@ -112,6 +112,7 @@ const [tickers, setTickers] = useState<any[]>([]);
 const [managers, setManagers] = useState<any[]>([]);
 const [timeStamp, setTimestamp] = useState("");
 
+// FX-style change
 const [equityEnabled, setEquityEnabled] = useState<boolean | null>(null);
 const [wsBaseUrl, setWsBaseUrl] = useState<string | null>(null);
 
@@ -125,6 +126,28 @@ const updateState = (data: any) => {
   setManagers(data.top_managers_agg);
 };
 
+function isMarketTradingTime() {
+  const now = new Date();
+
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    hour: "numeric",
+    minute: "numeric",
+    hour12: false,
+  }).formatToParts(now);
+
+  const weekday = parts.find(p => p.type === "weekday")!.value;
+  const hour = Number(parts.find(p => p.type === "hour")!.value);
+  const minute = Number(parts.find(p => p.type === "minute")!.value);
+
+  const totalMin = hour * 60 + minute;
+  const CLOSE_MIN = 960 + 2;
+
+  if (weekday === "Sat" || weekday === "Sun") return false;
+  return totalMin >= 570 && totalMin <= CLOSE_MIN;
+}
+
 useEffect(() => {
   async function fetchConfigAndData() {
     try {
@@ -134,18 +157,12 @@ useEffect(() => {
       const enabled = config.forceStream || isMarketTradingTime();
       setEquityEnabled(enabled);
 
-      if (enabled) {
-        setWsBaseUrl(config.wsBaseUrl);
+      if (!enabled) return;
 
-        const dataRes = await fetch(
-          "/api/equity/intraday/overview",
-          { cache: "no-store" }
-        );
+      setWsBaseUrl(config.wsBaseUrl);
 
-        if (dataRes.ok) {
-          updateState(await dataRes.json());
-        }
-      }
+      const dataRes = await fetch("/api/equity/intraday/overview", { cache: "no-store" });
+      if (dataRes.ok) updateState(await dataRes.json());
     } catch (e) {
       console.error("Fetch failed", e);
     }
@@ -154,28 +171,23 @@ useEffect(() => {
   fetchConfigAndData();
 }, []);
 
-// WebSocket runs ONLY when base URL exists
+// WebSocket unchanged
 useWebSocket(
-  wsBaseUrl ? `${wsBaseUrl}/equity/overview/` : null,
+  equityEnabled && wsBaseUrl ? `${wsBaseUrl}/equity/overview/` : null,
   updateState
 );
 
-// ---- RETURN LOGIC ----
+// FX-style return logic
 if (equityEnabled === null) return <LoadingState />;
 
-if (!equityEnabled) {
+if (equityEnabled === false) {
   return (
     <div className="min-h-screen bg-[#020617] flex items-center justify-center p-12 text-center">
       <div className="space-y-4 max-w-md">
         <Clock className="w-12 h-12 text-slate-700 mx-auto" />
         <h2 className="text-xl font-black text-white uppercase tracking-tight">Market Closed</h2>
-        <p className="text-slate-400 text-sm leading-relaxed">
-          U.S. equity markets operate Mon-Fri, 9:30 AM to 4:00 PM (EST).
-        </p>
-        <Link
-          href="/dashboard/equity/daily"
-          className="inline-block mt-4 text-blue-500 text-[10px] font-black uppercase tracking-widest border border-blue-500/30 px-6 py-2 rounded-lg hover:bg-blue-500/10 transition"
-        >
+        <p className="text-slate-400 text-sm leading-relaxed">U.S. equity markets operate Mon-Fri, 9:30 AM to 4:00 PM (EST).</p>
+        <Link href="/dashboard/equity/daily" className="inline-block mt-4 text-blue-500 text-[10px] font-black uppercase tracking-widest border border-blue-500/30 px-6 py-2 rounded-lg hover:bg-blue-500/10 transition">
           ← View Daily Equity Data
         </Link>
       </div>

@@ -104,6 +104,7 @@ const [holdings, setHoldings] = useState<any[]>([]);
 const [alerts, setAlerts] = useState<any[]>([]);
 const [timeStamp, setTimestamp] = useState("");
 
+// FX-style change
 const [equityEnabled, setEquityEnabled] = useState<boolean | null>(null);
 const [wsBaseUrl, setWsBaseUrl] = useState<string | null>(null);
 
@@ -129,9 +130,8 @@ function isMarketTradingTime() {
   return totalMin >= 570 && totalMin <= CLOSE_MIN;
 }
 
-// -------- CONFIG + INITIAL DATA --------
 useEffect(() => {
-  async function fetchConfigAndData() {
+  async function fetchConfig() {
     try {
       const res = await fetch("/api/config");
       const config = await res.json();
@@ -139,33 +139,40 @@ useEffect(() => {
       const enabled = config.forceStream || isMarketTradingTime();
       setEquityEnabled(enabled);
 
-      if (enabled) {
-        setWsBaseUrl(config.wsBaseUrl);
+      if (!enabled) return;
 
-        const dataRes = await fetch(
-          `/api/equity/intraday/manager?manager=${rawManager}`,
-          { cache: "no-store" }
-        );
-
-        if (dataRes.ok) {
-          const json = await dataRes.json();
-          setSummary(json.totals);
-          setHoldings(json.holdings);
-          setAlerts(json.alerts || []);
-          setTimestamp(json.timestamp);
-        }
-      }
+      setWsBaseUrl(config.wsBaseUrl);
     } catch (e) {
       console.error(e);
     }
   }
 
-  if (rawManager) fetchConfigAndData();
-}, [rawManager]);
+  fetchConfig();
+}, []);
 
-// -------- WEBSOCKET --------
+useEffect(() => {
+  if (!equityEnabled || !rawManager) return;
+  async function load() {
+    try {
+      const res = await fetch(
+        `/api/equity/intraday/manager?manager=${rawManager}`,
+        { cache: "no-store" }
+      );
+      if (!res.ok) return;
+      const json = await res.json();
+      setSummary(json.totals);
+      setHoldings(json.holdings);
+      setAlerts(json.alerts || []);
+      setTimestamp(json.timestamp);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  load();
+}, [rawManager, equityEnabled]);
+
 useWebSocket(
-  wsBaseUrl && rawManager
+  equityEnabled && wsBaseUrl && rawManager
     ? `${wsBaseUrl}/equity/manager/${rawManager}/`
     : null,
   (data) => {
@@ -176,15 +183,9 @@ useWebSocket(
   }
 );
 
-// -------- RETURN LOGIC (CONSISTENT EVERYWHERE) --------
+// FX-style return logic
 if (equityEnabled === null) {
-  return (
-    <div className="p-8 bg-[#020617] min-h-screen flex items-center justify-center">
-      <div className="text-blue-500 font-black animate-pulse tracking-widest text-xs uppercase italic">
-        Synchronizing Manager Data...
-      </div>
-    </div>
-  );
+  return <LoadingState />;
 }
 
 if (equityEnabled === false) {
@@ -192,9 +193,7 @@ if (equityEnabled === false) {
     <div className="min-h-screen bg-[#020617] flex items-center justify-center p-12 text-center">
       <div className="space-y-4 max-w-md">
         <Clock className="w-12 h-12 text-slate-700 mx-auto" />
-        <h2 className="text-xl font-black text-white uppercase tracking-tight">
-          Market Closed
-        </h2>
+        <h2 className="text-xl font-black text-white uppercase tracking-tight">Market Closed</h2>
         <p className="text-slate-400 text-sm leading-relaxed">
           U.S. equity markets operate Mon–Fri, 9:30 AM to 4:00 PM (EST).
         </p>

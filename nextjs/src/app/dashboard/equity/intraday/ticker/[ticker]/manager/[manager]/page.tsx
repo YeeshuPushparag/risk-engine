@@ -88,7 +88,7 @@ function TacticalMetric({ label, value, numericValue }: any) {
 
 /* ================= MAIN PAGE ================= */
 export default function TickerManagerIntradayPage() {
-const params = useParams();
+ const params = useParams();
 const ticker = String(params.ticker).toUpperCase();
 const manager = decodeURIComponent(String(params.manager));
 
@@ -97,6 +97,7 @@ const [totals, setTotals] = useState<any>(null);
 const [signals, setSignals] = useState<any>(null);
 const [alerts, setAlerts] = useState<any[]>([]);
 
+// FX-style change
 const [equityEnabled, setEquityEnabled] = useState<boolean | null>(null);
 const [wsBaseUrl, setWsBaseUrl] = useState<string | null>(null);
 
@@ -122,9 +123,8 @@ function isMarketTradingTime() {
   return totalMin >= 570 && totalMin <= CLOSE_MIN;
 }
 
-// -------- CONFIG + INITIAL DATA --------
 useEffect(() => {
-  async function fetchConfigAndData() {
+  async function fetchConfig() {
     try {
       const res = await fetch("/api/config");
       const config = await res.json();
@@ -132,33 +132,40 @@ useEffect(() => {
       const enabled = config.forceStream || isMarketTradingTime();
       setEquityEnabled(enabled);
 
-      if (enabled) {
-        setWsBaseUrl(config.wsBaseUrl);
+      if (!enabled) return;
 
-        const dataRes = await fetch(
-          `/api/equity/intraday/ticker_manager?ticker=${ticker}&manager=${manager}`,
-          { cache: "no-store" }
-        );
-
-        if (dataRes.ok) {
-          const json = await dataRes.json();
-          setTimestamp(json.timestamp);
-          setTotals(json.totals);
-          setSignals(json.signals);
-          setAlerts(json.alerts ?? []);
-        }
-      }
+      setWsBaseUrl(config.wsBaseUrl);
     } catch (e) {
       console.error(e);
     }
   }
 
-  if (ticker && manager) fetchConfigAndData();
-}, [ticker, manager]);
+  fetchConfig();
+}, []);
 
-// -------- WEBSOCKET --------
+useEffect(() => {
+  if (!equityEnabled || !ticker || !manager) return;
+  async function load() {
+    try {
+      const res = await fetch(
+        `/api/equity/intraday/ticker_manager?ticker=${ticker}&manager=${manager}`,
+        { cache: "no-store" }
+      );
+      if (!res.ok) return;
+      const json = await res.json();
+      setTimestamp(json.timestamp);
+      setTotals(json.totals);
+      setSignals(json.signals);
+      setAlerts(json.alerts ?? []);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  load();
+}, [ticker, manager, equityEnabled]);
+
 useWebSocket(
-  wsBaseUrl && ticker && manager
+  equityEnabled && wsBaseUrl && ticker && manager
     ? `${wsBaseUrl}/equity/ticker_manager/${ticker}/${manager}/`
     : null,
   (json) => {
@@ -169,15 +176,9 @@ useWebSocket(
   }
 );
 
-// -------- RETURN LOGIC (SAME AS OVERVIEW) --------
+// FX-style return logic
 if (equityEnabled === null) {
-  return (
-    <div className="p-8 bg-[#020617] min-h-screen flex items-center justify-center">
-      <div className="text-blue-500 font-black animate-pulse tracking-widest text-xs uppercase">
-        Initialising Tactical Engine...
-      </div>
-    </div>
-  );
+  return <LoadingState />;
 }
 
 if (equityEnabled === false) {
@@ -185,11 +186,9 @@ if (equityEnabled === false) {
     <div className="min-h-screen bg-[#020617] flex items-center justify-center p-12 text-center">
       <div className="space-y-4 max-w-md">
         <Clock className="w-12 h-12 text-slate-700 mx-auto" />
-        <h2 className="text-xl font-black text-white uppercase tracking-tight">
-          Market Closed
-        </h2>
+        <h2 className="text-xl font-black text-white uppercase tracking-tight">Market Closed</h2>
         <p className="text-slate-400 text-sm leading-relaxed">
-          U.S. equity markets operate Monday through Friday, 9:30 AM to 4:00 PM (EST).
+          U.S. equity markets operate <strong>Monday through Friday</strong>, 9:30 AM to 4:00 PM (EST).
         </p>
         <Link
           href="/dashboard/equity/daily"
@@ -211,7 +210,6 @@ if (!totals || !signals) {
     </div>
   );
 }
-
 
 
   return (
