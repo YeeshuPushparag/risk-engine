@@ -70,7 +70,6 @@ function FlashCell({ value, children, className = "" }: any) {
 /* --- MAIN PAGE --- */
 
 export default function FxIntradayMain() {
-export default function FxIntradayMain() {
   const [data, setData] = useState<any>(null);
   const [wsUrl, setWsUrl] = useState<string | null>(null);
   const [fxEnabled, setFxEnabled] = useState<boolean | null>(null); 
