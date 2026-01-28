@@ -70,55 +70,86 @@ function FlashCell({ value, children, className = "" }: any) {
 /* --- MAIN PAGE --- */
 
 export default function FxIntradayMain() {
+export default function FxIntradayMain() {
   const [data, setData] = useState<any>(null);
   const [wsUrl, setWsUrl] = useState<string | null>(null);
   const [fxEnabled, setFxEnabled] = useState<boolean | null>(null); 
-  const prevDataRef = useRef<any>(null);
+  
+  // Debug
+  const renderCount = useRef(0);
+
+  useEffect(() => {
+    renderCount.current += 1;
+    console.log(`Render #${renderCount.current}: fxEnabled=${fxEnabled}, wsUrl=${wsUrl ? 'SET' : 'NULL'}, data=${data ? 'YES' : 'NO'}`);
+  });
 
   const handleDataUpdate = (update: any) => {
-    prevDataRef.current = data;
+    console.log("WebSocket data received, timestamp:", update?.timestamp);
     setData(update);
   };
 
-  // Fetch runtime config from the server
   useEffect(() => {
+    console.log("Starting fetchConfig...");
+    
     async function fetchConfig() {
       try {
+        console.log("Fetching /api/config...");
         const res = await fetch("/api/config");
         const config = await res.json();
+        console.log("Config received. wsBaseUrl:", config.wsBaseUrl);
 
         const enabled = config.forceStream || isFXTradingTime();
+        console.log(`fxEnabled = ${enabled}`);
         setFxEnabled(enabled); 
 
-        if (!enabled) return;
+        if (!enabled) {
+          console.log("Market not enabled, stopping.");
+          return;
+        }
 
-        // Set WebSocket URL dynamically
-        setWsUrl(config.wsBaseUrl + "/fx/overview/");
+        const fullUrl = config.wsBaseUrl + "/fx/overview/";
+        console.log(`Setting wsUrl to: ${fullUrl}`);
+        setWsUrl(fullUrl);
 
-        // Load initial data
+        console.log("Fetching initial data...");
         const initialRes = await fetch(
           "/api/fx/intraday/overview",
           { cache: "no-store" }
         );
 
         if (initialRes.ok) {
-          handleDataUpdate(await initialRes.json());
+          const initialData = await initialRes.json();
+          console.log("Initial data received, tickers:", initialData?.top_tickers?.length || 0);
+          handleDataUpdate(initialData);
         }
       } catch (err) {
-        console.error("Failed to load config or data:", err);
+        console.error("Failed to load:", err);
       }
     }
 
     fetchConfig();
   }, []);
 
-  // WebSocket hook ALWAYS mounted, waits for wsUrl
   useWebSocket(wsUrl, handleDataUpdate);
 
-  /* ---- RETURN LOGIC (CORRECT) ---- */
-  if (fxEnabled === null) return <LoadingTerminal />;   // config not loaded
-  if (fxEnabled === false) return <MarketClosedView />; // market closed
-  if (!data) return <LoadingTerminal />;                // waiting for first payload
+  if (fxEnabled === null) {
+    console.log("Showing LoadingTerminal: fxEnabled is null");
+    return <LoadingTerminal />;
+  }
+  
+  if (fxEnabled === false) {
+    console.log("Showing MarketClosedView: fxEnabled is false");
+    return <MarketClosedView />;
+  }
+  
+  if (!data) {
+    console.log("Showing LoadingTerminal: data is null, wsUrl:", wsUrl);
+    return <LoadingTerminal />;
+  }
+
+  console.log("Rendering main content");
+  // ... rest of your code
+
 
 
     return (

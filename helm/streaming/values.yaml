@@ -17,6 +17,15 @@ image:
   spark:
     repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/spark
 
+  zookeeper:
+    repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/zookeeper
+
+  kafka:
+    repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/kafka
+
+  kubectl:
+    repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/kubectl
+
 replicas:
   zookeeper: 1
   kafka: 1

@@ -332,7 +332,7 @@ services:
 
   equity-producer:
     build:
-      context: ./producers
+      context: ./producer
       dockerfile: Dockerfile
     env_file:
       - .env
@@ -343,7 +343,7 @@ services:
 
   fx-producer:
     build:
-      context: ./producers
+      context: ./producer
       dockerfile: Dockerfile
     env_file:
       - .env

@@ -172,10 +172,10 @@ useEffect(() => {
 }, []);
 
 // WebSocket unchanged
-useWebSocket(
-  equityEnabled && wsBaseUrl ? `${wsBaseUrl}/equity/overview/` : null,
-  updateState
-);
+// useWebSocket(
+//   equityEnabled && wsBaseUrl ? `${wsBaseUrl}/equity/overview/` : null,
+//   updateState
+// );
 
 // FX-style return logic
 if (equityEnabled === null) return <LoadingState />;

@@ -164,17 +164,17 @@ useEffect(() => {
   load();
 }, [ticker, manager, equityEnabled]);
 
-useWebSocket(
-  equityEnabled && wsBaseUrl && ticker && manager
-    ? `${wsBaseUrl}/equity/ticker_manager/${ticker}/${manager}/`
-    : null,
-  (json) => {
-    setTimestamp(json.timestamp);
-    setTotals(json.totals);
-    setSignals(json.signals);
-    setAlerts(json.alerts ?? []);
-  }
-);
+// useWebSocket(
+//   equityEnabled && wsBaseUrl && ticker && manager
+//     ? `${wsBaseUrl}/equity/ticker_manager/${ticker}/${manager}/`
+//     : null,
+//   (json) => {
+//     setTimestamp(json.timestamp);
+//     setTotals(json.totals);
+//     setSignals(json.signals);
+//     setAlerts(json.alerts ?? []);
+//   }
+// );
 
 // FX-style return logic
 if (equityEnabled === null) {

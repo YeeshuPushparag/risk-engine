@@ -3,6 +3,8 @@ kind: CronJob
 metadata:
   name: start-equity-producer
   namespace: streaming
+  annotations:
+    argocd.argoproj.io/sync-options: Replace=true
 spec:
   schedule: "31 9 * * 1-5"
   timeZone: "America/New_York"
@@ -13,10 +15,11 @@ spec:
           nodeSelector:
             {{- toYaml .Values.nodeSelector | nindent 12 }}
           restartPolicy: Never
-          serviceAccountName: streaming-sa
+          serviceAccountName: {{ .Values.serviceAccount.name }}
           containers:
             - name: start-equity-producer
-              image: bitnami/kubectl:1.30.0
+              image: "{{ .Values.image.kubectl.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
               command:
                 - /bin/sh
                 - -c

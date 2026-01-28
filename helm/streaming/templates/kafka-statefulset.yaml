@@ -5,7 +5,7 @@ metadata:
   namespace: streaming
 spec:
   serviceName: kafka
-  replicas: 1
+  replicas: {{ .Values.replicas.kafka }}
   selector:
     matchLabels:
       app: kafka
@@ -16,7 +16,7 @@ spec:
     spec:
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
-      serviceAccountName: streaming-sa
+      serviceAccountName: {{ .Values.serviceAccount.name }}
 
       securityContext:
         fsGroup: 1000
@@ -36,7 +36,8 @@ spec:
 
       containers:
         - name: kafka
-          image: confluentinc/cp-kafka:7.6.0
+          image: "{{ .Values.image.kafka.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
 
           securityContext:
             runAsUser: 1000
@@ -66,7 +67,7 @@ spec:
         name: kafka-data
       spec:
         accessModes: ["ReadWriteOnce"]
-        storageClassName: gp3
+        storageClassName: {{ .Values.storageClassName }}
         resources:
           requests:
-            storage: 10Gi
+            storage: {{ .Values.kafkaStorageSize }}

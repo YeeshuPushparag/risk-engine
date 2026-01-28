@@ -3,6 +3,8 @@ kind: CronJob
 metadata:
   name: start-spark-equity
   namespace: streaming
+  annotations:
+    argocd.argoproj.io/sync-options: Replace=true
 spec:
   schedule: "55 8 * * 1-5"
   timeZone: "America/New_York"
@@ -12,11 +14,12 @@ spec:
         spec:
           nodeSelector:
             {{- toYaml .Values.nodeSelector | nindent 12 }}
-          restartPolicy: Never
+          restartPolicy: OnFailure
           serviceAccountName: streaming-sa
           containers:
             - name: start-equity
-              image: bitnami/kubectl:1.30.0
+              image: "{{ .Values.image.kubectl.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
               command:
                 - /bin/sh
                 - -c

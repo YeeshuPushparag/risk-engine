@@ -38,34 +38,34 @@ pipeline {
             echo "false" > build_django
             echo "false" > build_nextjs
             echo "false" > build_spark
-            echo "false" > build_producers
+            echo "false" > build_producer
 
             echo "$CHANGED" | grep -q '^airflow/'   && echo "true" > build_airflow   || true
             echo "$CHANGED" | grep -q '^django/'    && echo "true" > build_django    || true
             echo "$CHANGED" | grep -q '^nextjs/'    && echo "true" > build_nextjs    || true
             echo "$CHANGED" | grep -q '^spark/'     && echo "true" > build_spark     || true
-            echo "$CHANGED" | grep -q '^producers/' && echo "true" > build_producers || true
+            echo "$CHANGED" | grep -q '^producer/' && echo "true" > build_producer || true
           '''
 
           env.BUILD_AIRFLOW   = readFile('build_airflow').trim()
           env.BUILD_DJANGO    = readFile('build_django').trim()
           env.BUILD_NEXTJS    = readFile('build_nextjs').trim()
           env.BUILD_SPARK     = readFile('build_spark').trim()
-          env.BUILD_PRODUCERS = readFile('build_producers').trim()
+          env.BUILD_PRODUCER = readFile('build_producer').trim()
 
           env.BUILD_IMAGES = (
             env.BUILD_AIRFLOW   == 'true' ||
             env.BUILD_DJANGO    == 'true' ||
             env.BUILD_NEXTJS    == 'true' ||
             env.BUILD_SPARK     == 'true' ||
-            env.BUILD_PRODUCERS == 'true'
+            env.BUILD_PRODUCER == 'true'
           ).toString()
 
           echo "BUILD_AIRFLOW=${env.BUILD_AIRFLOW}"
           echo "BUILD_DJANGO=${env.BUILD_DJANGO}"
           echo "BUILD_NEXTJS=${env.BUILD_NEXTJS}"
           echo "BUILD_SPARK=${env.BUILD_SPARK}"
-          echo "BUILD_PRODUCERS=${env.BUILD_PRODUCERS}"
+          echo "BUILD_PRODUCER=${env.BUILD_PRODUCER}"
         }
       }
     }
@@ -119,11 +119,11 @@ pipeline {
               '''
             }
 
-            if (env.BUILD_PRODUCERS == 'true') {
+            if (env.BUILD_PRODUCER == 'true') {
               sh '''
                 /kaniko/executor \
-                  --context=dir://${WORKSPACE}/producers \
-                  --dockerfile=${WORKSPACE}/producers/Dockerfile \
+                  --context=dir://${WORKSPACE}/producer \
+                  --dockerfile=${WORKSPACE}/producer/Dockerfile \
                   --destination=${ECR_REGISTRY}/producer:${IMAGE_TAG} \
                   --cache=true \
                   --cache-repo=${KANIKO_CACHE_REPO}
@@ -178,7 +178,7 @@ stage('Update Helm Image Tags') {
               fi
 
               # Producer or Spark changes → streaming chart
-              if [ "${BUILD_PRODUCERS}" = "true" ] || [ "${BUILD_SPARK}" = "true" ]; then
+              if [ "${BUILD_PRODUCER}" = "true" ] || [ "${BUILD_SPARK}" = "true" ]; then
                 sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/streaming/values.yaml
                 CHARTS_UPDATED="${CHARTS_UPDATED} helm/streaming/values.yaml"
               fi

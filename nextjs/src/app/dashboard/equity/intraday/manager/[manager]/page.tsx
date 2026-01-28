@@ -171,17 +171,17 @@ useEffect(() => {
   load();
 }, [rawManager, equityEnabled]);
 
-useWebSocket(
-  equityEnabled && wsBaseUrl && rawManager
-    ? `${wsBaseUrl}/equity/manager/${rawManager}/`
-    : null,
-  (data) => {
-    setSummary(data.totals);
-    setHoldings(data.holdings);
-    setAlerts(data.alerts || []);
-    setTimestamp(data.timestamp);
-  }
-);
+// useWebSocket(
+//   equityEnabled && wsBaseUrl && rawManager
+//     ? `${wsBaseUrl}/equity/manager/${rawManager}/`
+//     : null,
+//   (data) => {
+//     setSummary(data.totals);
+//     setHoldings(data.holdings);
+//     setAlerts(data.alerts || []);
+//     setTimestamp(data.timestamp);
+//   }
+// );
 
 // FX-style return logic
 if (equityEnabled === null) {

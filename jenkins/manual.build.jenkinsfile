@@ -23,30 +23,34 @@ pipeline {
       }
     }
 
-    stage('Build & Push Images (Kaniko)') {
-      steps {
-        container('kaniko') {
-          script {
-            def apps = ['airflow','django','nextjs','spark','producers']
-            
-            for (app in apps) {
-              def contextDir = "${WORKSPACE}/${app}"
-              def dockerFile = "${contextDir}/Dockerfile"
-              def destination = app == 'producers' ? "${ECR_REGISTRY}/producer:${IMAGE_TAG}" : "${ECR_REGISTRY}/${app}:${IMAGE_TAG}"
-              
-              sh """
-                /kaniko/executor \
-                  --context=dir://${contextDir} \
-                  --dockerfile=${dockerFile} \
-                  --destination=${destination} \
-                  --cache=true \
-                  --cache-repo=${KANIKO_CACHE_REPO}
-              """
-            }
-          }
+stage('Build & Push Images (Kaniko)') {
+  steps {
+    container('kaniko') {
+      script {
+        // Apps in root + tools folder images
+        def apps = ['airflow','django','nextjs','spark','producer','tools/kubectl','tools/zookeeper','tools/kafka']
+        
+        for (app in apps) {
+          def contextDir = "${WORKSPACE}/${app}"
+          def dockerFile = "${contextDir}/Dockerfile"
+          
+          // ECR repo name should not include "tools/" prefix
+          def repoName = app.contains("/") ? app.split('/')[1] : app
+          def destination = "${ECR_REGISTRY}/${repoName}:${IMAGE_TAG}"
+          
+          sh """
+            /kaniko/executor \
+              --context=dir://${contextDir} \
+              --dockerfile=${dockerFile} \
+              --destination=${destination} \
+              --cache=true \
+              --cache-repo=${KANIKO_CACHE_REPO}
+          """
         }
       }
     }
+  }
+}
 
     stage('Update Helm Image Tags') {
       steps {

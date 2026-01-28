@@ -188,18 +188,18 @@ useEffect(() => {
   load();
 }, [ticker, equityEnabled]);
 
-useWebSocket(
-  equityEnabled && wsBaseUrl && ticker
-    ? `${wsBaseUrl}/equity/ticker/${ticker}/`
-    : null,
-  (data) => {
-    setTotals(data.totals);
-    setMarket(data.market);
-    setFundamentals(data.fundamentals);
-    setAlerts(data.alerts || []);
-    setManagers(data.manager_breakdown || []);
-  }
-);
+// useWebSocket(
+//   equityEnabled && wsBaseUrl && ticker
+//     ? `${wsBaseUrl}/equity/ticker/${ticker}/`
+//     : null,
+//   (data) => {
+//     setTotals(data.totals);
+//     setMarket(data.market);
+//     setFundamentals(data.fundamentals);
+//     setAlerts(data.alerts || []);
+//     setManagers(data.manager_breakdown || []);
+//   }
+// );
 
 // FX-style return logic
 if (equityEnabled === null) {
