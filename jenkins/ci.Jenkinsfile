@@ -30,17 +30,17 @@ pipeline {
 
             CHANGED=$(git diff --name-only "$GIT_PREVIOUS_SUCCESSFUL_COMMIT" "$GIT_COMMIT" || true)
 
-            echo "false" > build_airflow
-            echo "false" > build_django
-            echo "false" > build_nextjs
-            echo "false" > build_spark
-            echo "false" > build_producer
+            echo false > build_airflow
+            echo false > build_django
+            echo false > build_nextjs
+            echo false > build_spark
+            echo false > build_producer
 
-            echo "$CHANGED" | grep -q '^airflow/'   && echo "true" > build_airflow   || true
-            echo "$CHANGED" | grep -q '^django/'    && echo "true" > build_django    || true
-            echo "$CHANGED" | grep -q '^nextjs/'    && echo "true" > build_nextjs    || true
-            echo "$CHANGED" | grep -q '^spark/'     && echo "true" > build_spark     || true
-            echo "$CHANGED" | grep -q '^producer/'  && echo "true" > build_producer  || true
+            echo "$CHANGED" | grep -q '^airflow/'   && echo true > build_airflow   || true
+            echo "$CHANGED" | grep -q '^django/'    && echo true > build_django    || true
+            echo "$CHANGED" | grep -q '^nextjs/'    && echo true > build_nextjs    || true
+            echo "$CHANGED" | grep -q '^spark/'     && echo true > build_spark     || true
+            echo "$CHANGED" | grep -q '^producer/'  && echo true > build_producer  || true
           '''
 
           env.BUILD_AIRFLOW  = readFile('build_airflow').trim()
@@ -68,16 +68,26 @@ pipeline {
         container('kaniko') {
           script {
 
+            // ✅ READ ENV ONCE (sandbox-safe)
+            def buildFlags = [
+              airflow  : env.BUILD_AIRFLOW,
+              django   : env.BUILD_DJANGO,
+              nextjs   : env.BUILD_NEXTJS,
+              spark    : env.BUILD_SPARK,
+              producer : env.BUILD_PRODUCER
+            ]
+
             def builds = [
-              [flag: 'BUILD_AIRFLOW',  name: 'airflow',  path: 'airflow',  values: 'helm/airflow/values.yaml',  key: null],
-              [flag: 'BUILD_DJANGO',   name: 'django',   path: 'django',   values: 'helm/django/values.yaml',   key: null],
-              [flag: 'BUILD_NEXTJS',   name: 'nextjs',   path: 'nextjs',   values: 'helm/nextjs/values.yaml',   key: null],
-              [flag: 'BUILD_PRODUCER', name: 'producer', path: 'producer', values: 'helm/streaming/values.yaml', key: 'producer'],
-              [flag: 'BUILD_SPARK',    name: 'spark',    path: 'spark',    values: 'helm/streaming/values.yaml', key: 'spark']
+              [id: 'airflow',  name: 'airflow',  path: 'airflow',  values: 'helm/airflow/values.yaml',  key: null],
+              [id: 'django',   name: 'django',   path: 'django',   values: 'helm/django/values.yaml',   key: null],
+              [id: 'nextjs',   name: 'nextjs',   path: 'nextjs',   values: 'helm/nextjs/values.yaml',   key: null],
+              [id: 'producer', name: 'producer', path: 'producer', values: 'helm/streaming/values.yaml', key: 'producer'],
+              [id: 'spark',    name: 'spark',    path: 'spark',    values: 'helm/streaming/values.yaml', key: 'spark']
             ]
 
             for (b in builds) {
-              if (env[b.flag] == 'true') {
+              if (buildFlags[b.id] == 'true') {
+
                 sh """
                   set -e
 
@@ -139,6 +149,5 @@ pipeline {
         }
       }
     }
-
   }
 }
