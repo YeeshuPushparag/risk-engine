@@ -3,7 +3,6 @@ FROM apache/spark:3.5.7
 USER root
 WORKDIR /app
 
-# ---- System Python (explicit, single source of truth) ----
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3 \
@@ -12,21 +11,15 @@ RUN apt-get update && \
         curl && \
     rm -rf /var/lib/apt/lists/*
 
-# ---- Force Spark to use THIS Python ----
-ENV PYSPARK_PYTHON=/usr/bin/python3
+ENV PYSPARK_PYTHON=/usr/local/bin/python3
 
-# ---- Python deps (bound to python3, not pip3) ----
 COPY requirements.txt .
 RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel certifi && \
     python3 -m pip install --no-cache-dir -r requirements.txt
 
-# ---- Kafka / Spark ivy cache ----
 RUN mkdir -p /tmp/.ivy2 && chmod -R 777 /tmp
 
-# ---- App code ----
 COPY . .
 
 ENV SPARK_HOME=/opt/spark
 ENV PATH="$SPARK_HOME/bin:$PATH"
-
-USER root
