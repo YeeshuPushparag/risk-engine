@@ -8,23 +8,27 @@ envFrom:
   secretName: streaming-infra-secret
 
 image:
-  tag: "68"
   pullPolicy: IfNotPresent
 
   producer:
     repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/producer
+    tag: "68"
 
   spark:
     repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/spark
+    tag: "68"
 
   zookeeper:
     repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/zookeeper
+    tag: "0"
 
   kafka:
     repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/kafka
+    tag: "0"
 
   kubectl:
     repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/kubectl
+    tag: "0"
 
 replicas:
   zookeeper: 1

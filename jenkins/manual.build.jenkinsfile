@@ -7,12 +7,10 @@ pipeline {
   }
 
   environment {
-    AWS_REGION         = 'us-east-1'
-    AWS_DEFAULT_REGION = 'us-east-1'
-    AWS_ACCOUNT_ID     = '871007552317'
-    ECR_REGISTRY       = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-    IMAGE_TAG          = "${BUILD_NUMBER}"
-    KANIKO_CACHE_REPO  = "${ECR_REGISTRY}/kaniko-cache"
+    AWS_REGION     = 'us-east-1'
+    AWS_ACCOUNT_ID = '871007552317'
+    ECR_REGISTRY   = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+    KANIKO_CACHE   = "${ECR_REGISTRY}/kaniko-cache"
   }
 
   stages {
@@ -23,36 +21,79 @@ pipeline {
       }
     }
 
-stage('Build & Push Images (Kaniko)') {
-  steps {
-    container('kaniko') {
-      script {
-        // Apps in root + tools folder images
-        def apps = ['airflow','django','nextjs','spark','producer','tools/kubectl','tools/zookeeper','tools/kafka']
-        
-        for (app in apps) {
-          def contextDir = "${WORKSPACE}/${app}"
-          def dockerFile = "${contextDir}/Dockerfile"
-          
-          // ECR repo name should not include "tools/" prefix
-          def repoName = app.contains("/") ? app.split('/')[1] : app
-          def destination = "${ECR_REGISTRY}/${repoName}:${IMAGE_TAG}"
-          
-          sh """
-            /kaniko/executor \
-              --context=dir://${contextDir} \
-              --dockerfile=${dockerFile} \
-              --destination=${destination} \
-              --cache=true \
-              --cache-repo=${KANIKO_CACHE_REPO}
-          """
+    stage('Build & Push Non-Streaming Apps') {
+      steps {
+        container('kaniko') {
+          script {
+
+            def singleApps = [
+              [name: 'airflow', path: 'airflow', values: 'helm/airflow/values.yaml'],
+              [name: 'django',  path: 'django',  values: 'helm/django/values.yaml'],
+              [name: 'nextjs',  path: 'nextjs',  values: 'helm/nextjs/values.yaml']
+            ]
+
+            for (app in singleApps) {
+              sh """
+                set -e
+
+                VALUES_FILE="${app.values}"
+
+                CURRENT_TAG=\$(grep '^  tag:' \$VALUES_FILE | awk '{print \$2}' | tr -d '"')
+                NEXT_TAG=\$((CURRENT_TAG + 1))
+
+                /kaniko/executor \
+                  --context=dir://${WORKSPACE}/${app.path} \
+                  --dockerfile=${WORKSPACE}/${app.path}/Dockerfile \
+                  --destination=${ECR_REGISTRY}/${app.name}:\$NEXT_TAG \
+                  --cache=true \
+                  --cache-repo=${KANIKO_CACHE}
+
+                sed -i "s/^  tag:.*/  tag: \\"\$NEXT_TAG\\"/" \$VALUES_FILE
+              """
+            }
+          }
         }
       }
     }
-  }
-}
 
-    stage('Update Helm Image Tags') {
+    stage('Build & Push Streaming Images') {
+      steps {
+        container('kaniko') {
+          script {
+
+            def streamingImages = [
+              [name: 'producer',  path: 'producer'],
+              [name: 'spark',     path: 'spark'],
+              [name: 'zookeeper', path: 'tools/zookeeper'],
+              [name: 'kafka',     path: 'tools/kafka'],
+              [name: 'kubectl',   path: 'tools/kubectl']
+            ]
+
+            for (img in streamingImages) {
+              sh """
+                set -e
+
+                VALUES_FILE="helm/streaming/values.yaml"
+
+                CURRENT_TAG=\$(awk '/${img.name}:/{f=1} f && /tag:/{print \$2; exit}' \$VALUES_FILE | tr -d '"')
+                NEXT_TAG=\$((CURRENT_TAG + 1))
+
+                /kaniko/executor \
+                  --context=dir://${WORKSPACE}/${img.path} \
+                  --dockerfile=${WORKSPACE}/${img.path}/Dockerfile \
+                  --destination=${ECR_REGISTRY}/${img.name}:\$NEXT_TAG \
+                  --cache=true \
+                  --cache-repo=${KANIKO_CACHE}
+
+                sed -i "/${img.name}:/,/tag:/ s/tag:.*/tag: \\"\$NEXT_TAG\\"/" \$VALUES_FILE
+              """
+            }
+          }
+        }
+      }
+    }
+
+    stage('Commit Helm Changes') {
       steps {
         container('jnlp') {
           withCredentials([usernamePassword(
@@ -64,19 +105,13 @@ stage('Build & Push Images (Kaniko)') {
               set -e
               git config user.name "Pushparag"
               git config user.email "pushparagyeeshu@gmail.com"
+
               git remote set-url origin https://${GIT_USER}:${GITHUB_TOKEN}@github.com/YeeshuPushparag/risk-engine.git
-              git fetch origin
               git checkout main
-              git reset --hard origin/main || true
+              git pull origin main
 
-              # Always update all Helm charts
-              sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/airflow/values.yaml
-              sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/django/values.yaml
-              sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/nextjs/values.yaml
-              sed -i "s/^  tag: .*/  tag: \\"${IMAGE_TAG}\\"/" helm/streaming/values.yaml
-
-              git add helm/*/values.yaml
-              git commit -m "deploy: update image tags to ${IMAGE_TAG} [skip ci]" || true
+              git add helm
+              git commit -m "deploy: bump image tags [skip ci]" || true
               git push origin main
             '''
           }

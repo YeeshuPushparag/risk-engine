@@ -31,7 +31,7 @@ spec:
 
       containers:
         - name: spark-fx
-          image: "{{ .Values.image.spark.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.spark.repository }}:{{ .Values.image.spark.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
 
           envFrom:

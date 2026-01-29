@@ -18,6 +18,7 @@ spec:
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
       serviceAccountName: airflow-sa
+
       initContainers:
         - name: wait-for-db
           image: postgres:15
@@ -31,6 +32,7 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ .Values.envFrom.secretName }}
+
         - name: delete-airflow-config
           image: busybox
           command: ["sh", "-c"]
@@ -40,12 +42,12 @@ spec:
       containers:
         - name: worker
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["airflow"]
           args: ["celery", "worker"]
+
           ports:
             - name: logs
               containerPort: 8793
+
           envFrom:
             - configMapRef:
                 name: {{ .Values.envFrom.configMapName }}
@@ -53,19 +55,24 @@ spec:
                 name: {{ .Values.envFrom.secretName }}
 
 
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: airflow-worker
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app: airflow-worker
-spec:
-  type: ClusterIP
-  selector:
-    app: airflow-worker
-  ports:
-    - name: logs
-      port: 8793
-      targetPort: 8793
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "1500m"
+              memory: "4Gi"
+
+          volumeMounts:
+            - name: airflow-logs
+              mountPath: /opt/airflow/logs
+            - name: airflow-dags
+              mountPath: /opt/airflow/dags
+
+      volumes:
+        - name: airflow-logs
+          persistentVolumeClaim:
+            claimName: airflow-logs
+        - name: airflow-dags
+          persistentVolumeClaim:
+            claimName: airflow-dags
