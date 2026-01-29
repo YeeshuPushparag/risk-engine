@@ -17,8 +17,11 @@ ENV PYSPARK_PYTHON=/usr/bin/python3
 
 # Install deps INTO THE SAME PYTHON
 COPY requirements.txt .
-RUN /usr/bin/python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel certifi && \
-    /usr/bin/python3 -m pip install --no-cache-dir -r requirements.txt
+RUN /usr/bin/python3 -m pip install --no-cache-dir --break-system-packages \
+    --upgrade pip setuptools wheel certifi && \
+    /usr/bin/python3 -m pip install --no-cache-dir --break-system-packages \
+    -r requirements.txt
+
 
 # Spark ivy cache
 RUN mkdir -p /tmp/.ivy2 && chmod -R 777 /tmp
