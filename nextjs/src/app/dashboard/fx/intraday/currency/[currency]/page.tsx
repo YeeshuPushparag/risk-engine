@@ -92,7 +92,7 @@ export default function CurrencyPage() {
     fetchConfigAndData();
   }, [currency]);
 
-  // useWebSocket(wsUrl, handleUpdate);
+  useWebSocket(wsUrl, handleUpdate);
 
   // ---- RETURN LOGIC (CONSISTENT) ----
   if (fxEnabled === null) return <LoadingState />;

@@ -124,7 +124,7 @@ export default function TickerPage() {
     fetchConfigAndData();
   }, [ticker]);
 
-  // useWebSocket(wsUrl, handleUpdate);
+  useWebSocket(wsUrl, handleUpdate);
 
   // ---- RETURN LOGIC (FIXED) ----
   if (fxEnabled === null) return <LoadingState />;

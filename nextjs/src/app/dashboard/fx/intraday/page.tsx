@@ -1,8 +1,15 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback} from "react";
+import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
-import { Activity, Clock, TrendingUp, TrendingDown, Globe, MoveHorizontal } from "lucide-react";
+import {
+  Activity,
+  Clock,
+  TrendingUp,
+  TrendingDown,
+  Globe,
+  MoveHorizontal,
+} from "lucide-react";
 import TickerSearch from "@/components/TickerSearch";
 import { useWebSocket } from "@/hooks/useWebSocket";
 
@@ -18,7 +25,7 @@ const fmt = (v?: number) => {
   return `${sign}$${abs.toFixed(0)}`;
 };
 
-const fmtFX = (n?: number) => n == null ? "—" : n.toFixed(4);
+const fmtFX = (n?: number) => (n == null ? "—" : n.toFixed(4));
 
 /* --- ANIMATED COMPONENTS --- */
 
@@ -30,6 +37,7 @@ function StatCard({ label, value, numericValue, trend, color }: any) {
     if (numericValue !== prevValue.current) {
       if (numericValue > prevValue.current) setFlash("animate-flash-green");
       else if (numericValue < prevValue.current) setFlash("animate-flash-red");
+
       prevValue.current = numericValue;
       const timer = setTimeout(() => setFlash(""), 1000);
       return () => clearTimeout(timer);
@@ -37,13 +45,31 @@ function StatCard({ label, value, numericValue, trend, color }: any) {
   }, [numericValue]);
 
   return (
-    <div className={`bg-slate-900 border border-slate-800 p-5 rounded-2xl transition-all duration-500 ${flash}`}>
-      <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-3">{label}</p>
+    <div
+      className={`bg-slate-900 border border-slate-800 p-5 rounded-2xl transition-all duration-500 ${flash}`}
+    >
+      <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-3">
+        {label}
+      </p>
       <div className="flex items-end justify-between">
-        <h3 className={`text-xl sm:text-2xl font-black tracking-tighter ${color || 'text-white'}`}>{value}</h3>
+        <h3
+          className={`text-xl sm:text-2xl font-black tracking-tighter ${
+            color || "text-white"
+          }`}
+        >
+          {value}
+        </h3>
         {trend && (
-          <span className={trend === 'up' ? 'text-emerald-500' : 'text-red-500'}>
-            {trend === 'up' ? <TrendingUp className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />}
+          <span
+            className={
+              trend === "up" ? "text-emerald-500" : "text-red-500"
+            }
+          >
+            {trend === "up" ? (
+              <TrendingUp className="w-5 h-5" />
+            ) : (
+              <TrendingDown className="w-5 h-5" />
+            )}
           </span>
         )}
       </div>
@@ -57,14 +83,25 @@ function FlashCell({ value, children, className = "" }: any) {
 
   useEffect(() => {
     if (value !== prevValue.current) {
-      setFlash(value > prevValue.current ? "bg-emerald-500/10" : "bg-red-500/10");
+      setFlash(
+        value > prevValue.current
+          ? "bg-emerald-500/10"
+          : "bg-red-500/10"
+      );
       prevValue.current = value;
+
       const timer = setTimeout(() => setFlash(""), 800);
       return () => clearTimeout(timer);
     }
   }, [value]);
 
-  return <td className={`${className} ${flash} transition-colors duration-500`}>{children}</td>;
+  return (
+    <td
+      className={`${className} ${flash} transition-colors duration-500`}
+    >
+      {children}
+    </td>
+  );
 }
 
 /* --- MAIN PAGE --- */
@@ -72,45 +109,25 @@ function FlashCell({ value, children, className = "" }: any) {
 export default function FxIntradayMain() {
   const [data, setData] = useState<any>(null);
   const [wsUrl, setWsUrl] = useState<string | null>(null);
-  const [fxEnabled, setFxEnabled] = useState<boolean | null>(null); 
-  
-  // Debug
-  const renderCount = useRef(0);
-
-  useEffect(() => {
-    renderCount.current += 1;
-    console.log(`Render #${renderCount.current}: fxEnabled=${fxEnabled}, wsUrl=${wsUrl ? 'SET' : 'NULL'}, data=${data ? 'YES' : 'NO'}`);
-  });
+  const [fxEnabled, setFxEnabled] = useState<boolean | null>(null);
 
   const handleDataUpdate = (update: any) => {
-    console.log("WebSocket data received, timestamp:", update?.timestamp);
     setData(update);
   };
 
   useEffect(() => {
-    console.log("Starting fetchConfig...");
-    
     async function fetchConfig() {
       try {
-        console.log("Fetching /api/config...");
         const res = await fetch("/api/config");
         const config = await res.json();
-        console.log("Config received. wsBaseUrl:", config.wsBaseUrl);
 
         const enabled = config.forceStream || isFXTradingTime();
-        console.log(`fxEnabled = ${enabled}`);
-        setFxEnabled(enabled); 
+        setFxEnabled(enabled);
 
-        if (!enabled) {
-          console.log("Market not enabled, stopping.");
-          return;
-        }
+        if (!enabled) return;
 
-        const fullUrl = config.wsBaseUrl + "/fx/overview/";
-        console.log(`Setting wsUrl to: ${fullUrl}`);
-        setWsUrl(fullUrl);
+        setWsUrl(config.wsBaseUrl + "/fx/overview/");
 
-        console.log("Fetching initial data...");
         const initialRes = await fetch(
           "/api/fx/intraday/overview",
           { cache: "no-store" }
@@ -118,11 +135,10 @@ export default function FxIntradayMain() {
 
         if (initialRes.ok) {
           const initialData = await initialRes.json();
-          console.log("Initial data received, tickers:", initialData?.top_tickers?.length || 0);
           handleDataUpdate(initialData);
         }
-      } catch (err) {
-        console.error("Failed to load:", err);
+      } catch (e) {
+        console.error("Failed to load config or data:", e);
       }
     }
 
@@ -132,24 +148,16 @@ export default function FxIntradayMain() {
   useWebSocket(wsUrl, handleDataUpdate);
 
   if (fxEnabled === null) {
-    console.log("Showing LoadingTerminal: fxEnabled is null");
     return <LoadingTerminal />;
   }
-  
+
   if (fxEnabled === false) {
-    console.log("Showing MarketClosedView: fxEnabled is false");
     return <MarketClosedView />;
   }
-  
+
   if (!data) {
-    console.log("Showing LoadingTerminal: data is null, wsUrl:", wsUrl);
     return <LoadingTerminal />;
   }
-
-  console.log("Rendering main content");
-  // ... rest of your code
-
-
 
     return (
       <main className="min-h-screen bg-[#020617] text-slate-200 p-6 lg:p-10 font-sans overflow-x-hidden">
