@@ -63,16 +63,6 @@ spec:
               cpu: "1500m"
               memory: "4Gi"
 
-          volumeMounts:
-            - name: airflow-logs
-              mountPath: /opt/airflow/logs
-            - name: airflow-dags
-              mountPath: /opt/airflow/dags
 
-      volumes:
-        - name: airflow-logs
-          persistentVolumeClaim:
-            claimName: airflow-logs
-        - name: airflow-dags
-          persistentVolumeClaim:
-            claimName: airflow-dags
+
+

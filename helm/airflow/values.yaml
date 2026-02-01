@@ -10,7 +10,6 @@ image:
   tag: "4"
   pullPolicy: IfNotPresent
 
-
 service:
   type: ClusterIP
   port: 8080
@@ -29,18 +28,21 @@ ingress:
   sslRedirect: "443"
   certificateArn: "arn:aws:acm:us-east-1:871007552317:certificate/3ba64c9b-66cf-4dd6-b635-f92c1a8cdba9"
 
+# Inject ConfigMap and Secret for environment variables
 envFrom:
   configMapName: airflow-config
   secretName: airflow-secret
 
+# Initialize Airflow DB and run migrations
 airflowInit:
   enabled: true
   runMigrations: true
 
+# Persistence settings
 persistence:
   logs:
-    enabled: true
-    size: 5Gi
+    enabled: true   # Keep logs persistent locally if needed, optional with S3
+    size: 20Gi
   dags:
     enabled: true
     size: 5Gi
