@@ -18,6 +18,7 @@ data:
   AIRFLOW__LOGGING__REMOTE_BASE_LOG_FOLDER: "s3://pushparag-airflow-logs"
   AIRFLOW__LOGGING__REMOTE_LOG_CONN_ID: "aws_default"
   AIRFLOW__LOGGING__DELETE_LOCAL_LOGS: "True"
+  AIRFLOW__LOGGING__TASK_LOG_READER: "s3"
 
   AIRFLOW__WEBSERVER__ENABLE_PROXY_FIX: "True"
   AIRFLOW__WEBSERVER__BASE_URL: "http://airflow.airflow.svc.cluster.local:8080"
