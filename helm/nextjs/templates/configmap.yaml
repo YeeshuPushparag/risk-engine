@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.envFrom.configMapName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: nextjs
+data:
+  NEXT_PUBLIC_API_BASE_URL: "https://api.pushparag.online"
+  NEXT_PUBLIC_WS_BASE_URL: "wss://api.pushparag.online/ws"
+  NEXT_PUBLIC_FORCE_STREAM: "false"
