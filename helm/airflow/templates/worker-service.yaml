@@ -1,9 +1,0 @@
-apiVersion: v1
-kind: Service
-metadata:
-  name: airflow-worker
-  namespace: airflow
-spec:
-  selector:
-    app: airflow-worker
-  type: ClusterIP
