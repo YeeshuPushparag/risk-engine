@@ -44,9 +44,6 @@ spec:
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
           args: ["celery", "worker"]
 
-          ports:
-            - name: logs
-              containerPort: 8793
 
           envFrom:
             - configMapRef:

@@ -6,39 +6,25 @@ metadata:
   labels:
     app: airflow
 data:
-  # --------------------
-  # Core
-  # --------------------
   AIRFLOW__CORE__EXECUTOR: "CeleryExecutor"
-  AIRFLOW__CORE__HOSTNAME: "airflow-worker"
   AIRFLOW__CORE__DAGS_FOLDER: "/opt/airflow/dags"
   AIRFLOW__CORE__LOAD_EXAMPLES: "False"
   AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
+  AIRFLOW__CORE__HOSTNAME_CALLABLE: "airflow.utils.net.getfqdn"
 
   AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow.airflow.svc.cluster.local:8080/execution/"
 
-  # --------------------
-  # Logging (S3 ONLY – correct)
-  # --------------------
   AIRFLOW__LOGGING__REMOTE_LOGGING: "True"
   AIRFLOW__LOGGING__REMOTE_BASE_LOG_FOLDER: "s3://pushparag-airflow-logs"
   AIRFLOW__LOGGING__REMOTE_LOG_CONN_ID: "aws_default"
   AIRFLOW__LOGGING__DELETE_LOCAL_LOGS: "True"
 
-  # --------------------
-  # API / UI
-  # --------------------
-  AIRFLOW__WEBSERVER__ENABLE_PROXY_FIX: "True"
-  AIRFLOW__WEBSERVER__BASE_URL: "http://airflow.airflow.svc.cluster.local:8080"
+  AIRFLOW__API__BASE_URL: "https://airflow.pushparag.online"
 
-  # --------------------
-  # Auth
-  # --------------------
+  AIRFLOW__CELERY__WORKER_LOG_SERVER_PORT: "8793"
+
   AIRFLOW__CORE__AUTH_MANAGER: "airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager"
 
-  # --------------------
-  # AWS / Runtime
-  # --------------------
   AWS_REGION: "us-east-1"
   AWS_DEFAULT_REGION: "us-east-1"
   PYTHONPATH: "/opt/airflow"
