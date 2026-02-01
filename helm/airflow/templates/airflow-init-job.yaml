@@ -1,15 +1,14 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: airflow-init-{{ .Release.Revision }}
+  name: airflow-init
   namespace: {{ .Release.Namespace }}
   labels:
     app: airflow-init
   annotations:
-    # Ensures ArgoCD deletes and recreates the Job every sync
-    argocd.argoproj.io/sync-options: Replace=true
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
-  ttlSecondsAfterFinished: 180   # Cleanup finished jobs after 3 minutes
   backoffLimit: 5
   template:
     metadata:
@@ -22,7 +21,7 @@ spec:
       containers:
         - name: airflow-init
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
-          imagePullPolicy: Always    # <-- Force Kubernetes to always fetch latest image
+          imagePullPolicy: Always
           command: ["/entrypoint"]
           args: ["airflow", "db", "migrate"]
           envFrom:
