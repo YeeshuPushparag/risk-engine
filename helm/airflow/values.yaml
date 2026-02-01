@@ -41,11 +41,8 @@ airflowInit:
 # Persistence settings
 persistence:
   logs:
-    enabled: true   # Keep logs persistent locally if needed, optional with S3
-    size: 20Gi
+    enabled: false   # Keep logs persistent locally if needed, optional with S3
   dags:
-    enabled: true
-    size: 5Gi
+    enabled: false
   postgres:
     enabled: false
-    size: 10Gi
