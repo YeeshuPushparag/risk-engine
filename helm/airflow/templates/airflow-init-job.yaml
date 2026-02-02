@@ -6,8 +6,7 @@ metadata:
   labels:
     app: airflow-init
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
-    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    argocd.argoproj.io/sync-options: Replace=true
 spec:
   backoffLimit: 5
   template:
