@@ -34,7 +34,8 @@ resource "aws_vpc_endpoint" "sts" {
   subnet_ids = var.subnet_ids
 
   security_group_ids = [
-    aws_security_group.sts_vpce_sg.id
+    aws_security_group.sts_vpce_sg.id,
+    aws_security_group.jenkins_sg.id
   ]
 
   private_dns_enabled = true
