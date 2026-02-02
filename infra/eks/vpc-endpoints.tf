@@ -33,5 +33,5 @@ resource "aws_vpc_endpoint" "sts" {
     aws_security_group.sts_vpce_sg.id
   ]
 
-  private_dns_enabled = true
+  private_dns_enabled = false
 }
