@@ -1,18 +1,17 @@
-############################################
-# Security Group for STS VPC Endpoint
-############################################
 resource "aws_security_group" "sts_vpce_sg" {
   name        = "${var.cluster_name}-sts-vpce-sg"
-  description = "Allow EKS pods to reach STS via VPC endpoint"
+  description = "Allow EKS and optional Jenkins to reach STS via VPC endpoint"
   vpc_id      = var.vpc_id
 
   ingress {
-    from_port       = 443
-    to_port         = 443
-    protocol        = "tcp"
-    security_groups = [
-      aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
-    ]
+    from_port = 443
+    to_port   = 443
+    protocol  = "tcp"
+
+    security_groups = compact([
+      aws_eks_cluster.this.vpc_config[0].cluster_security_group_id,
+      var.jenkins_sg_id
+    ])
   }
 
   egress {
@@ -23,9 +22,6 @@ resource "aws_security_group" "sts_vpce_sg" {
   }
 }
 
-############################################
-# STS Interface VPC Endpoint
-############################################
 resource "aws_vpc_endpoint" "sts" {
   vpc_id            = var.vpc_id
   service_name      = "com.amazonaws.us-east-1.sts"
@@ -34,8 +30,7 @@ resource "aws_vpc_endpoint" "sts" {
   subnet_ids = var.subnet_ids
 
   security_group_ids = [
-    aws_security_group.sts_vpce_sg.id,
-    aws_security_group.jenkins_sg.id
+    aws_security_group.sts_vpce_sg.id
   ]
 
   private_dns_enabled = true
