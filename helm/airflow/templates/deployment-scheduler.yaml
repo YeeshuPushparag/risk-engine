@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-scheduler
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.replicaCount.scheduler }}
+  selector:
+    matchLabels:
+      app: airflow-scheduler
+  template:
+    metadata:
+      labels:
+        app: airflow-scheduler
+    spec:
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      serviceAccountName: airflow-sa
+      initContainers:
+        - name: wait-for-db
+          image: postgres:15
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              until pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT"; do
+                sleep 5
+              done
+          envFrom:
+            - secretRef:
+                name: {{ .Values.envFrom.secretName }}
+        - name: delete-airflow-config
+          image: busybox
+          command: ["sh", "-c"]
+          args:
+            - rm -f /opt/airflow/airflow.cfg
+
+      containers:
+        - name: scheduler
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["airflow"]
+          args: ["scheduler"]
+          envFrom:
+            - configMapRef:
+                name: {{ .Values.envFrom.configMapName }}
+            - secretRef:
+                name: {{ .Values.envFrom.secretName }}

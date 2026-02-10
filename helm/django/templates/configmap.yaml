@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.envFrom.configMapName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: django
+data:
+  DJANGO_ALLOWED_HOSTS: "api.pushparag.online"
+  DJANGO_CSRF_TRUSTED_ORIGINS: "https://app.pushparag.online,https://api.pushparag.online"
+  DJANGO_DEBUG: "false"

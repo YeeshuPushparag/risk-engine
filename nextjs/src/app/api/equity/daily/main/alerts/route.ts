@@ -1,0 +1,23 @@
+import { NextResponse } from "next/server";
+
+export async function GET(req: Request) {
+  const url = new URL(req.url);
+
+  // forward ALL query params (date, scenario, ret_shift, etc.)
+  const queryString = url.searchParams.toString();
+  const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
+
+  if (!baseUrl) {
+    throw new Error("API_BASE_URL is not defined");
+  }
+
+ 
+
+  const res = await fetch(
+    `${baseUrl}/api/daily/equity/alerts/?${queryString}`,
+    { cache: "no-store" }
+  );
+
+  const data = await res.json();
+  return NextResponse.json(data);
+}

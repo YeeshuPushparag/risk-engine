@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-fx
+  namespace: streaming
+  annotations:
+    argocd.argoproj.io/ignore-differences: |
+      jsonPointers:
+        - /spec/replicas
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: spark-fx
+  template:
+    metadata:
+      labels:
+        app: spark-fx
+    spec:
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      serviceAccountName: streaming-sa
+
+      initContainers:
+        - name: wait-for-kafka
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z kafka 9092; do
+                echo "Waiting for Kafka..."
+                sleep 5
+              done
+
+      containers:
+        - name: spark-fx
+          image: "{{ .Values.image.spark.repository }}:{{ .Values.image.spark.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+          envFrom:
+            - secretRef:
+                name: streaming-infra-secret
+
+          env:
+            - name: SPARK_LOCAL_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+
+          command: ["/bin/bash", "-lc"]
+          args:
+            - >
+              spark-submit
+              --master local[*]
+              --conf spark.driver.host=$(SPARK_LOCAL_IP)
+              --conf spark.driver.bindAddress=0.0.0.0
+              --conf spark.driver.port=7077
+              --conf spark.ui.port=4041
+              --conf spark.blockManager.port=7080
+              --conf spark.network.timeout=600s
+              --repositories https://repo.maven.apache.org/maven2
+              --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.7,org.apache.kafka:kafka-clients:3.5.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.696
+              /app/fx_consumer.py
+
+          volumeMounts:
+            - name: ivy-cache
+              mountPath: /tmp/.ivy2
+
+      volumes:
+        - name: ivy-cache
+          persistentVolumeClaim:
+            claimName: spark-ivy-cache-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-fx
+  namespace: streaming
+spec:
+  selector:
+    app: spark-fx
+  ports:
+    - name: driver
+      port: 7077
+      targetPort: 7077
+    - name: ui
+      port: 4041
+      targetPort: 4041
+    - name: blockmanager
+      port: 7080
+      targetPort: 7080

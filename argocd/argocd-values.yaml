@@ -1,0 +1,57 @@
+replicaCount: 1
+
+server:
+  nodeSelector:
+    role: platform-core
+
+  service:
+    ports:
+      http:
+        enabled: false        
+      https:
+        enabled: true
+
+  ingress:
+    enabled: true
+    ingressClassName: alb
+    hostname: argocd.pushparag.online
+    annotations:
+      kubernetes.io/ingress.class: alb
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:871007552317:certificate/3ba64c9b-66cf-4dd6-b635-f92c1a8cdba9
+      alb.ingress.kubernetes.io/backend-protocol: HTTPS
+      alb.ingress.kubernetes.io/ssl-redirect: "443"
+      alb.ingress.kubernetes.io/group.name: risk-engine
+      alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=3600
+
+
+  extraArgs:
+    - --insecure=false   # enforce HTTPS
+
+configs:
+  cm:
+    url: https://argocd.pushparag.online  
+  params:
+    server.insecure: false
+
+repoServer:
+  nodeSelector:
+    role: platform-core
+
+controller:
+  nodeSelector:
+    role: platform-core
+
+applicationSet:
+  nodeSelector:
+    role: platform-core
+
+dex:
+  nodeSelector:
+    role: platform-core
+
+redis:
+  nodeSelector:
+    role: platform-core

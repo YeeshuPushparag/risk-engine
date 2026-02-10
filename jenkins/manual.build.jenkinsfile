@@ -1,0 +1,132 @@
+pipeline {
+  agent {
+    kubernetes {
+      inheritFrom 'jenkins-agent'
+      defaultContainer 'jnlp'
+    }
+  }
+
+  environment {
+    AWS_REGION = 'us-east-1'
+  }
+
+  stages {
+
+    stage('Resolve AWS Account') {
+      steps {
+        container('jnlp') {
+          script {
+            // Get AWS account ID from your credentials
+            env.AWS_ACCOUNT_ID = sh(
+              script: "aws sts get-caller-identity --query Account --output text",
+              returnStdout: true
+            ).trim()
+
+            // Build ECR variables
+            env.ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+            env.KANIKO_CACHE = "${env.ECR_REGISTRY}/kaniko-cache"
+          }
+        }
+      }
+    }
+
+    stage('Checkout') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('Build & Push Non-Streaming Apps') {
+      steps {
+        container('kaniko') {
+          script {
+            def singleApps = [
+              [name: 'airflow', path: 'airflow', values: 'helm/airflow/values.yaml'],
+              [name: 'django',  path: 'django',  values: 'helm/django/values.yaml'],
+              [name: 'nextjs',  path: 'nextjs',  values: 'helm/nextjs/values.yaml']
+            ]
+
+            for (app in singleApps) {
+              sh """
+                set -e
+                VALUES_FILE="${app.values}"
+                CURRENT_TAG=\$(grep '^  tag:' \$VALUES_FILE | awk '{print \$2}' | tr -d '"')
+                NEXT_TAG=\$((CURRENT_TAG + 1))
+
+                /kaniko/executor \
+                  --context=dir://${WORKSPACE}/${app.path} \
+                  --dockerfile=${WORKSPACE}/${app.path}/Dockerfile \
+                  --destination=${ECR_REGISTRY}/${app.name}:\$NEXT_TAG \
+                  --cache=true \
+                  --cache-repo=${KANIKO_CACHE}
+
+                sed -i "s/^  tag:.*/  tag: \\"\$NEXT_TAG\\"/" \$VALUES_FILE
+              """
+            }
+          }
+        }
+      }
+    }
+
+    stage('Build & Push Streaming Images') {
+      steps {
+        container('kaniko') {
+          script {
+            def streamingImages = [
+              [name: 'producer',  path: 'producer'],
+              [name: 'spark',     path: 'spark'],
+              [name: 'zookeeper', path: 'tools/zookeeper'],
+              [name: 'kafka',     path: 'tools/kafka'],
+              [name: 'kubectl',   path: 'tools/kubectl']
+            ]
+
+            for (img in streamingImages) {
+              sh """
+                set -e
+                VALUES_FILE="helm/streaming/values.yaml"
+                CURRENT_TAG=\$(awk '/${img.name}:/{f=1} f && /tag:/{print \$2; exit}' \$VALUES_FILE | tr -d '"')
+                NEXT_TAG=\$((CURRENT_TAG + 1))
+
+                /kaniko/executor \
+                  --context=dir://${WORKSPACE}/${img.path} \
+                  --dockerfile=${WORKSPACE}/${img.path}/Dockerfile \
+                  --destination=${ECR_REGISTRY}/${img.name}:\$NEXT_TAG \
+                  --cache=true \
+                  --cache-repo=${KANIKO_CACHE}
+
+                sed -i "/${img.name}:/,/tag:/ s/tag:.*/tag: \\"\$NEXT_TAG\\"/" \$VALUES_FILE
+              """
+            }
+          }
+        }
+      }
+    }
+
+    stage('Commit Helm Changes') {
+      steps {
+        container('jnlp') {
+          withCredentials([usernamePassword(
+            credentialsId: 'github-https',
+            usernameVariable: 'GIT_USER',
+            passwordVariable: 'GITHUB_TOKEN'
+          )]) {
+            sh '''
+              set -e
+              git config user.name "Pushparag"
+              git config user.email "pushparagyeeshu@gmail.com"
+
+              git remote set-url origin https://${GIT_USER}:${GITHUB_TOKEN}@github.com/YeeshuPushparag/risk-engine.git
+              git checkout main
+              git pull origin main
+
+              git add helm
+              git commit -m "deploy: bump image tags [skip ci]" || true
+              git push origin main
+            '''
+          }
+        }
+      }
+    }
+
+  } // end of stages
+} // end of pipeline

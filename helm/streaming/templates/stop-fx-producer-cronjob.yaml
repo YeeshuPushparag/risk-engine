@@ -1,0 +1,26 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: stop-fx-producer
+  namespace: streaming
+  annotations:
+    argocd.argoproj.io/sync-options: Replace=true
+spec:
+  schedule: "3 17 * * 5"
+  timeZone: "America/New_York"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          nodeSelector:
+            {{- toYaml .Values.nodeSelector | nindent 12 }}
+          restartPolicy: OnFailure
+          serviceAccountName: streaming-sa
+          containers:
+            - name: stop-fx-producer
+              image: "{{ .Values.image.kubectl.repository }}:{{ .Values.image.kubectl.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - /bin/sh
+                - -c
+                - kubectl -n streaming scale deployment fx-producer --replicas=0

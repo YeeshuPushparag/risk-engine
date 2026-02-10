@@ -1,0 +1,48 @@
+replicaCount:
+  apiServer: 1
+  scheduler: 1
+  worker: 1
+  dagProcessor: 1
+  triggerer: 1
+
+image:
+  repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/airflow
+  tag: "5"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+
+nodeSelector:
+  role: platform-core
+
+ingress:
+  enabled: true
+  host: airflow.pushparag.online
+  ingressClassName: alb
+  groupName: risk-engine
+  scheme: internet-facing
+  targetType: ip
+  listenPorts: '[{"HTTP":80},{"HTTPS":443}]'
+  sslRedirect: "443"
+  certificateArn: "arn:aws:acm:us-east-1:871007552317:certificate/3ba64c9b-66cf-4dd6-b635-f92c1a8cdba9"
+
+# Inject ConfigMap and Secret for environment variables
+envFrom:
+  configMapName: airflow-config
+  secretName: airflow-secret
+
+# Initialize Airflow DB and run migrations
+airflowInit:
+  enabled: true
+  runMigrations: true
+
+# Persistence settings
+persistence:
+  logs:
+    enabled: false   # Keep logs persistent locally if needed, optional with S3
+  dags:
+    enabled: false
+  postgres:
+    enabled: false

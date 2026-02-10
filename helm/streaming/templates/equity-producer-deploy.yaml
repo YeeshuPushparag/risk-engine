@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: equity-producer
+  namespace: streaming
+  annotations:
+    argocd.argoproj.io/ignore-differences: |
+      jsonPointers:
+        - /spec/replicas
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: equity-producer
+  template:
+    metadata:
+      labels:
+        app: equity-producer
+    spec:
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      serviceAccountName: streaming-sa
+
+      initContainers:
+        - name: wait-for-kafka
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z kafka 9092; do
+                echo "Waiting for Kafka..."
+                sleep 5
+              done
+
+      containers:
+        - name: equity-producer
+          image: "{{ .Values.image.producer.repository }}:{{ .Values.image.producer.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python"]
+          args: ["equity_producer.py"]
+          envFrom:
+            - secretRef:
+                name: streaming-infra-secret

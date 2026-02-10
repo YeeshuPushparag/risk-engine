@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.envFrom.configMapName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: airflow
+data:
+  # --------------------
+  # Core
+  # --------------------
+  AIRFLOW__CORE__EXECUTOR: "CeleryExecutor"
+  AIRFLOW__CORE__DAGS_FOLDER: "/opt/airflow/dags"
+  AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
+
+  # Airflow API Server
+  AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow.airflow.svc.cluster.local:8080/execution/"
+  AIRFLOW__API__BASE_URL: "https://airflow.pushparag.online"
+
+  # --------------------
+  # Logging (S3 ONLY)
+  # --------------------
+  AIRFLOW__LOGGING__SERVE_LOGS: "False"
+  AIRFLOW__LOGGING__REMOTE_LOGGING: "True"
+  AIRFLOW__LOGGING__REMOTE_BASE_LOG_FOLDER: "s3://pushparag-airflow-logs/airflow-logs"
+  AIRFLOW__LOGGING__REMOTE_LOG_CONN_ID: "aws_default"
+  AIRFLOW__LOGGING__DELETE_LOCAL_LOGS: "True"
+
+  # --------------------
+  # Auth
+  # --------------------
+  AIRFLOW__CORE__AUTH_MANAGER: "airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager"
+
+  # --------------------
+  # AWS / IRSA
+  # --------------------
+  AWS_REGION: "us-east-1"
+  AWS_DEFAULT_REGION: "us-east-1"
+  AWS_EC2_METADATA_DISABLED: "true"
+  AWS_SDK_LOAD_CONFIG: "1"
+  AWS_STS_REGIONAL_ENDPOINTS: "regional"
+
+  # --------------------
+  # Python
+  # --------------------
+  PYTHONPATH: "/opt/airflow"

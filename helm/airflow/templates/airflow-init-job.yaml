@@ -1,0 +1,33 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: airflow-init
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: airflow-init
+  annotations:
+    argocd.argoproj.io/sync-options: Replace=true
+spec:
+  backoffLimit: 5
+  selector:
+    matchLabels:
+      app: airflow-init
+  template:
+    metadata:
+      labels:
+        app: airflow-init
+    spec:
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      restartPolicy: OnFailure
+      containers:
+        - name: airflow-init
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: Always
+          command: ["/entrypoint"]
+          args: ["airflow", "db", "migrate"]
+          envFrom:
+            - configMapRef:
+                name: {{ .Values.envFrom.configMapName }}
+            - secretRef:
+                name: {{ .Values.envFrom.secretName }}
