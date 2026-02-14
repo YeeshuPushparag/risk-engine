@@ -17,8 +17,8 @@ from pyspark.sql.types import (
 # =====================================================
 # CONFIG
 # =====================================================
-BUCKET = "daily-fx-pushparag"
-INTRADAY_BUCKET= "pushparag-risk-analytics-data"
+BUCKET = "pushparag-fx-bucket"
+INTRADAY_BUCKET= "pushparag-risk-analytics"
 FINAL_MERGED_KEY = "historical-fx/final_merged.parquet"
 
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092")

@@ -27,7 +27,7 @@ MIN_VaR_99 = 0.01
 MIN_CVaR_95 = 0.007
 MIN_CVaR_99 = 0.015
 
-S3_BUCKET = "daily-equity-portfolio"
+S3_BUCKET = "pushparag-equity-bucket"
 s3 = boto3.client("s3")
 
 

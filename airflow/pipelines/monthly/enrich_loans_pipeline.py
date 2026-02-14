@@ -3,7 +3,7 @@ import boto3
 from io import BytesIO
 from connections.snowflake_conn import get_snowflake_conn
 
-S3_BUCKET = "monthly-loans"
+S3_BUCKET = "pushparag-loan-bucket"
 LOAN_BASE_KEY = "loan_synthetic_base.parquet"
 OUTPUT_KEY = "loan_enriched_fx_bonds_commod_derivatives_collateral.parquet"
 

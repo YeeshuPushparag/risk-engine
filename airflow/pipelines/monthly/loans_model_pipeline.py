@@ -11,7 +11,7 @@ from connections.postgre_conn import get_postgre_conn
 import psycopg
 
 
-S3_BUCKET = "monthly-loans"
+S3_BUCKET = "pushparag-loan-bucket"
 s3 = boto3.client("s3")
 
 OUTPUT_TABLE = "LOANS"

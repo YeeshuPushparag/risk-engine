@@ -82,7 +82,7 @@ def generate_market_features(df, risk_free_rate=0.05):
 # =============================================================
 
 def update_market_features(input_filename="final_tickers.csv",
-                           bucket="daily-equity-portfolio",
+                           bucket="pushparag-equity-bucket",
                            prefix="historical-equity/",
                            batch_size=100):
     input_key = prefix + input_filename

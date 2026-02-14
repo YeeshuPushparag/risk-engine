@@ -30,7 +30,7 @@ signal.signal(signal.SIGINT, stop_signal)
 # Load tickers from S3
 # =================================================
 s3 = boto3.client("s3")
-bucket_name = "daily-equity-portfolio"
+bucket_name = "pushparag-equity-bucket"
 key = "historical-equity/tickers50.csv"
 
 csv_obj = s3.get_object(Bucket=bucket_name, Key=key)

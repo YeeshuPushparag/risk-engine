@@ -35,6 +35,9 @@ resource "aws_eks_node_group" "streaming" {
   labels = {
     role = "streaming"
   }
+  depends_on = [
+  kubernetes_config_map_v1.aws_auth
+]
 }
 
 ############################################
@@ -58,6 +61,9 @@ resource "aws_eks_node_group" "platform_core" {
   labels = {
     role = "platform-core"
   }
+  depends_on = [
+  kubernetes_config_map_v1.aws_auth
+]
 }
 
 ############################################
@@ -81,6 +87,9 @@ resource "aws_eks_node_group" "web" {
   labels = {
     role = "web"
   }
+  depends_on = [
+  kubernetes_config_map_v1.aws_auth
+]
 }
 
 ############################################
@@ -104,6 +113,9 @@ resource "aws_eks_node_group" "monitoring" {
   labels = {
     role = "monitoring"
   }
+  depends_on = [
+  kubernetes_config_map_v1.aws_auth
+]
 }
 
 ############################################
@@ -132,6 +144,9 @@ resource "aws_eks_node_group" "jenkins_agent" {
     "k8s.io/cluster-autoscaler/${var.cluster_name}"  = "owned"
     "k8s.io/cluster-autoscaler/node-template/label/role" = "jenkins-agent"
   }
+  depends_on = [
+  kubernetes_config_map_v1.aws_auth
+]
 }
 
 ############################################
@@ -143,6 +158,7 @@ resource "aws_eks_addon" "ebs_csi" {
   service_account_role_arn = aws_iam_role.ebs_csi_irsa_role.arn
 
   depends_on = [
-    aws_iam_role_policy_attachment.ebs_csi_attach
+    aws_iam_role_policy_attachment.ebs_csi_attach,
+    aws_eks_node_group.platform_core
   ]
 }

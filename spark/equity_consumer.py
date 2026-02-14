@@ -25,8 +25,8 @@ redis_client = redis.Redis(
 # =====================================================
 s3 = boto3.client("s3")
 
-BUCKET = "daily-equity-portfolio"
-INTRADAY_BUCKET = "pushparag-risk-analytics-data"
+BUCKET = "pushparag-equity-bucket"
+INTRADAY_BUCKET = "pushparag-risk-analytics"
 FINAL_MERGED_KEY = "historical-equity/final_merged.parquet"
 
 obj = s3.get_object(Bucket=BUCKET, Key=FINAL_MERGED_KEY)

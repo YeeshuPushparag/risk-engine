@@ -10,7 +10,7 @@ import boto3
 from io import BytesIO, StringIO
 from connections.postgre_conn import get_postgre_conn
 
-S3_BUCKET = "daily-commodity-pushparag"
+S3_BUCKET = "pushparag-commodity-bucket"
 s3 = boto3.client("s3")
 
 

@@ -8,7 +8,7 @@ from io import StringIO
 
 
 def run_commodities_update(
-    s3_bucket="daily-commodity-pushparag",
+    s3_bucket="pushparag-commodity-bucket",
     s3_key="commodities_daily.csv",
     tickers=None,
     roll_window=60

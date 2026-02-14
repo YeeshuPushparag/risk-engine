@@ -12,7 +12,7 @@ from fredapi import Fred
 from connections.postgre_conn import get_postgre_conn
 
 
-S3_BUCKET = "daily-bonds-pushparag"
+S3_BUCKET = "pushparag-bond-bucket"
 s3 = boto3.client("s3")
 FRED_API_KEY = os.getenv("FRED_API_KEY")
 

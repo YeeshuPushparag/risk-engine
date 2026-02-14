@@ -15,7 +15,7 @@ from connections.postgre_conn import get_postgre_conn
 
 
 # ================= CLIENTS =================
-MACRO_BUCKET = "daily-equity-portfolio"
+MACRO_BUCKET = "pushparag-equity-bucket"
 MACRO_KEY = "historical-equity/macro_data.csv"
 
 s3 = boto3.client("s3")

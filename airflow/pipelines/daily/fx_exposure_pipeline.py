@@ -11,7 +11,7 @@ FRED_API_KEY = os.getenv("FRED_API_KEY")
 
 
 # S3 settings — unchanged
-BUCKET = "daily-fx-pushparag"
+BUCKET = "pushparag-fx-bucket"
 PREFIX = "historical-fx"
 INPUT_KEY = f"{PREFIX}/final_merged.parquet"
 OUTPUT_KEY = f"{PREFIX}/fx_exposure_with_interest_diff.parquet"

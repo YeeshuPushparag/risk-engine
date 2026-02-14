@@ -12,7 +12,7 @@ from snowflake.connector.pandas_tools import write_pandas
 
 
 # ================== CONSTANTS ==================
-MACRO_BUCKET = "daily-equity-portfolio"
+MACRO_BUCKET = "pushparag-equity-bucket"
 MACRO_KEY = "historical-equity/macro_data.csv"
 
 s3 = boto3.client("s3")

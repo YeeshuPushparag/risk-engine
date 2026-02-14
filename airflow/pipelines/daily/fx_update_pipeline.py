@@ -14,7 +14,7 @@ from snowflake.connector.pandas_tools import write_pandas
 
 
 
-S3_BUCKET = "daily-fx-pushparag"
+S3_BUCKET = "pushparag-fx-bucket"
 s3 = boto3.client("s3")
 
 # -----------------------------
