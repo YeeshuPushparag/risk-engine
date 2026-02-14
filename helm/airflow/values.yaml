@@ -7,7 +7,7 @@ replicaCount:
 
 image:
   repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/airflow
-  tag: "5"
+  tag: "0"
   pullPolicy: IfNotPresent
 
 service:
