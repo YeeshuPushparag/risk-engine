@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: 871007552317.dkr.ecr.us-east-1.amazonaws.com/nextjs
+  repository: 922967232801.dkr.ecr.us-east-1.amazonaws.com/nextjs
   tag: "1"
   pullPolicy: IfNotPresent
 
@@ -17,5 +17,5 @@ envFrom:
 ingress:
   enabled: true
   host: app.pushparag.online
-  certificateArn: arn:aws:acm:us-east-1:871007552317:certificate/3ba64c9b-66cf-4dd6-b635-f92c1a8cdba9
+  certificateArn: arn:aws:acm:us-east-1:922967232801:certificate/e0af3110-f363-4d3e-85a0-2e428d4cd4a6
   groupName: risk-engine

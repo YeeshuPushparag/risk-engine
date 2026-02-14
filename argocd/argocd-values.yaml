@@ -20,7 +20,7 @@ server:
       alb.ingress.kubernetes.io/scheme: internet-facing
       alb.ingress.kubernetes.io/target-type: ip
       alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
-      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:871007552317:certificate/3ba64c9b-66cf-4dd6-b635-f92c1a8cdba9
+      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:871007552317:certificate/e0af3110-f363-4d3e-85a0-2e428d4cd4a6
       alb.ingress.kubernetes.io/backend-protocol: HTTPS
       alb.ingress.kubernetes.io/ssl-redirect: "443"
       alb.ingress.kubernetes.io/group.name: risk-engine
