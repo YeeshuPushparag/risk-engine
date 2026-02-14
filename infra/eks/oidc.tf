@@ -6,6 +6,10 @@ data "aws_eks_cluster" "this" {
   ]
 }
 
+data "tls_certificate" "oidc" {
+  url = data.aws_eks_cluster.this.identity[0].oidc[0].issuer
+}
+
 resource "aws_iam_openid_connect_provider" "eks" {
   url = data.aws_eks_cluster.this.identity[0].oidc[0].issuer
 
