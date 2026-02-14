@@ -11,24 +11,21 @@ pipeline {
   }
 
   stages {
- stage('Resolve AWS Account') {
+    stage('Resolve AWS Account') {
       steps {
         container('jnlp') {
           script {
-            // Get AWS account ID from your credentials
             env.AWS_ACCOUNT_ID = sh(
-              script: "aws sts get-caller-identity --query Account --output text",
+              script: "echo $AWS_ROLE_ARN | cut -d: -f5",
               returnStdout: true
             ).trim()
 
-            // Build ECR variables
             env.ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
             env.KANIKO_CACHE = "${env.ECR_REGISTRY}/kaniko-cache"
           }
         }
       }
     }
-
 
     stage('Checkout') {
       steps {
