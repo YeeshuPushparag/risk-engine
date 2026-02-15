@@ -22,8 +22,29 @@ spec:
         - name: airflow-init
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["/entrypoint"]
-          args: ["airflow", "db", "migrate"]
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              echo "Running DB migrations..."
+              airflow db migrate
+
+              echo "Checking if user already exists..."
+              if airflow users list | grep -w "$_AIRFLOW_WWW_USER_USERNAME" > /dev/null 2>&1; then
+                echo "User already exists. Skipping creation."
+              else
+                echo "Creating admin user from Kubernetes Secret..."
+                airflow users create \
+                  --username "$_AIRFLOW_WWW_USER_USERNAME" \
+                  --password "$_AIRFLOW_WWW_USER_PASSWORD" \
+                  --firstname "$_AIRFLOW_WWW_USER_FIRSTNAME" \
+                  --lastname "$_AIRFLOW_WWW_USER_LASTNAME" \
+                  --role "$_AIRFLOW_WWW_USER_ROLE" \
+                  --email "$_AIRFLOW_WWW_USER_EMAIL"
+              fi
+
+              echo "Airflow init completed successfully."
           envFrom:
             - configMapRef:
                 name: {{ .Values.envFrom.configMapName }}
