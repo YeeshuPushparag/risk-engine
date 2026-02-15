@@ -3,6 +3,8 @@ kind: Deployment
 metadata:
   name: airflow-dag-processor
   namespace: {{ .Release.Namespace }}
+  labels:
+    app: airflow-dag-processor
 spec:
   replicas: {{ .Values.replicaCount.dagProcessor }}
   selector:
@@ -16,6 +18,7 @@ spec:
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
       serviceAccountName: airflow-sa
+
       initContainers:
         - name: wait-for-db
           image: postgres:15
@@ -29,6 +32,7 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ .Values.envFrom.secretName }}
+
         - name: delete-airflow-config
           image: busybox
           command: ["sh", "-c"]
@@ -46,4 +50,3 @@ spec:
                 name: {{ .Values.envFrom.configMapName }}
             - secretRef:
                 name: {{ .Values.envFrom.secretName }}
-

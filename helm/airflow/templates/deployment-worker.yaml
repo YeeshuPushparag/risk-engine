@@ -19,6 +19,13 @@ spec:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
       serviceAccountName: airflow-sa
 
+      {{- if .Values.persistence.logs.enabled }}
+      volumes:
+        - name: logs
+          persistentVolumeClaim:
+            claimName: airflow-logs
+      {{- end }}
+
       initContainers:
         - name: wait-for-db
           image: postgres:15
@@ -42,15 +49,24 @@ spec:
       containers:
         - name: worker
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["celery", "worker"]
 
+          {{- if .Values.persistence.logs.enabled }}
+          volumeMounts:
+            - name: logs
+              mountPath: /opt/airflow/logs
+          {{- end }}
+
+          ports:
+            - name: logs
+              containerPort: 8793
 
           envFrom:
             - configMapRef:
                 name: {{ .Values.envFrom.configMapName }}
             - secretRef:
                 name: {{ .Values.envFrom.secretName }}
-
 
           resources:
             requests:
@@ -59,7 +75,3 @@ spec:
             limits:
               cpu: "1500m"
               memory: "4Gi"
-
-
-
-

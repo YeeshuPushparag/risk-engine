@@ -1,47 +1,49 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ .Values.envFrom.configMapName }}
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app: airflow
+  name: airflow-config
+  namespace: airflow
 data:
-  # --------------------
+  # ---------------------------
   # Core
-  # --------------------
-  AIRFLOW__CORE__EXECUTOR: "CeleryExecutor"
-  AIRFLOW__CORE__DAGS_FOLDER: "/opt/airflow/dags"
+  # ---------------------------
+  AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+  AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
   AIRFLOW__CORE__LOAD_EXAMPLES: "False"
   AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
 
-  # Airflow API Server
-  AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow.airflow.svc.cluster.local:8080/execution/"
-  AIRFLOW__API__BASE_URL: "https://airflow.pushparag.online"
+  # CRITICAL: hostname resolution (fixes http://:8793)
+  AIRFLOW__CORE__HOSTNAME_CALLABLE: airflow.utils.net.get_host_ip_address
 
-  # --------------------
-  # Logging (S3 ONLY)
-  # --------------------
-  AIRFLOW__LOGGING__SERVE_LOGS: "False"
-  AIRFLOW__LOGGING__REMOTE_LOGGING: "True"
-  AIRFLOW__LOGGING__REMOTE_BASE_LOG_FOLDER: "s3://pushparag-airflow-logs/airflow-logs"
-  AIRFLOW__LOGGING__REMOTE_LOG_CONN_ID: "aws_default"
-  AIRFLOW__LOGGING__DELETE_LOCAL_LOGS: "True"
+  # ---------------------------
+  # Logging
+  # ---------------------------
+  AIRFLOW__LOGGING__REMOTE_LOGGING: "False"
+  AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
 
-  # --------------------
-  # Auth
-  # --------------------
-  AIRFLOW__CORE__AUTH_MANAGER: "airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager"
+  # VERY IMPORTANT — fixes missing host in worker log URL
+  AIRFLOW__LOGGING__WORKER_LOG_SERVER_HOST: airflow-worker.airflow.svc.cluster.local
+  AIRFLOW__LOGGING__WORKER_LOG_SERVER_PORT: "8793"
 
-  # --------------------
-  # AWS / IRSA
-  # --------------------
-  AWS_REGION: "us-east-1"
-  AWS_DEFAULT_REGION: "us-east-1"
-  AWS_EC2_METADATA_DISABLED: "true"
-  AWS_SDK_LOAD_CONFIG: "1"
-  AWS_STS_REGIONAL_ENDPOINTS: "regional"
+  # Also force hostname resolution for logs
+  AIRFLOW__LOGGING__HOSTNAME_CALLABLE: airflow.utils.net.get_host_ip_address
 
-  # --------------------
-  # Python
-  # --------------------
-  PYTHONPATH: "/opt/airflow"
+  # ---------------------------
+  # API / Webserver
+  # ---------------------------
+  AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
+  AIRFLOW__API__HOSTNAME_CALLABLE: airflow.utils.net.get_host_ip_address
+
+  AIRFLOW__WEBSERVER__ENABLE_PROXY_FIX: "True"
+  AIRFLOW__WEBSERVER__BASE_URL: https://airflow.pushparag.online
+
+  # ---------------------------
+  # Scheduler stability
+  # ---------------------------
+  AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "300"
+  AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC: "5"
+
+  # ---------------------------
+  # Misc
+  # ---------------------------
+  PYTHONPATH: /opt/airflow

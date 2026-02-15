@@ -1,3 +1,4 @@
+{{- if .Values.airflowInit.enabled }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -9,9 +10,6 @@ metadata:
     argocd.argoproj.io/sync-options: Replace=true
 spec:
   backoffLimit: 5
-  selector:
-    matchLabels:
-      app: airflow-init
   template:
     metadata:
       labels:
@@ -23,7 +21,7 @@ spec:
       containers:
         - name: airflow-init
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
-          imagePullPolicy: Always
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/entrypoint"]
           args: ["airflow", "db", "migrate"]
           envFrom:
@@ -31,3 +29,4 @@ spec:
                 name: {{ .Values.envFrom.configMapName }}
             - secretRef:
                 name: {{ .Values.envFrom.secretName }}
+{{- end }}

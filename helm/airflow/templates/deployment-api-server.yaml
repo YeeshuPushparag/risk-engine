@@ -16,6 +16,7 @@ spec:
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
       serviceAccountName: airflow-sa
+
       initContainers:
         - name: wait-for-db
           image: postgres:15
@@ -29,6 +30,7 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ .Values.envFrom.secretName }}
+
         - name: delete-airflow-config
           image: busybox
           command: ["sh", "-c"]
@@ -48,20 +50,3 @@ spec:
                 name: {{ .Values.envFrom.configMapName }}
             - secretRef:
                 name: {{ .Values.envFrom.secretName }}
-
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: airflow
-  namespace: {{ .Release.Namespace }}
-spec:
-  selector:
-    app: airflow-api
-  ports:
-    - protocol: TCP
-      port: 8080
-      targetPort: 8080
-      name: http
-  type: {{ .Values.service.type }}
