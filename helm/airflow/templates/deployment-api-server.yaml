@@ -41,8 +41,8 @@ spec:
         - name: airflow-api
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["airflow"]
-          args: ["api-server", "--port", "8080"]
+          command: ["/entrypoint"]
+          args: ["airflow", "api-server"]
           ports:
             - containerPort: 8080
           envFrom:

@@ -43,8 +43,8 @@ spec:
         - name: scheduler
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["airflow"]
-          args: ["scheduler"]
+          command: ["/entrypoint"]
+          args: ["airflow", "scheduler"]
           envFrom:
             - configMapRef:
                 name: {{ .Values.envFrom.configMapName }}

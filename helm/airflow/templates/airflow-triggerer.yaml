@@ -43,8 +43,8 @@ spec:
         - name: triggerer
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["airflow"]
-          args: ["triggerer"]
+          command: ["/entrypoint"]
+          args: ["airflow", "triggerer"]
           envFrom:
             - configMapRef:
                 name: {{ .Values.envFrom.configMapName }}

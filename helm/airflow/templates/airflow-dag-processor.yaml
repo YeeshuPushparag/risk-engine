@@ -43,8 +43,8 @@ spec:
         - name: dag-processor
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["airflow"]
-          args: ["dag-processor"]
+          command: ["/entrypoint"]
+          args: ["airflow", "dag-processor"]
           envFrom:
             - configMapRef:
                 name: {{ .Values.envFrom.configMapName }}

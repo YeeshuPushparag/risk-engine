@@ -50,7 +50,9 @@ spec:
         - name: worker
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: ["celery", "worker"]
+          command: ["/entrypoint"]
+          args: ["airflow", "celery", "worker"]
+
 
           {{- if .Values.persistence.logs.enabled }}
           volumeMounts:
