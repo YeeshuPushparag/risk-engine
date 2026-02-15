@@ -22,8 +22,8 @@ spec:
         - name: airflow-init
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["/entrypoint"]
-          args: ["airflow", "db", "migrate"]
+          command: ["airflow"]
+          args: ["db", "migrate"]
           envFrom:
             - configMapRef:
                 name: {{ .Values.envFrom.configMapName }}
