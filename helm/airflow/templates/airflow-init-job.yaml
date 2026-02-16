@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  generateName: airflow-init-
+  name: airflow-init
   namespace: {{ .Release.Namespace }}
   labels:
     app: airflow-init
@@ -17,11 +17,11 @@ spec:
       restartPolicy: OnFailure
       serviceAccountName: airflow-sa
       nodeSelector:
-        {{- toYaml .Values.nodeSelector | nindent 8 }}
+        role: platform-core
       containers:
         - name: airflow-init
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "-c"]
           args:
             - |
