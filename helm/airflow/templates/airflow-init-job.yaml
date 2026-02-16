@@ -1,53 +1,58 @@
-{{- if .Values.airflowInit.enabled }}
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: airflow-init
-  namespace: {{ .Release.Namespace }}
+  namespace: airflow
   labels:
     app: airflow-init
   annotations:
-    argocd.argoproj.io/sync-options: Replace=true
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
 spec:
-  backoffLimit: 5
+  backoffLimit: 3
   template:
     metadata:
       labels:
         app: airflow-init
     spec:
-      nodeSelector:
-        {{- toYaml .Values.nodeSelector | nindent 8 }}
       restartPolicy: OnFailure
+      serviceAccountName: airflow-sa
+
+      nodeSelector:
+        role: platform-core
+
       containers:
         - name: airflow-init
-          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: 922967232801.dkr.ecr.us-east-1.amazonaws.com/airflow:1
+          imagePullPolicy: IfNotPresent
+
           command: ["/bin/bash", "-c"]
           args:
             - |
               set -e
 
+              echo "Waiting for database..."
+              until pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT"; do
+                sleep 5
+              done
+
               echo "Running DB migrations..."
               airflow db migrate
 
-              echo "Checking if user already exists..."
-              if airflow users list | grep -w "$_AIRFLOW_WWW_USER_USERNAME" > /dev/null 2>&1; then
-                echo "User already exists. Skipping creation."
-              else
-                echo "Creating admin user from Kubernetes Secret..."
-                airflow users create \
-                  --username "$_AIRFLOW_WWW_USER_USERNAME" \
-                  --password "$_AIRFLOW_WWW_USER_PASSWORD" \
-                  --firstname "$_AIRFLOW_WWW_USER_FIRSTNAME" \
-                  --lastname "$_AIRFLOW_WWW_USER_LASTNAME" \
-                  --role "$_AIRFLOW_WWW_USER_ROLE" \
-                  --email "$_AIRFLOW_WWW_USER_EMAIL"
-              fi
+              echo "Creating admin user if not exists..."
+              airflow users create \
+                --username "$_AIRFLOW_WWW_USER_USERNAME" \
+                --password "$_AIRFLOW_WWW_USER_PASSWORD" \
+                --firstname "$_AIRFLOW_WWW_USER_FIRSTNAME" \
+                --lastname "$_AIRFLOW_WWW_USER_LASTNAME" \
+                --role "$_AIRFLOW_WWW_USER_ROLE" \
+                --email "$_AIRFLOW_WWW_USER_EMAIL" \
+              || echo "Admin user already exists"
 
               echo "Airflow init completed successfully."
+
           envFrom:
             - configMapRef:
-                name: {{ .Values.envFrom.configMapName }}
+                name: airflow-config
             - secretRef:
-                name: {{ .Values.envFrom.secretName }}
-{{- end }}
+                name: airflow-secret
