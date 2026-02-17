@@ -18,10 +18,10 @@ spec:
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
       serviceAccountName: airflow-sa
-      securityContext:  # Add this
-        fsGroup: 50000  # Add this
-        runAsUser: 50000  # Add this
-        runAsGroup: 50000  # Add this
+      securityContext:
+        fsGroup: 50000
+        runAsUser: 50000
+        runAsGroup: 50000
 
       {{- if .Values.persistence.logs.enabled }}
       volumes:
@@ -31,6 +31,21 @@ spec:
       {{- end }}
 
       initContainers:
+        - name: fix-log-permissions
+          image: busybox
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "Fixing log directory permissions..."
+              chmod 777 /opt/airflow/logs
+              chown 50000:50000 /opt/airflow/logs
+              ls -la /opt/airflow/logs
+          volumeMounts:
+            - name: logs
+              mountPath: /opt/airflow/logs
+          securityContext:
+            runAsUser: 0
+
         - name: wait-for-db
           image: postgres:15
           imagePullPolicy: IfNotPresent
@@ -43,18 +58,18 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ .Values.envFrom.secretName }}
-          securityContext:  # Add this
-            runAsUser: 0    # Add this
-            runAsGroup: 0   # Add this
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
 
         - name: delete-airflow-config
           image: busybox
           command: ["sh", "-c"]
           args:
             - rm -f /opt/airflow/airflow.cfg
-          securityContext:  # Add this
-            runAsUser: 0    # Add this
-            runAsGroup: 0   # Add this
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
 
       containers:
         - name: worker
