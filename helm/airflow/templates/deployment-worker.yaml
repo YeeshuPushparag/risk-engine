@@ -2,11 +2,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: airflow-worker
-  namespace: {{ .Release.Namespace }}
+  namespace: airflow
   labels:
     app: airflow-worker
 spec:
-  replicas: {{ .Values.replicaCount.worker }}
+  replicas: 1
   selector:
     matchLabels:
       app: airflow-worker
@@ -15,84 +15,27 @@ spec:
       labels:
         app: airflow-worker
     spec:
-      nodeSelector:
-        {{- toYaml .Values.nodeSelector | nindent 8 }}
       serviceAccountName: airflow-sa
-      securityContext:
-        fsGroup: 50000
-        runAsUser: 50000
-        runAsGroup: 50000
-
-      {{- if .Values.persistence.logs.enabled }}
-      volumes:
-        - name: logs
-          persistentVolumeClaim:
-            claimName: airflow-logs
-      {{- end }}
-
-      initContainers:
-        - name: fix-log-permissions
-          image: busybox
-          command: ["sh", "-c"]
-          args:
-            - |
-              echo "Fixing log directory permissions..."
-              chmod 777 /opt/airflow/logs
-              chown 50000:50000 /opt/airflow/logs
-              ls -la /opt/airflow/logs
-          volumeMounts:
-            - name: logs
-              mountPath: /opt/airflow/logs
-          securityContext:
-            runAsUser: 0
-
-        - name: wait-for-db
-          image: postgres:15
-          imagePullPolicy: IfNotPresent
-          command: ["/bin/bash", "-c"]
-          args:
-            - |
-              until pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT"; do
-                sleep 5
-              done
-          envFrom:
-            - secretRef:
-                name: {{ .Values.envFrom.secretName }}
-          securityContext:
-            runAsUser: 0
-            runAsGroup: 0
-
-        - name: delete-airflow-config
-          image: busybox
-          command: ["sh", "-c"]
-          args:
-            - rm -f /opt/airflow/airflow.cfg
-          securityContext:
-            runAsUser: 0
-            runAsGroup: 0
 
       containers:
         - name: worker
-          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: 922967232801.dkr.ecr.us-east-1.amazonaws.com/airflow:1
+          imagePullPolicy: IfNotPresent
           command: ["/entrypoint"]
           args: ["airflow", "celery", "worker"]
-          
+
+          # 🔥 THIS FIXES http://:8793
           env:
             - name: POD_IP
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            - name: AIRFLOW__CELERY__WORKER_LOG_SERVER_HOST
-              value: "$(POD_IP)"
+
             - name: AIRFLOW__LOGGING__WORKER_LOG_SERVER_HOST
               value: "$(POD_IP)"
 
-          {{- if .Values.persistence.logs.enabled }}
-          volumeMounts:
-            - name: logs
-              mountPath: /opt/airflow/logs
-          {{- end }}
+            - name: AIRFLOW__CELERY__WORKER_LOG_SERVER_AUTHENTICATION
+              value: "False"
 
           ports:
             - name: logs
@@ -100,14 +43,6 @@ spec:
 
           envFrom:
             - configMapRef:
-                name: {{ .Values.envFrom.configMapName }}
+                name: airflow-config
             - secretRef:
-                name: {{ .Values.envFrom.secretName }}
-
-          resources:
-            requests:
-              cpu: "500m"
-              memory: "2Gi"
-            limits:
-              cpu: "1500m"
-              memory: "4Gi"
+                name: airflow-secret
