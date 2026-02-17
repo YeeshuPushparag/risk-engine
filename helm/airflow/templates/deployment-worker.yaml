@@ -21,21 +21,9 @@ spec:
         - name: worker
           image: 922967232801.dkr.ecr.us-east-1.amazonaws.com/airflow:1
           imagePullPolicy: IfNotPresent
+
           command: ["/entrypoint"]
           args: ["airflow", "celery", "worker"]
-
-          # 🔥 THIS FIXES http://:8793
-          env:
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
-
-            - name: AIRFLOW__LOGGING__WORKER_LOG_SERVER_HOST
-              value: "$(POD_IP)"
-
-            - name: AIRFLOW__CELERY__WORKER_LOG_SERVER_AUTHENTICATION
-              value: "False"
 
           ports:
             - name: logs
@@ -46,3 +34,11 @@ spec:
                 name: airflow-config
             - secretRef:
                 name: airflow-secret
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "1500m"
+              memory: "4Gi"
