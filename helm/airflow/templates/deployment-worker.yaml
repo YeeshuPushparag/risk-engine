@@ -18,6 +18,10 @@ spec:
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
       serviceAccountName: airflow-sa
+      securityContext:  # Add this
+        fsGroup: 50000  # Add this
+        runAsUser: 50000  # Add this
+        runAsGroup: 50000  # Add this
 
       {{- if .Values.persistence.logs.enabled }}
       volumes:
@@ -39,12 +43,18 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ .Values.envFrom.secretName }}
+          securityContext:  # Add this
+            runAsUser: 0    # Add this
+            runAsGroup: 0   # Add this
 
         - name: delete-airflow-config
           image: busybox
           command: ["sh", "-c"]
           args:
             - rm -f /opt/airflow/airflow.cfg
+          securityContext:  # Add this
+            runAsUser: 0    # Add this
+            runAsGroup: 0   # Add this
 
       containers:
         - name: worker
