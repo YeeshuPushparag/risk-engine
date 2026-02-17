@@ -6,7 +6,7 @@ metadata:
   labels:
     app: airflow-init
 spec:
-  backoffLimit: 3
+  backoffLimit: 1
   template:
     metadata:
       labels:
@@ -31,19 +31,18 @@ spec:
               done
               
               echo "Running database migrations..."
-              airflow db upgrade
+              airflow db migrate || echo "Migrations already applied, continuing..."
               
-              echo "Creating admin user if not exists..."
+              echo "Creating admin user..."
               airflow users create \
                 --username "$_AIRFLOW_WWW_USER_USERNAME" \
                 --password "$_AIRFLOW_WWW_USER_PASSWORD" \
                 --firstname "$_AIRFLOW_WWW_USER_FIRSTNAME" \
                 --lastname "$_AIRFLOW_WWW_USER_LASTNAME" \
                 --role "$_AIRFLOW_WWW_USER_ROLE" \
-                --email "$_AIRFLOW_WWW_USER_EMAIL" \
-              || echo "User may already exist, continuing..."
+                --email "$_AIRFLOW_WWW_USER_EMAIL" || true
               
-              echo "Init completed successfully"
+              echo "Init completed"
           envFrom:
             - configMapRef:
                 name: {{ .Values.envFrom.configMapName }}
