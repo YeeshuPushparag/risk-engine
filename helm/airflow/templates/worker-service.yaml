@@ -1,13 +1,13 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: airflow-worker
+  name: airflow-worker-headless
   namespace: {{ .Release.Namespace }}
 spec:
+  clusterIP: None
   selector:
     app: airflow-worker
   ports:
     - name: logs
       port: 8793
       targetPort: 8793
-  type: ClusterIP

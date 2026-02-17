@@ -1,13 +1,14 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: airflow-init
+  name: airflow-init-{{ randAlphaNum 5 | lower }}
   namespace: {{ .Release.Namespace }}
   labels:
     app: airflow-init
   annotations:
-    helm.sh/hook: post-install
-    helm.sh/hook-delete-policy: hook-succeeded
+    helm.sh/hook: pre-install  # Changed: removed pre-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-weight: "1"
 spec:
   backoffLimit: 3
   template:
@@ -15,7 +16,7 @@ spec:
       labels:
         app: airflow-init
     spec:
-      restartPolicy: OnFailure
+      restartPolicy: Never
       serviceAccountName: airflow-sa
       nodeSelector:
         role: platform-core
@@ -27,8 +28,16 @@ spec:
           args:
             - |
               set -e
-              until pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT"; do sleep 5; done
-              airflow db migrate
+              echo "Waiting for PostgreSQL..."
+              until pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT"; do 
+                echo "Waiting for database..."
+                sleep 5
+              done
+              
+              echo "Running database migrations..."
+              airflow db upgrade
+              
+              echo "Creating admin user if not exists..."
               airflow users create \
                 --username "$_AIRFLOW_WWW_USER_USERNAME" \
                 --password "$_AIRFLOW_WWW_USER_PASSWORD" \
@@ -36,7 +45,9 @@ spec:
                 --lastname "$_AIRFLOW_WWW_USER_LASTNAME" \
                 --role "$_AIRFLOW_WWW_USER_ROLE" \
                 --email "$_AIRFLOW_WWW_USER_EMAIL" \
-              || true
+              || echo "User may already exist, continuing..."
+              
+              echo "Init completed successfully"
           envFrom:
             - configMapRef:
                 name: {{ .Values.envFrom.configMapName }}
