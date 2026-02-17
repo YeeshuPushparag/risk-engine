@@ -56,8 +56,10 @@ spec:
         - name: worker-log-server
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["/entrypoint"]
-          args: ["airflow", "celery", "worker-log-server"]
+
+          command: ["/bin/bash", "-c"]
+          args:
+            - airflow worker log-server --port 8793
 
           ports:
             - name: logs
