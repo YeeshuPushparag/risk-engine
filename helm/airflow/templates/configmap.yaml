@@ -35,7 +35,7 @@ data:
   # ---------------------------
   AIRFLOW__WEBSERVER__ENABLE_PROXY_FIX: "True"
   AIRFLOW__WEBSERVER__BASE_URL: https://airflow.pushparag.online
-
+  AIRFLOW__WEBSERVER__REMOTE_LOG_AUTH: "basic"
   # ---------------------------
   # Scheduler
   # ---------------------------
