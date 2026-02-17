@@ -23,16 +23,14 @@ spec:
             claimName: airflow-logs
 
       containers:
+        # ============================
+        # 1️⃣ Celery Worker
+        # ============================
         - name: worker
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-
           command: ["/entrypoint"]
           args: ["airflow", "celery", "worker"]
-
-          ports:
-            - name: logs
-              containerPort: 8793
 
           volumeMounts:
             - name: logs
@@ -51,3 +49,26 @@ spec:
             limits:
               cpu: "1500m"
               memory: "4Gi"
+
+        # ============================
+        # 2️⃣ Worker Log Server (REQUIRED)
+        # ============================
+        - name: worker-log-server
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/entrypoint"]
+          args: ["airflow", "celery", "worker-log-server"]
+
+          ports:
+            - name: logs
+              containerPort: 8793
+
+          volumeMounts:
+            - name: logs
+              mountPath: /opt/airflow/logs
+
+          envFrom:
+            - configMapRef:
+                name: airflow-config
+            - secretRef:
+                name: airflow-secret
