@@ -67,7 +67,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             - name: AIRFLOW__CELERY__WORKER_LOG_SERVER_HOST
-              value: "$(POD_NAME).airflow-worker-headless.$(NAMESPACE).svc.cluster.local"
+              value: "$(POD_IP)"
 
           {{- if .Values.persistence.logs.enabled }}
           volumeMounts:
