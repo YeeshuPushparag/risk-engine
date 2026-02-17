@@ -4,7 +4,7 @@ metadata:
   name: airflow-worker
   namespace: airflow
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicaCount.worker }}
   selector:
     matchLabels:
       app: airflow-worker
@@ -14,25 +14,19 @@ spec:
         app: airflow-worker
     spec:
       serviceAccountName: airflow-sa
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
 
       volumes:
         - name: logs
           persistentVolumeClaim:
             claimName: airflow-logs
 
-      initContainers:
-        - name: fix-log-permissions
-          image: busybox
-          command: ["sh", "-c"]
-          args:
-            - |
-              chmod -R 777 /opt/airflow/logs
-          volumeMounts:
-            - name: logs
-              mountPath: /opt/airflow/logs
-
       containers:
         - name: worker
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+
           command: ["/entrypoint"]
           args: ["airflow", "celery", "worker"]
 
@@ -49,3 +43,11 @@ spec:
                 name: airflow-config
             - secretRef:
                 name: airflow-secret
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "1500m"
+              memory: "4Gi"
