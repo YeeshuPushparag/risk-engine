@@ -14,6 +14,10 @@ output "risk_analytics_bucket" {
   value = module.storage.risk_analytics_bucket
 }
 
+output "airflow_logs_bucket" {
+  value = module.storage.airflow_logs_bucket
+}
+
 output "acm_certificate_arn" {
   value = module.compute.acm_certificate_arn
 }

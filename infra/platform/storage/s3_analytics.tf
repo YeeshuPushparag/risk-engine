@@ -20,3 +20,24 @@ resource "aws_s3_bucket_versioning" "risk_analytics_data" {
   }
 }
 
+# =========================
+# S3 Bucket for Airflow Logs
+# =========================
+
+resource "aws_s3_bucket" "airflow_logs" {
+  bucket = "pushparag-airflow-logs"
+
+  tags = {
+    Name        = "pushparag-airflow-logs"
+    Project     = "risk"
+    Environment = "platform"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "airflow_logs" {
+  bucket = aws_s3_bucket.airflow_logs.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}

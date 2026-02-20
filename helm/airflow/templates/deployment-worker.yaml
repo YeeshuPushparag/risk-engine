@@ -8,31 +8,54 @@ spec:
   selector:
     matchLabels:
       app: airflow-worker
+
   template:
     metadata:
       labels:
         app: airflow-worker
+
     spec:
       serviceAccountName: airflow-sa
 
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
 
+      # ✅ FIX 1 — POD SECURITY CONTEXT (MOST IMPORTANT)
+      securityContext:
+        fsGroup: 50000
+
       volumes:
         - name: logs
           persistentVolumeClaim:
             claimName: airflow-logs
 
+      # ✅ FIX 2 — PERMISSION INIT CONTAINER
+      initContainers:
+        - name: fix-log-permissions
+          image: busybox
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /opt/airflow/logs
+              chown -R 50000:0 /opt/airflow/logs
+              chmod -R 775 /opt/airflow/logs
+          volumeMounts:
+            - name: logs
+              mountPath: /opt/airflow/logs
+
       containers:
-        # ============================
-        # ✅ Celery Worker (ONLY container)
-        # ============================
         - name: worker
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
 
           command: ["/entrypoint"]
           args: ["airflow", "celery", "worker"]
+
+          # ✅ FIX 3 — CONTAINER USER
+          securityContext:
+            runAsUser: 50000
+            runAsGroup: 0
 
           volumeMounts:
             - name: logs
