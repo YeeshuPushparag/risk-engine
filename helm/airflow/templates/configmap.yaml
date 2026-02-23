@@ -13,7 +13,7 @@ data:
   AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
 
   # REQUIRED for Airflow 3.x
-  AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api.airflow.svc.cluster.local:8080/execution/
+  AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow.airflow.svc.cluster.local:8080/execution/
 
   # =========================
   # Authentication
