@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: airflow-worker
-  namespace: airflow
+  namespace: {{ .Release.Namespace }}
 spec:
   replicas: {{ .Values.replicaCount.worker }}
   selector:
@@ -15,36 +15,36 @@ spec:
         app: airflow-worker
 
     spec:
-      serviceAccountName: airflow-sa
-
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
+      serviceAccountName: airflow-sa
 
-      # ⭐ CRITICAL FIX
-      securityContext:
-        fsGroup: 50000
-
-      volumes:
-        - name: logs
-          persistentVolumeClaim:
-            claimName: airflow-logs
-
-      # ⭐ FIX PERMISSIONS BEFORE WORKER STARTS
       initContainers:
-        - name: fix-permissions
-          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
-          command:
-            - /bin/bash
-            - -c
+        # -----------------------------
+        # Wait for DB (same as API)
+        # -----------------------------
+        - name: wait-for-db
+          image: postgres:15
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
             - |
-              mkdir -p /opt/airflow/logs
-              chown -R 50000:50000 /opt/airflow/logs
-              chmod -R 775 /opt/airflow/logs
-          volumeMounts:
-            - name: logs
-              mountPath: /opt/airflow/logs
-          securityContext:
-            runAsUser: 0
+              until pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT"; do
+                sleep 5
+              done
+          envFrom:
+            - secretRef:
+                name: {{ .Values.envFrom.secretName }}
+
+        # -----------------------------
+        # Delete default airflow.cfg
+        # (same as API / scheduler / others)
+        # -----------------------------
+        - name: delete-airflow-config
+          image: busybox
+          command: ["sh", "-c"]
+          args:
+            - rm -f /opt/airflow/airflow.cfg
 
       containers:
         - name: worker
@@ -54,12 +54,8 @@ spec:
           command: ["/entrypoint"]
           args: ["airflow", "celery", "worker"]
 
-          volumeMounts:
-            - name: logs
-              mountPath: /opt/airflow/logs
-
           envFrom:
             - configMapRef:
-                name: airflow-config
+                name: {{ .Values.envFrom.configMapName }}
             - secretRef:
-                name: airflow-secret
+                name: {{ .Values.envFrom.secretName }}

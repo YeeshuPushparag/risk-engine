@@ -14,26 +14,30 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: airflow-sa
+
       nodeSelector:
-        role: platform-core
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+
       containers:
         - name: airflow-init
           image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+
           command: ["/bin/bash", "-c"]
           args:
             - |
               set -e
+
               echo "Waiting for PostgreSQL..."
-              until pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT"; do 
+              until pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT"; do
                 echo "Waiting for database..."
                 sleep 5
               done
-              
-              echo "Running database migrations..."
-              airflow db migrate || echo "Migrations already applied, continuing..."
-              
-              echo "Creating admin user..."
+
+              echo "Running Airflow DB migrations..."
+              airflow db migrate || true
+
+              echo "Creating admin user (if not exists)..."
               airflow users create \
                 --username "$_AIRFLOW_WWW_USER_USERNAME" \
                 --password "$_AIRFLOW_WWW_USER_PASSWORD" \
@@ -41,8 +45,9 @@ spec:
                 --lastname "$_AIRFLOW_WWW_USER_LASTNAME" \
                 --role "$_AIRFLOW_WWW_USER_ROLE" \
                 --email "$_AIRFLOW_WWW_USER_EMAIL" || true
-              
-              echo "Init completed"
+
+              echo "Airflow initialization completed."
+
           envFrom:
             - configMapRef:
                 name: {{ .Values.envFrom.configMapName }}

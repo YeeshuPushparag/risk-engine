@@ -12,7 +12,7 @@ data:
   AIRFLOW__CORE__LOAD_EXAMPLES: "False"
   AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
 
-  # REQUIRED for Airflow 3.x (do NOT remove)
+  # REQUIRED for Airflow 3.x
   AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api.airflow.svc.cluster.local:8080/execution/
 
   # =========================
@@ -22,21 +22,14 @@ data:
   AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
 
   # =========================
-  # Logging (FINAL FIX)
+  # Logging — S3 ONLY
   # =========================
-  # ❌ Disable served logs (THIS IS THE BUG)
   AIRFLOW__LOGGING__USE_SERVED_LOGS: "False"
-
-  # ✅ Enable remote logging (STABLE)
   AIRFLOW__LOGGING__REMOTE_LOGGING: "True"
   AIRFLOW__LOGGING__LOGGING_LEVEL: "INFO"
 
-  # ===== Choose ONE backend =====
-  # ---- S3 example ----
-  AIRFLOW__LOGGING__REMOTE_BASE_LOG_FOLDER: s3://airflow-logs-bucket/logs
+  AIRFLOW__LOGGING__REMOTE_BASE_LOG_FOLDER: s3://pushparag-airflow-logs/logs
   AIRFLOW__LOGGING__REMOTE_LOG_CONN_ID: aws_default
-
-  # (DO NOT set WORKER_LOG_SERVER_HOST or PORT)
 
   # =========================
   # Web / API
@@ -45,7 +38,7 @@ data:
   AIRFLOW__WEBSERVER__BASE_URL: https://airflow.pushparag.online
 
   # =========================
-  # Hostname (SAFE)
+  # Hostname (safe defaults)
   # =========================
   AIRFLOW__CORE__HOSTNAME_CALLABLE: airflow.utils.net.get_host_ip_address
   AIRFLOW__API__HOSTNAME_CALLABLE: airflow.utils.net.get_host_ip_address
