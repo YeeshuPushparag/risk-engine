@@ -46,6 +46,11 @@ spec:
                 --role "$_AIRFLOW_WWW_USER_ROLE" \
                 --email "$_AIRFLOW_WWW_USER_EMAIL" || true
 
+              echo "Creating AWS connection (required for S3 logging)..."
+
+              airflow connections add aws_default \
+                --conn-type aws || true
+
               echo "Airflow initialization completed."
 
           envFrom:
