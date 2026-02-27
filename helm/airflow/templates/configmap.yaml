@@ -14,7 +14,7 @@ data:
 
   # REQUIRED for Airflow 3.x
   AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow.airflow.svc.cluster.local:8080/execution/
-  AIRFLOW_CELERY_WORKER_CONCURRENCY: "4"
+  AIRFLOW__CELERY__WORKER_CONCURRENCY: "4"
   # =========================
   # Authentication
   # =========================
