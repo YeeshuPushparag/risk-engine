@@ -55,7 +55,7 @@ export default function ProjectPage() {
         {/* KPI GRID */}
         <section className="grid grid-cols-2 md:grid-cols-4 gap-px bg-slate-800 border border-slate-800 mb-24">
           {[
-            { label: "Asset Universe", val: "3,217", sub: "Equity Tickers" },
+            { label: "Asset Universe", val: "3,000+", sub: "Equity Tickers" },
             { label: "Entity Coverage", val: "20", sub: "Institutional Managers" },
             { label: "Data Segments", val: "07", sub: "Cross Asset Classes" },
             { label: "Model Stack", val: "20", sub: "XGBoost & Statistical" },
