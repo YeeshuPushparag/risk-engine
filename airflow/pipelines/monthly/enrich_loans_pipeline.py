@@ -9,16 +9,17 @@ OUTPUT_KEY = "loan_enriched_fx_bonds_commod_derivatives_collateral.parquet"
 
 s3 = boto3.client("s3")
 
+
 # =========================
 # HELPERS
 # =========================
-
 def fast_parse_dates(series):
     s = pd.to_datetime(series, errors="coerce", dayfirst=True)
     mask = s.isna()
     if mask.any():
         s[mask] = pd.to_datetime(series[mask], format="%d-%m-%Y", errors="coerce")
     return s
+
 
 def read_s3_parquet(key):
     try:
@@ -27,6 +28,7 @@ def read_s3_parquet(key):
     except s3.exceptions.NoSuchKey:
         return None
 
+
 def write_s3_parquet(df, key):
     buf = BytesIO()
     df.to_parquet(buf, index=False)
@@ -34,7 +36,9 @@ def write_s3_parquet(df, key):
     s3.put_object(Bucket=S3_BUCKET, Key=key, Body=buf)
     print(f"Uploaded {key} to S3")
 
+
 def load_snowflake_table_chunked(name, last_month):
+    """Load table incrementally from Snowflake."""
     print(f"Loading {name} incrementally from Snowflake...")
 
     where_clause = ""
@@ -54,7 +58,6 @@ def load_snowflake_table_chunked(name, last_month):
     with get_snowflake_conn() as ctx:
         cur = ctx.cursor()
         cur.execute(query, params)
-
         for batch in cur.fetch_pandas_batches():
             batch["date"] = fast_parse_dates(batch["date"])
             batch = batch[batch["date"].notna()]  # remove invalid dates
@@ -65,10 +68,10 @@ def load_snowflake_table_chunked(name, last_month):
     print(f"{name} loaded: {len(df):,} rows")
     return df
 
+
 # =========================
 # MAIN PIPELINE
 # =========================
-
 def run_enrich_loans_pipeline():
     import time
     start_time = time.time()
@@ -78,6 +81,7 @@ def run_enrich_loans_pipeline():
     loans = read_s3_parquet(LOAN_BASE_KEY)
     if loans is None:
         raise RuntimeError("loan_synthetic_base.parquet not found in S3")
+
     loans["issue_date"] = fast_parse_dates(loans["issue_date"])
     loans["maturity_date"] = fast_parse_dates(loans["maturity_date"])
     print(f"Loaded {len(loans):,} loans")
@@ -86,7 +90,9 @@ def run_enrich_loans_pipeline():
     prev = read_s3_parquet(OUTPUT_KEY)
     if prev is not None:
         prev["date"] = fast_parse_dates(prev["date"])
-        last_processed_month = prev["date"].dt.to_period("M").max()
+        prev = prev[prev["date"].notna()]  # Remove invalid dates
+        prev = prev[prev["date"] <= pd.Timestamp.today()]  # No future dates
+        last_processed_month = prev["date"].dt.to_period("M").max() if not prev.empty else None
         print(f"Last processed month: {last_processed_month}")
     else:
         last_processed_month = None
@@ -105,10 +111,9 @@ def run_enrich_loans_pipeline():
     # =========================
     new_months = pd.concat([df["month_year"] for df in tables.values() if not df.empty])
     new_months = pd.PeriodIndex(new_months).dropna().sort_values().unique()
-
-    # Cap to actual max date from Snowflake
-    max_real_month = max(df["month_year"].max() for df in tables.values() if not df.empty)
-    new_months = new_months[new_months <= max_real_month]
+    # Cap to today to prevent future months
+    today_period = pd.Period(pd.Timestamp.today(), freq="M")
+    new_months = new_months[new_months <= today_period]
 
     if len(new_months) == 0:
         print("No valid months to process after filtering.")
@@ -116,7 +121,9 @@ def run_enrich_loans_pipeline():
 
     print(f"Processing months: {new_months.min()} -> {new_months.max()}")
 
+    # =========================
     # Active loans cross join with months
+    # =========================
     month_df = pd.DataFrame({"month_start": new_months.to_timestamp(), "month_year": new_months})
     min_date = month_df["month_start"].min()
     max_date = month_df["month_start"].max()
@@ -139,7 +146,7 @@ def run_enrich_loans_pipeline():
     # AGGREGATE Snowflake TABLES MONTHLY
     # =========================
     def aggregate_monthly(df, group_cols, agg_dict):
-        if df.empty: 
+        if df.empty:
             return df
         return df.groupby(group_cols, as_index=False).agg(agg_dict)
 
