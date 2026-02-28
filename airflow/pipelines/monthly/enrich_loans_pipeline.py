@@ -34,36 +34,35 @@ def write_s3_parquet(df, key):
     s3.put_object(Bucket=S3_BUCKET, Key=key, Body=buf)
     print(f"Uploaded {key} to S3")
 
-def load_snowflake_table_chunked(name, last_month, chunk_size=100_000):
-    """Load Snowflake table incrementally in chunks to save memory."""
+def load_snowflake_table_chunked(name, last_month):
     print(f"Loading {name} incrementally from Snowflake...")
+
     where_clause = ""
     params = ()
+
     if last_month is not None:
         param_date = f"{last_month.year}-{last_month.month:02d}-01"
-        where_clause = '''
+        where_clause = """
             WHERE DATE_TRUNC('MONTH', TO_DATE("date", 'YYYY-MM-DD'))
                   > DATE_TRUNC('MONTH', TO_DATE(%s, 'YYYY-MM-DD'))
-        '''
+        """
         params = (param_date,)
+
     query = f'SELECT * FROM "{name}" {where_clause}'
 
     dfs = []
+
     with get_snowflake_conn() as ctx:
         cur = ctx.cursor()
         cur.execute(query, params)
-        while True:
-            chunk = cur.fetch_pandas_batches(chunk_size)
-            batch = pd.concat(list(chunk), ignore_index=True) if chunk else pd.DataFrame()
-            if batch.empty:
-                break
+
+        for batch in cur.fetch_pandas_batches():
             batch["date"] = fast_parse_dates(batch["date"])
             batch["month_year"] = batch["date"].dt.to_period("M")
             dfs.append(batch)
-    if dfs:
-        df = pd.concat(dfs, ignore_index=True)
-    else:
-        df = pd.DataFrame()
+
+    df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
     print(f"{name} loaded: {len(df):,} rows")
     return df
 
