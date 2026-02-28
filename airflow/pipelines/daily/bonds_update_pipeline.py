@@ -134,10 +134,11 @@ def update_bonds_snowflake():
 
     last_date_sf = pd.Timestamp(last_date_sf).date() if last_date_sf else pd.Timestamp("1970-01-01").date()
 
-    if last_date_sf >= today:
+    start_date = last_date_sf + timedelta(days=1)
+
+    if start_date >= today:
         return "ALREADY_UPDATED"
 
-    start_date = last_date_sf + timedelta(days=1)
     df = create_daily_bond_data(start_date.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"))
     # Exclude weekends
     new_rows = df[df["date"].dt.weekday < 5]  # weekdays are 0 to 4 (Mon-Fri)
