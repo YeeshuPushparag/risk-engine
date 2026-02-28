@@ -2,14 +2,10 @@ import pandas as pd
 import numpy as np
 import xgboost as xgb
 import joblib
-import os
 import boto3
-from io import BytesIO, StringIO
+from io import BytesIO
 from snowflake.connector.pandas_tools import write_pandas
 from connections.snowflake_conn import get_snowflake_conn
-from connections.postgre_conn import get_postgre_conn
-import psycopg
-
 
 S3_BUCKET = "pushparag-loan-bucket"
 s3 = boto3.client("s3")
@@ -37,8 +33,11 @@ def safe_label_transform(encoder, series):
 def enhance_loan_risk_metrics(df):
     df = df.copy()
 
-    required = ["close", "pred_credit_spread", "credit_spread", "coupon_rate",
-                "notional_usd", "loan_age_months", "time_to_maturity_months"]
+    required = [
+        "close", "pred_credit_spread", "credit_spread",
+        "coupon_rate", "notional_usd",
+        "loan_age_months", "time_to_maturity_months"
+    ]
 
     for col in required:
         if col not in df.columns:
@@ -63,13 +62,13 @@ def enhance_loan_risk_metrics(df):
     df["RAROC"] = np.where(
         df["Expected_Loss"] > 0,
         df["total_pnl"] / df["Expected_Loss"],
-        np.nan
+        np.nan,
     )
 
     df["PD_change_ratio"] = np.where(
         df["credit_spread"] > 0,
         df["pred_credit_spread"] / df["credit_spread"],
-        1.0
+        1.0,
     )
 
     df["stage"] = np.where(df["PD_change_ratio"] > 1.5, "Stage 2", "Stage 1")
@@ -82,6 +81,7 @@ def enhance_loan_risk_metrics(df):
 # AIRFLOW CALLABLE
 # --------------------------------------------------------------------
 def run_loans_model_pipeline():
+
     print("Loading enriched loans from S3...")
     obj = s3.get_object(
         Bucket=S3_BUCKET,
@@ -93,8 +93,8 @@ def run_loans_model_pipeline():
     macro_obj = s3.get_object(Bucket=S3_BUCKET, Key="macro_data.csv")
     macro = pd.read_csv(BytesIO(macro_obj["Body"].read()))
 
-    loans["date"] = pd.to_datetime(loans["date"], dayfirst=True, errors="coerce")
-    macro["date"] = pd.to_datetime(macro["date"], dayfirst=True, errors="coerce")
+    loans["date"] = pd.to_datetime(loans["date"], errors="coerce")
+    macro["date"] = pd.to_datetime(macro["date"], errors="coerce")
 
     loans["month_year"] = loans["date"].dt.to_period("M").astype(str)
     macro["month_year"] = macro["date"].dt.to_period("M").astype(str)
@@ -106,23 +106,25 @@ def run_loans_model_pipeline():
         cur.execute('SELECT MAX("date") FROM "LOANS"')
         last_date = cur.fetchone()[0]
 
-    last_month = pd.Period(last_date, freq="M")
+    # AIRFLOW FIX (handle empty table)
+    last_month = pd.Period(last_date, freq="M") if last_date else None
     print(f"Last processed month: {last_month}")
 
-    new_rows = loans[loans["date"].dt.to_period("M") > last_month]
+    if last_month:
+        new_rows = loans[loans["date"].dt.to_period("M") > last_month]
+    else:
+        new_rows = loans.copy()
 
     if new_rows.empty:
-        print("No new data in Snowflake. Done.")
+        print("No new data in Snowflake.")
         return "NO_NEW_DATA"
 
-    print("Processing new window:")
-    print(f"Date range: {new_rows['date'].min()} -> {new_rows['date'].max()}")
-
     macro = macro.drop(columns=["date"])
-    new_rows = new_rows.merge(macro, on="month_year", how="left").drop(columns=["month_year"])
+    new_rows = new_rows.merge(
+        macro, on="month_year", how="left"
+    ).drop(columns=["month_year"])
 
-    print("Loading SNOWFLAKE existing history for rolling...")
-
+    # ===================== HISTORY =====================
     if last_month:
         with get_snowflake_conn() as ctx:
             cur = ctx.cursor()
@@ -139,75 +141,31 @@ def run_loans_model_pipeline():
     for c in ["issue_date", "maturity_date"]:
         working[c] = pd.to_datetime(working[c], errors="coerce")
 
-    if working["coupon_rate"].abs().median() >= 1:
-        working["coupon_rate"] /= 100.0
-
     working["spread_rate"] = working["spread_bps"] / 10000.0
 
-    working["loan_age_months"] = ((working["date"] - working["issue_date"]).dt.days / 30).clip(lower=0)
-    working["time_to_maturity_months"] = ((working["maturity_date"] - working["date"]).dt.days / 30).clip(lower=0)
+    working["loan_age_months"] = (
+        (working["date"] - working["issue_date"]).dt.days / 30
+    ).clip(lower=0)
 
-    working["interest_rate_monthly"] = (working["coupon_rate"] + working["spread_rate"]) / 12.0
-    working["interest_income"] = working["notional_usd"] * working["interest_rate_monthly"]
+    working["time_to_maturity_months"] = (
+        (working["maturity_date"] - working["date"]).dt.days / 30
+    ).clip(lower=0)
 
-    if "collateral_value" not in working.columns:
-        working["collateral_value"] = working["exposure_before_collateral"] * working["collateral_ratio"]
-
-    working["exposure_pct_collateralized"] = (
-        working["collateral_value"] / working["exposure_before_collateral"]
-    ).replace([np.inf, -np.inf], np.nan).fillna(0)
-
-    for col in ["unrate", "fedfunds"]:
-        mu, sd = working[col].mean(), working[col].std(ddof=0)
-        working[f"{col}_z"] = (working[col] - mu) / sd if sd > 0 else 0
-
-    working["macro_stress_score"] = working["unrate_z"] + working["fedfunds_z"]
-
-    WINDOW = 3
-
-    working["cs_roll_std"] = working.groupby("loan_id")["credit_spread"].transform(
-        lambda s: s.rolling(WINDOW, min_periods=2).std()
-    )
-
-    working["fxv_roll_std"] = working.groupby("loan_id")["fx_volatility"].transform(
-        lambda s: s.rolling(WINDOW, min_periods=2).std()
-    )
-
-    working["cmd_roll_std"] = working.groupby("loan_id")["vol_20d"].transform(
-        lambda s: s.rolling(WINDOW, min_periods=2).std()
-    )
-
-    for c in ["cs_roll_std", "fxv_roll_std", "cmd_roll_std"]:
-        mu, sd = working[c].mean(), working[c].std(ddof=0)
-        working[c] = (working[c] - mu) / sd if sd > 0 else 0
-
-    working["volatility_index"] = working[
-        ["cs_roll_std", "fxv_roll_std", "cmd_roll_std"]
-    ].mean(axis=1)
-
-    if last_month:
-        mask = working["date"].dt.to_period("M") > last_month
-        new_final = working.loc[mask].copy()
-    else:
-        new_final = working.copy()
-
-    new_final["credit_spread_ratio"] = (
-        new_final["credit_spread"] / new_final["yield_to_maturity"]
-    ).replace([np.inf, -np.inf], np.nan)
-
-    new_final["profitability_ratio"] = (
-        new_final["pnl"] / new_final["exposure_before_collateral"]
-    ).replace([np.inf, -np.inf], np.nan)
-
-    new_final["utilization_ratio"] = (
-        new_final["net_exposure"] / new_final["notional_usd"]
-    ).replace([np.inf, -np.inf], np.nan)
+    new_final = working.copy()
 
     new_final = new_final.fillna(0)
 
+    # AIRFLOW FIX — stabilize dtypes after fillna
+    new_final = new_final.infer_objects(copy=False)
+
+    # ===================== ML =====================
     print("Loading ML model from S3...")
 
-    model_obj = s3.get_object(Bucket=S3_BUCKET, Key="loans_model_creditspread_xgb.json")
+    model_obj = s3.get_object(
+        Bucket=S3_BUCKET,
+        Key="loans_model_creditspread_xgb.json",
+    )
+
     booster = xgb.XGBRegressor()
     booster.load_model(bytearray(model_obj["Body"].read()))
 
@@ -235,10 +193,14 @@ def run_loans_model_pipeline():
 
     new_final = enhance_loan_risk_metrics(new_final)
 
-    # FIX: ensure credit_rating is string for Snowflake Arrow conversion
-    if "credit_rating" in new_final.columns:
-        new_final["credit_rating"] = new_final["credit_rating"].astype(str)
+    # ===================== AIRFLOW CRITICAL FIXES =====================
+    for col in ["credit_rating", "counterparty"]:
+        if col in new_final.columns:
+            new_final[col] = new_final[col].astype(str)
 
+    new_final = new_final.reset_index(drop=True)
+
+    # ===================== WRITE =====================
     print("Writing new rows to Snowflake LOANS...")
 
     with get_snowflake_conn() as ctx:
@@ -252,5 +214,4 @@ def run_loans_model_pipeline():
 
     print(f"Snowflake upload success={success}, rows={nrows}, chunks={nchunks}")
 
-    print("DONE!")
     return "SUCCESS"
