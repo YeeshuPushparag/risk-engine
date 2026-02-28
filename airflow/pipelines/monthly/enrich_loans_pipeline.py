@@ -51,18 +51,17 @@ def load_snowflake_table_chunked(name, last_month):
     query = f'SELECT * FROM "{name}" {where_clause}'
 
     dfs = []
-
     with get_snowflake_conn() as ctx:
         cur = ctx.cursor()
         cur.execute(query, params)
 
         for batch in cur.fetch_pandas_batches():
             batch["date"] = fast_parse_dates(batch["date"])
+            batch = batch[batch["date"].notna()]  # remove invalid dates
             batch["month_year"] = batch["date"].dt.to_period("M")
             dfs.append(batch)
 
     df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
-
     print(f"{name} loaded: {len(df):,} rows")
     return df
 
@@ -101,65 +100,61 @@ def run_enrich_loans_pipeline():
         print("No new months to process.")
         return "NO_NEW_DATA"
 
-    # Determine new months
-    new_months = pd.concat(
-        [df["month_year"] for df in tables.values() if not df.empty]
-    ).dropna().unique()
+    # =========================
+    # SAFE new_months CALCULATION
+    # =========================
+    new_months = pd.concat([df["month_year"] for df in tables.values() if not df.empty])
+    new_months = pd.PeriodIndex(new_months).dropna().sort_values().unique()
 
-    new_months = pd.PeriodIndex(new_months).sort_values()
+    # Cap to actual max date from Snowflake
+    max_real_month = max(df["month_year"].max() for df in tables.values() if not df.empty)
+    new_months = new_months[new_months <= max_real_month]
+
+    if len(new_months) == 0:
+        print("No valid months to process after filtering.")
+        return "NO_NEW_DATA"
+
     print(f"Processing months: {new_months.min()} -> {new_months.max()}")
 
     # Active loans cross join with months
-    month_df = pd.DataFrame({
-        "month_start": new_months.to_timestamp(),
-        "month_year": new_months
-    })
-
+    month_df = pd.DataFrame({"month_start": new_months.to_timestamp(), "month_year": new_months})
     min_date = month_df["month_start"].min()
     max_date = month_df["month_start"].max()
 
-    active_loans = loans[
-        (loans["maturity_date"] >= min_date) &
-        (loans["issue_date"] <= max_date)
-    ].copy()
-
+    active_loans = loans[(loans["maturity_date"] >= min_date) & (loans["issue_date"] <= max_date)].copy()
     print(f"Active loans: {len(active_loans):,}")
 
-    # Cross join efficiently
+    # Cross join
     active_loans["key"] = 1
     month_df["key"] = 1
-
     loans_expanded = active_loans.merge(month_df, on="key").drop("key", axis=1)
-
     loans_expanded = loans_expanded[
         (loans_expanded["month_start"] >= loans_expanded["issue_date"]) &
         (loans_expanded["month_start"] <= loans_expanded["maturity_date"])
     ]
-
-    # FIXED: keep datetime64[ns], not python date
     loans_expanded["date"] = loans_expanded["month_start"]
-
     print(f"Expanded rows: {len(loans_expanded):,}")
 
-    # Aggregate Snowflake tables monthly
-    fx_month = tables["FX"].groupby(["ticker", "month_year"], as_index=False).agg({
-        "fx_rate": "mean",
-        "fx_volatility": "mean",
-        "carry_daily": "mean"
-    })
+    # =========================
+    # AGGREGATE Snowflake TABLES MONTHLY
+    # =========================
+    def aggregate_monthly(df, group_cols, agg_dict):
+        if df.empty: 
+            return df
+        return df.groupby(group_cols, as_index=False).agg(agg_dict)
 
-    bonds_month = tables["BONDS"].groupby(["ticker", "month_year"], as_index=False).agg({
+    fx_month = aggregate_monthly(tables["FX"], ["ticker", "month_year"], {
+        "fx_rate": "mean", "fx_volatility": "mean", "carry_daily": "mean"
+    })
+    bonds_month = aggregate_monthly(tables["BONDS"], ["ticker", "month_year"], {
         "credit_spread": "mean",
         "yield_to_maturity": "mean",
         "credit_rating": lambda x: x.mode()[0] if len(x.mode()) else None
     })
-
-    commod_month = tables["COMMODITY"].groupby(["sector", "month_year"], as_index=False).agg({
-        "close": "mean",
-        "vol_20d": "mean"
+    commod_month = aggregate_monthly(tables["COMMODITY"], ["sector", "month_year"], {
+        "close": "mean", "vol_20d": "mean"
     })
-
-    deriv_month = tables["DERIVATIVES"].groupby(["ticker", "month_year"], as_index=False).agg({
+    deriv_month = aggregate_monthly(tables["DERIVATIVES"], ["ticker", "month_year"], {
         "notional": "mean",
         "exposure_before_collateral": "mean",
         "collateral_value": "mean",
@@ -168,46 +163,31 @@ def run_enrich_loans_pipeline():
         "margin_call_flag": lambda x: 1 if (x == 1).any() else 0,
         "pnl": "mean"
     })
-
-    collat_month = tables["COLLATERAL"].groupby(["ticker", "month_year"], as_index=False).agg({
+    collat_month = aggregate_monthly(tables["COLLATERAL"], ["ticker", "month_year"], {
         "counterparty": lambda x: '|'.join(sorted(set(map(str, x)))[:3]),
         "funding_cost": "mean",
         "liquidity_score": "mean",
         "margin_call_amount": "mean"
     })
 
-    # Merge monthly tables into loans_expanded
+    # =========================
+    # MERGE ALL
+    # =========================
     merged = loans_expanded
-
-    if not fx_month.empty:
-        merged = merged.merge(fx_month, on=["ticker", "month_year"], how="left", sort=False)
-
-    if not bonds_month.empty:
-        merged = merged.merge(bonds_month, on=["ticker", "month_year"], how="left", sort=False)
-
-    if not commod_month.empty:
-        merged = merged.merge(commod_month, on=["sector", "month_year"], how="left", sort=False)
-
-    if not deriv_month.empty:
-        merged = merged.merge(deriv_month, on=["ticker", "month_year"], how="left", sort=False)
-
-    if not collat_month.empty:
-        merged = merged.merge(collat_month, on=["ticker", "month_year"], how="left", sort=False)
+    for month_df_, name in zip([fx_month, bonds_month, commod_month, deriv_month, collat_month], table_names):
+        if not month_df_.empty:
+            merge_on = ["ticker", "month_year"] if name != "COMMODITY" else ["sector", "month_year"]
+            merged = merged.merge(month_df_, on=merge_on, how="left", sort=False)
 
     merged.drop(columns=["month_year", "month_start"], inplace=True, errors="ignore")
 
-    # Append previous enriched file if exists
     if prev is not None:
         merged = pd.concat([prev, merged], ignore_index=True)
         merged.drop_duplicates(subset=["loan_id", "date"], inplace=True)
 
-    # Ensure date column is proper datetime before writing
     merged["date"] = pd.to_datetime(merged["date"])
-
-    # Write final dataset to S3
     write_s3_parquet(merged, OUTPUT_KEY)
 
     total_time = time.time() - start_time
     print(f"Pipeline completed in {total_time:.1f} seconds. Final shape: {merged.shape}")
-
     return "SUCCESS"
