@@ -9,14 +9,14 @@ from connections.snowflake_conn import get_snowflake_conn
 
 
 S3_BUCKET = "pushparag-loan-bucket"
-s3 = boto3.client("s3")
-
 OUTPUT_TABLE = "LOANS"
 
+s3 = boto3.client("s3")
 
-# --------------------------------------------------------------------
-# SAFE LABEL TRANSFORM
-# --------------------------------------------------------------------
+
+# =========================================================
+# SAFE LABEL ENCODING
+# =========================================================
 def safe_label_transform(encoder, series):
     series = series.astype(str)
     known = set(encoder.classes_)
@@ -28,9 +28,9 @@ def safe_label_transform(encoder, series):
     return encoder.transform(series)
 
 
-# --------------------------------------------------------------------
+# =========================================================
 # RISK METRICS
-# --------------------------------------------------------------------
+# =========================================================
 def enhance_loan_risk_metrics(df):
 
     df = df.copy()
@@ -41,10 +41,13 @@ def enhance_loan_risk_metrics(df):
     df["PD"] = np.clip(df["pred_credit_spread"] / 10, 0.01, 0.25)
     df["LGD"] = 0.45
     df["EAD"] = df["notional_usd"]
+
     df["Expected_Loss"] = df["PD"] * df["LGD"] * df["EAD"]
 
     df["carry_pnl_current"] = (df["coupon_rate"] * df["EAD"]) / 12
-    df["carry_pnl_cumulative"] = df["carry_pnl_current"] * df["loan_age_months"]
+    df["carry_pnl_cumulative"] = (
+        df["carry_pnl_current"] * df["loan_age_months"]
+    )
 
     spread_diff = df["pred_credit_spread"] - df["credit_spread"]
     df["spread_pnl"] = spread_diff * df["EAD"] / 10000
@@ -68,9 +71,9 @@ def enhance_loan_risk_metrics(df):
     return df
 
 
-# --------------------------------------------------------------------
+# =========================================================
 # AIRFLOW CALLABLE
-# --------------------------------------------------------------------
+# =========================================================
 def run_loans_model_pipeline():
 
     print("Loading enriched loans...")
@@ -80,18 +83,24 @@ def run_loans_model_pipeline():
     )
     loans = pd.read_parquet(BytesIO(obj["Body"].read()))
 
+    # 🔥 HARD BLOCK any schema drift from generation stage
+    loans.drop(columns=["notional_oc"], errors="ignore", inplace=True)
+
     print("Loading macro...")
     macro_obj = s3.get_object(Bucket=S3_BUCKET, Key="macro_data.csv")
     macro = pd.read_csv(BytesIO(macro_obj["Body"].read()))
 
-    loans["date"] = pd.to_datetime(loans["date"], errors="coerce")
-    macro["date"] = pd.to_datetime(macro["date"], errors="coerce")
+    # -------------------------------------------------
+    # DATE HANDLING
+    # -------------------------------------------------
+    loans["date"] = pd.to_datetime(loans["date"], dayfirst=True, errors="coerce")
+    macro["date"] = pd.to_datetime(macro["date"], dayfirst=True, errors="coerce")
 
     loans["month_year"] = loans["date"].dt.to_period("M").astype(str)
     macro["month_year"] = macro["date"].dt.to_period("M").astype(str)
 
     # -------------------------------------------------
-    # LAST MONTH
+    # FIND LAST PROCESSED MONTH
     # -------------------------------------------------
     with get_snowflake_conn() as ctx:
         cur = ctx.cursor()
@@ -99,7 +108,7 @@ def run_loans_model_pipeline():
         last_date = cur.fetchone()[0]
 
     last_month = pd.Period(last_date, freq="M") if last_date else None
-    print("Last month:", last_month)
+    print("Last processed month:", last_month)
 
     if last_month:
         loans = loans[loans["date"].dt.to_period("M") > last_month]
@@ -108,6 +117,9 @@ def run_loans_model_pipeline():
         print("No new rows.")
         return "NO_NEW_DATA"
 
+    # -------------------------------------------------
+    # MERGE MACRO
+    # -------------------------------------------------
     macro = macro.drop(columns=["date"])
     loans = loans.merge(macro, on="month_year", how="left")
     loans.drop(columns=["month_year"], inplace=True)
@@ -135,20 +147,29 @@ def run_loans_model_pipeline():
     # -------------------------------------------------
     print("Loading model...")
 
-    model_obj = s3.get_object(
-        Bucket=S3_BUCKET,
-        Key="loans_model_creditspread_xgb.json",
+    booster = xgb.XGBRegressor()
+    booster.load_model(
+        bytearray(
+            s3.get_object(
+                Bucket=S3_BUCKET,
+                Key="loans_model_creditspread_xgb.json",
+            )["Body"].read()
+        )
     )
 
-    booster = xgb.XGBRegressor()
-    booster.load_model(bytearray(model_obj["Body"].read()))
-
     features = joblib.load(
-        BytesIO(s3.get_object(Bucket=S3_BUCKET, Key="loans_features.pkl")["Body"].read())
+        BytesIO(
+            s3.get_object(Bucket=S3_BUCKET, Key="loans_features.pkl")["Body"].read()
+        )
     )
 
     encoders = joblib.load(
-        BytesIO(s3.get_object(Bucket=S3_BUCKET, Key="loans_label_encoders.pkl")["Body"].read())
+        BytesIO(
+            s3.get_object(
+                Bucket=S3_BUCKET,
+                Key="loans_label_encoders.pkl",
+            )["Body"].read()
+        )
     )
 
     original = loans.copy()
@@ -168,20 +189,33 @@ def run_loans_model_pipeline():
     loans = enhance_loan_risk_metrics(loans)
 
     # -------------------------------------------------
-    # HARD CLEAN (prevents ALL Snowflake errors)
+    # STRICT SCHEMA PROJECTION (NO DRIFT EVER AGAIN)
     # -------------------------------------------------
-    loans.columns = loans.columns.str.lower()
+    allowed_columns = [
+        "loan_id","ticker","sector","industry","currency","date",
+        "issue_date","maturity_date","rate_type","coupon_rate",
+        "spread_bps","spread_rate","notional_usd","credit_rating",
+        "credit_spread","yield_to_maturity","fx_rate","fx_volatility",
+        "carry_daily","close","vol_20d","gdp","unrate","cpi","fedfunds",
+        "loan_age_months","time_to_maturity_months","interest_income",
+        "exposure_pct_collateralized","macro_stress_score",
+        "volatility_index","credit_spread_ratio","profitability_ratio",
+        "utilization_ratio","counterparty","funding_cost",
+        "liquidity_score","pred_credit_spread","PD","LGD","EAD",
+        "Expected_Loss","carry_pnl_current","carry_pnl_cumulative",
+        "spread_pnl","total_pnl","RAROC","stage"
+    ]
+
+    loans = loans[[c for c in allowed_columns if c in loans.columns]]
+
     loans = loans.loc[:, ~loans.columns.duplicated()]
-    loans = loans.loc[:, ~loans.columns.str.endswith(("_x", "_y"))]
-
-    for col in ["credit_rating", "counterparty", "stage"]:
-        if col in loans.columns:
-            loans[col] = loans[col].astype(str)
-
     loans.reset_index(drop=True, inplace=True)
 
+    print("Columns being written:")
+    print(loans.columns.tolist())
+
     # -------------------------------------------------
-    # WRITE
+    # WRITE TO SNOWFLAKE
     # -------------------------------------------------
     print("Writing to Snowflake...")
 
