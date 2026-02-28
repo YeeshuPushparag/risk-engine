@@ -3,10 +3,10 @@ import numpy as np
 import xgboost as xgb
 import joblib
 import boto3
-from io import BytesIO
+from io import BytesIO, StringIO
 from snowflake.connector.pandas_tools import write_pandas
 from connections.snowflake_conn import get_snowflake_conn
-from connections.postgre_conn import get_postgre_conn  # for Postgres push later
+from connections.postgre_conn import get_postgre_conn  # Postgres connection
 
 S3_BUCKET = "pushparag-loan-bucket"
 OUTPUT_TABLE = "LOANS"
@@ -57,28 +57,23 @@ def enhance_loan_risk_metrics(df):
 
 
 # =========================
-# HARDEN TYPES FOR SNOWFLAKE / PYARROW
+# HARDEN TYPES FOR SNOWFLAKE
 # =========================
 def enforce_snowflake_types(df):
     df = df.copy()
-    # Force date columns as string YYYY-MM-DD for Snowflake
     for col in ["date", "issue_date", "maturity_date"]:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
 
-    # Fill numeric columns with 0
     numeric_cols = df.select_dtypes(include=["number"]).columns
     df[numeric_cols] = df[numeric_cols].fillna(0)
 
-    # Object columns as string, fill missing
     object_cols = df.select_dtypes(include=["object"]).columns
     df[object_cols] = df[object_cols].fillna("").astype(str)
 
-    # Stage column should be string for Snowflake
     if "stage" in df.columns:
         df["stage"] = df["stage"].astype(str).fillna("0")
 
-    # Reset index
     df = df.reset_index(drop=True)
     return df
 
@@ -99,7 +94,7 @@ def run_loans_model_pipeline():
     loans = pd.read_parquet(BytesIO(loans_obj["Body"].read()))
 
     # -------------------------
-    # FILTER VALID DATES
+    # VALID DATES
     # -------------------------
     for col in ["date", "issue_date", "maturity_date"]:
         if col in loans.columns:
@@ -213,21 +208,68 @@ def run_loans_model_pipeline():
     loans = loans.loc[:, ~loans.columns.duplicated()]
 
     # -------------------------
-    # CONVERT TYPES FOR SNOWFLAKE
-    # -------------------------
-    loans = enforce_snowflake_types(loans)
-
-    # -------------------------
     # WRITE TO SNOWFLAKE
     # -------------------------
-    if loans.empty:
-        print("No valid rows to push to Snowflake after processing.")
-        return "NO_NEW_DATA"
+    loans_sf = enforce_snowflake_types(loans)
+    if not loans_sf.empty:
+        print(f"Pushing {len(loans_sf):,} rows to Snowflake...")
+        with get_snowflake_conn() as ctx:
+            success, nchunks, nrows, _ = write_pandas(
+                ctx, loans_sf, OUTPUT_TABLE, chunk_size=100_000, quote_identifiers=True
+            )
+        print(f"Snowflake push result: SUCCESS={success}, rows={nrows}")
 
-    print(f"Pushing {len(loans):,} rows to Snowflake...")
-    with get_snowflake_conn() as ctx:
-        success, nchunks, nrows, _ = write_pandas(
-            ctx, loans, OUTPUT_TABLE, chunk_size=100_000, quote_identifiers=True
-        )
-    print(f"Snowflake push result: SUCCESS={success}, rows={nrows}")
-    return f"SUCCESS_SNOWFLAKE_{nrows}_ROWS"
+    # =========================
+    # WRITE TO POSTGRES
+    # =========================
+    try:
+        print("Uploading to PostgreSQL loan_data...")
+
+        df_pg = loans.copy()
+
+        # Compute month from Snowflake 'date'
+        df_pg["month"] = pd.to_datetime(df_pg["date"]).dt.to_period("M").dt.to_timestamp().dt.date
+
+        # Drop 'date' column (Snowflake-only)
+        if "date" in df_pg.columns:
+            df_pg = df_pg.drop(columns=["date"])
+
+        # Fix stage to int
+        if "stage" in df_pg.columns:
+            df_pg["stage"] = df_pg["stage"].astype(float).round().astype(int)
+
+        # Round integer columns
+        for c in ["loan_age_months", "time_to_maturity_months"]:
+            if c in df_pg.columns:
+                df_pg[c] = df_pg[c].fillna(0).astype(float).round().astype(int)
+
+        # Align column order with Postgres
+        with get_postgre_conn() as pg_conn:
+            with pg_conn.cursor() as pg_cur:
+                pg_cur.execute("""SELECT column_name
+                                  FROM information_schema.columns
+                                  WHERE table_schema='public'
+                                  AND table_name='loan_data'
+                                  ORDER BY ordinal_position""")
+                pg_cols_order = [r[0] for r in pg_cur.fetchall() if r[0] != "id"]
+
+                df_pg = df_pg[[c for c in pg_cols_order if c in df_pg.columns]]
+
+                buf = StringIO()
+                df_pg.to_csv(buf, index=False, header=False)
+                buf.seek(0)
+
+                quoted = [f'"{c}"' for c in pg_cols_order]
+                copy_sql = f"COPY public.loan_data ({','.join(quoted)}) FROM STDIN WITH CSV"
+
+                with pg_cur.copy(copy_sql) as copy:
+                    copy.write(buf.getvalue())
+
+                pg_conn.commit()
+
+        print(f"PostgreSQL upload complete. Rows: {len(df_pg)}")
+
+    except Exception as e:
+        print("PostgreSQL upload FAILED:", e)
+
+    return f"SUCCESS_SNOWFLAKE_{len(loans_sf)}_ROWS_PG_{len(df_pg)}_ROWS"
