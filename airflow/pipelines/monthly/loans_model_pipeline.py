@@ -6,6 +6,7 @@ import boto3
 from io import BytesIO
 from snowflake.connector.pandas_tools import write_pandas
 from connections.snowflake_conn import get_snowflake_conn
+from connections.postgre_conn import get_postgre_conn  # for Postgres push later
 
 S3_BUCKET = "pushparag-loan-bucket"
 OUTPUT_TABLE = "LOANS"
@@ -58,15 +59,27 @@ def enhance_loan_risk_metrics(df):
 # =========================
 # HARDEN TYPES FOR SNOWFLAKE / PYARROW
 # =========================
-def enforce_arrow_safe_types(df):
+def enforce_snowflake_types(df):
+    df = df.copy()
+    # Force date columns as string YYYY-MM-DD for Snowflake
     for col in ["date", "issue_date", "maturity_date"]:
         if col in df.columns:
-            # Force dayfirst parsing
-            df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
+            df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+
+    # Fill numeric columns with 0
     numeric_cols = df.select_dtypes(include=["number"]).columns
     df[numeric_cols] = df[numeric_cols].fillna(0)
+
+    # Object columns as string, fill missing
     object_cols = df.select_dtypes(include=["object"]).columns
     df[object_cols] = df[object_cols].fillna("").astype(str)
+
+    # Stage column should be string for Snowflake
+    if "stage" in df.columns:
+        df["stage"] = df["stage"].astype(str).fillna("0")
+
+    # Reset index
+    df = df.reset_index(drop=True)
     return df
 
 
@@ -77,7 +90,7 @@ def run_loans_model_pipeline():
     print("Starting Loans Model Pipeline...")
 
     # -------------------------
-    # LOAD DATA
+    # LOAD DATA FROM S3
     # -------------------------
     loans_obj = s3.get_object(
         Bucket=S3_BUCKET,
@@ -86,13 +99,13 @@ def run_loans_model_pipeline():
     loans = pd.read_parquet(BytesIO(loans_obj["Body"].read()))
 
     # -------------------------
-    # DATE HANDLING
+    # FILTER VALID DATES
     # -------------------------
     for col in ["date", "issue_date", "maturity_date"]:
         if col in loans.columns:
-            loans[col] = pd.to_datetime(loans[col], errors="coerce", dayfirst=True)
-
+            loans[col] = pd.to_datetime(loans[col], errors="coerce")
     loans = loans[loans["date"].notna()]
+
     today_period = pd.Period(pd.Timestamp.today(), freq="M")
     loans = loans[loans["date"].dt.to_period("M") <= today_period]
 
@@ -102,8 +115,7 @@ def run_loans_model_pipeline():
     try:
         macro_obj = s3.get_object(Bucket=S3_BUCKET, Key="macro_data.csv")
         macro = pd.read_csv(BytesIO(macro_obj["Body"].read()))
-        for col in ["date"]:
-            macro[col] = pd.to_datetime(macro[col], errors="coerce", dayfirst=True)
+        macro["date"] = pd.to_datetime(macro["date"], errors="coerce")
         macro = macro[macro["date"].notna()]
         loans["month_year"] = loans["date"].dt.to_period("M").astype(str)
         macro["month_year"] = macro["date"].dt.to_period("M").astype(str)
@@ -113,7 +125,7 @@ def run_loans_model_pipeline():
         print("Macro data not found, proceeding without it")
 
     # -------------------------
-    # LAST PROCESSED
+    # FILTER LAST PROCESSED
     # -------------------------
     with get_snowflake_conn() as ctx:
         cur = ctx.cursor()
@@ -160,13 +172,6 @@ def run_loans_model_pipeline():
     loans["volatility_index"] = loans[["cs_roll_std", "fxv_roll_std", "cmd_roll_std"]].mean(axis=1)
 
     # -------------------------
-    # MACRO / RATIO FEATURES
-    # -------------------------
-    loans["credit_spread_ratio"] = (loans.get("credit_spread", 0) / loans.get("yield_to_maturity", 1)).replace([np.inf, -np.inf], np.nan).fillna(0)
-    loans["profitability_ratio"] = (loans.get("pnl", 0) / loans.get("exposure_before_collateral", 1)).replace([np.inf, -np.inf], np.nan).fillna(0)
-    loans["utilization_ratio"] = (loans.get("net_exposure", 0) / loans.get("notional_usd", 1)).replace([np.inf, -np.inf], np.nan).fillna(0)
-
-    # -------------------------
     # MODEL PREDICTION
     # -------------------------
     print("Loading ML model + encoders...")
@@ -206,13 +211,17 @@ def run_loans_model_pipeline():
     ]
     loans = loans[[c for c in allowed_columns if c in loans.columns]]
     loans = loans.loc[:, ~loans.columns.duplicated()]
-    loans = enforce_arrow_safe_types(loans)
+
+    # -------------------------
+    # CONVERT TYPES FOR SNOWFLAKE
+    # -------------------------
+    loans = enforce_snowflake_types(loans)
 
     # -------------------------
     # WRITE TO SNOWFLAKE
     # -------------------------
     if loans.empty:
-        print("No valid rows to push to Snowflake after all processing.")
+        print("No valid rows to push to Snowflake after processing.")
         return "NO_NEW_DATA"
 
     print(f"Pushing {len(loans):,} rows to Snowflake...")
@@ -221,4 +230,4 @@ def run_loans_model_pipeline():
             ctx, loans, OUTPUT_TABLE, chunk_size=100_000, quote_identifiers=True
         )
     print(f"Snowflake push result: SUCCESS={success}, rows={nrows}")
-    return "SUCCESS"
+    return f"SUCCESS_SNOWFLAKE_{nrows}_ROWS"
