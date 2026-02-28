@@ -29,7 +29,7 @@ def safe_label_transform(encoder, series):
 
 
 # =========================================================
-# RISK METRICS
+# RISK METRICS (STAGE AS INTEGER)
 # =========================================================
 def enhance_loan_risk_metrics(df):
 
@@ -66,7 +66,29 @@ def enhance_loan_risk_metrics(df):
         1.0,
     )
 
-    df["stage"] = np.where(ratio > 1.5, "Stage 2", "Stage 1")
+    # 🔥 INTEGER STAGE (MATCH DJANGO)
+    df["stage"] = np.where(ratio > 1.5, 2, 1)
+
+    return df
+
+
+# =========================================================
+# HARDEN DATA TYPES FOR PYARROW
+# =========================================================
+def enforce_arrow_safe_types(df):
+
+    # Datetime columns
+    for col in ["date", "issue_date", "maturity_date"]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+
+    # Numeric columns
+    numeric_cols = df.select_dtypes(include=["number"]).columns
+    df[numeric_cols] = df[numeric_cols].fillna(0)
+
+    # String columns
+    object_cols = df.select_dtypes(include=["object"]).columns
+    df[object_cols] = df[object_cols].fillna("").astype(str)
 
     return df
 
@@ -83,7 +105,6 @@ def run_loans_model_pipeline():
     )
     loans = pd.read_parquet(BytesIO(obj["Body"].read()))
 
-    # 🔥 HARD BLOCK any schema drift from generation stage
     loans.drop(columns=["notional_oc"], errors="ignore", inplace=True)
 
     print("Loading macro...")
@@ -93,8 +114,8 @@ def run_loans_model_pipeline():
     # -------------------------------------------------
     # DATE HANDLING
     # -------------------------------------------------
-    loans["date"] = pd.to_datetime(loans["date"], dayfirst=True, errors="coerce")
-    macro["date"] = pd.to_datetime(macro["date"], dayfirst=True, errors="coerce")
+    loans["date"] = pd.to_datetime(loans["date"], errors="coerce")
+    macro["date"] = pd.to_datetime(macro["date"], errors="coerce")
 
     loans["month_year"] = loans["date"].dt.to_period("M").astype(str)
     macro["month_year"] = macro["date"].dt.to_period("M").astype(str)
@@ -139,8 +160,6 @@ def run_loans_model_pipeline():
     loans["time_to_maturity_months"] = (
         (loans["maturity_date"] - loans["date"]).dt.days / 30
     ).clip(lower=0)
-
-    loans = loans.fillna(0).infer_objects(copy=False)
 
     # -------------------------------------------------
     # LOAD MODEL
@@ -189,7 +208,7 @@ def run_loans_model_pipeline():
     loans = enhance_loan_risk_metrics(loans)
 
     # -------------------------------------------------
-    # STRICT SCHEMA PROJECTION (NO DRIFT EVER AGAIN)
+    # STRICT SCHEMA PROJECTION
     # -------------------------------------------------
     allowed_columns = [
         "loan_id","ticker","sector","industry","currency","date",
@@ -207,12 +226,16 @@ def run_loans_model_pipeline():
     ]
 
     loans = loans[[c for c in allowed_columns if c in loans.columns]]
-
     loans = loans.loc[:, ~loans.columns.duplicated()]
     loans.reset_index(drop=True, inplace=True)
 
-    print("Columns being written:")
-    print(loans.columns.tolist())
+    # -------------------------------------------------
+    # ENFORCE PYARROW SAFE TYPES
+    # -------------------------------------------------
+    loans = enforce_arrow_safe_types(loans)
+
+    print("Final dtypes:")
+    print(loans.dtypes)
 
     # -------------------------------------------------
     # WRITE TO SNOWFLAKE
