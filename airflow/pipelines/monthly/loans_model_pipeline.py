@@ -61,7 +61,8 @@ def enhance_loan_risk_metrics(df):
 def enforce_arrow_safe_types(df):
     for col in ["date", "issue_date", "maturity_date"]:
         if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce")
+            # Force dayfirst parsing
+            df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
     numeric_cols = df.select_dtypes(include=["number"]).columns
     df[numeric_cols] = df[numeric_cols].fillna(0)
     object_cols = df.select_dtypes(include=["object"]).columns
@@ -78,40 +79,38 @@ def run_loans_model_pipeline():
     # -------------------------
     # LOAD DATA
     # -------------------------
-    try:
-        loans_obj = s3.get_object(
-            Bucket=S3_BUCKET,
-            Key="loan_enriched_fx_bonds_commod_derivatives_collateral.parquet"
-        )
-        loans = pd.read_parquet(BytesIO(loans_obj["Body"].read()))
-    except s3.exceptions.NoSuchKey:
-        raise RuntimeError("Enriched loans parquet not found in S3")
-
-    loans.drop(columns=["notional_oc"], errors="ignore", inplace=True)
-
-    try:
-        macro_obj = s3.get_object(Bucket=S3_BUCKET, Key="macro_data.csv")
-        macro = pd.read_csv(BytesIO(macro_obj["Body"].read()))
-    except s3.exceptions.NoSuchKey:
-        print("Macro data not found, proceeding without it")
-        macro = pd.DataFrame()
+    loans_obj = s3.get_object(
+        Bucket=S3_BUCKET,
+        Key="loan_enriched_fx_bonds_commod_derivatives_collateral.parquet"
+    )
+    loans = pd.read_parquet(BytesIO(loans_obj["Body"].read()))
 
     # -------------------------
     # DATE HANDLING
     # -------------------------
-    loans["date"] = pd.to_datetime(loans["date"], errors="coerce")
-    loans = loans[loans["date"].notna()]  # remove bad rows
+    for col in ["date", "issue_date", "maturity_date"]:
+        if col in loans.columns:
+            loans[col] = pd.to_datetime(loans[col], errors="coerce", dayfirst=True)
 
+    loans = loans[loans["date"].notna()]
     today_period = pd.Period(pd.Timestamp.today(), freq="M")
     loans = loans[loans["date"].dt.to_period("M") <= today_period]
 
-    if not macro.empty:
-        macro["date"] = pd.to_datetime(macro["date"], errors="coerce")
+    # -------------------------
+    # LOAD MACRO DATA
+    # -------------------------
+    try:
+        macro_obj = s3.get_object(Bucket=S3_BUCKET, Key="macro_data.csv")
+        macro = pd.read_csv(BytesIO(macro_obj["Body"].read()))
+        for col in ["date"]:
+            macro[col] = pd.to_datetime(macro[col], errors="coerce", dayfirst=True)
         macro = macro[macro["date"].notna()]
         loans["month_year"] = loans["date"].dt.to_period("M").astype(str)
         macro["month_year"] = macro["date"].dt.to_period("M").astype(str)
         macro = macro.drop(columns=["date"]).drop_duplicates(subset=["month_year"])
         loans = loans.merge(macro, on="month_year", how="left").drop(columns=["month_year"])
+    except s3.exceptions.NoSuchKey:
+        print("Macro data not found, proceeding without it")
 
     # -------------------------
     # LAST PROCESSED
@@ -132,9 +131,6 @@ def run_loans_model_pipeline():
     # -------------------------
     # FEATURE ENGINEERING
     # -------------------------
-    for col in ["issue_date", "maturity_date"]:
-        loans[col] = pd.to_datetime(loans[col], errors="coerce")
-
     loans["spread_rate"] = loans.get("spread_bps", 0) / 10000.0
     loans["loan_age_months"] = ((loans["date"] - loans["issue_date"]).dt.days / 30).clip(lower=0)
     loans["time_to_maturity_months"] = ((loans["maturity_date"] - loans["date"]).dt.days / 30).clip(lower=0)
@@ -143,7 +139,6 @@ def run_loans_model_pipeline():
 
     if "collateral_value" not in loans.columns and "exposure_before_collateral" in loans.columns:
         loans["collateral_value"] = loans["exposure_before_collateral"] * loans.get("collateral_ratio", 0)
-
     loans["exposure_pct_collateralized"] = (
         loans.get("collateral_value", 0) / loans.get("exposure_before_collateral", 1)
     ).replace([np.inf, -np.inf], np.nan).fillna(0)
@@ -153,7 +148,9 @@ def run_loans_model_pipeline():
     # -------------------------
     loans = loans.sort_values(["loan_id", "date"])
     WINDOW = 3
-    for col, new_col in [("credit_spread", "cs_roll_std"), ("fx_volatility", "fxv_roll_std"), ("vol_20d", "cmd_roll_std")]:
+    for col, new_col in [("credit_spread", "cs_roll_std"),
+                         ("fx_volatility", "fxv_roll_std"),
+                         ("vol_20d", "cmd_roll_std")]:
         if col in loans.columns:
             loans[new_col] = loans.groupby("loan_id")[col].transform(lambda s: s.rolling(WINDOW, min_periods=2).std())
             mu, sd = loans[new_col].mean(), loans[new_col].std(ddof=0)
@@ -165,11 +162,9 @@ def run_loans_model_pipeline():
     # -------------------------
     # MACRO / RATIO FEATURES
     # -------------------------
-    for col, new_col in [("credit_spread", "credit_spread_ratio"), ("pnl", "profitability_ratio"), ("net_exposure", "utilization_ratio")]:
-        if col in loans.columns and "yield_to_maturity" in loans.columns:
-            loans[new_col] = (loans[col] / loans.get("yield_to_maturity", 1)).replace([np.inf, -np.inf], np.nan).fillna(0)
-        else:
-            loans[new_col] = 0
+    loans["credit_spread_ratio"] = (loans.get("credit_spread", 0) / loans.get("yield_to_maturity", 1)).replace([np.inf, -np.inf], np.nan).fillna(0)
+    loans["profitability_ratio"] = (loans.get("pnl", 0) / loans.get("exposure_before_collateral", 1)).replace([np.inf, -np.inf], np.nan).fillna(0)
+    loans["utilization_ratio"] = (loans.get("net_exposure", 0) / loans.get("notional_usd", 1)).replace([np.inf, -np.inf], np.nan).fillna(0)
 
     # -------------------------
     # MODEL PREDICTION
