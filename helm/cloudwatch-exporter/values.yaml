@@ -14,20 +14,25 @@ prometheus-cloudwatch-exporter:
   serviceMonitor:
     enabled: true
     namespace: monitoring
-    interval: 30s
-    scrapeTimeout: 10s
     additionalLabels:
       release: monitoring
 
   config: |
     region: us-east-1
     metrics:
+
       - aws_namespace: AWS/RDS
         aws_metric_name: CPUUtilization
         aws_dimensions: [DBInstanceIdentifier]
+        aws_dimension_select:
+          DBInstanceIdentifier:
+            - risk-postgres
         aws_statistics: [Average]
 
       - aws_namespace: AWS/ElastiCache
         aws_metric_name: CPUUtilization
         aws_dimensions: [CacheClusterId]
+        aws_dimension_select:
+          CacheClusterId:
+            - risk-redis
         aws_statistics: [Average]
