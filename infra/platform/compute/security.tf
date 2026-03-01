@@ -1,7 +1,7 @@
 resource "aws_security_group" "jenkins_sg" {
   name        = "${var.name_prefix}-jenkins-sg"
   description = "Security group for Jenkins"
-  vpc_id = var.vpc_id
+  vpc_id      = var.vpc_id
 
   ingress {
     description = "SSH"
@@ -17,6 +17,15 @@ resource "aws_security_group" "jenkins_sg" {
     to_port     = 8080
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+  }
+
+
+  ingress {
+    description     = "Prometheus scrape from EKS"
+    from_port       = 9100
+    to_port         = 9100
+    protocol        = "tcp"
+    security_groups = [var.eks_node_security_group_id]
   }
 
   egress {

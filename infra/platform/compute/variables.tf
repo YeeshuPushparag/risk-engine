@@ -18,3 +18,8 @@ variable "vpc_id" {
 variable "public_subnets" {
   type = list(string)
 }
+
+variable "eks_node_security_group_id" {
+  description = "EKS node security group ID from remote state"
+  type        = string
+}

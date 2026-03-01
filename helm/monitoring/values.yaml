@@ -32,15 +32,29 @@ kube-prometheus-stack:
               requests:
                 storage: 100Gi
 
+      ##################################
+      # ADDITIONAL SCRAPES
+      ##################################
+      additionalScrapeConfigs:
+        # Jenkins EC2
+        - job_name: "jenkins-ec2"
+          static_configs:
+            - targets:
+                - "ip-10-0-1-176.ec2.internal:9100"
+
+        # CloudWatch Exporter (RDS + Redis)
+        - job_name: "cloudwatch-exporter"
+          static_configs:
+            - targets:
+                - "cloudwatch-exporter.monitoring.svc.cluster.local:9106"
+
   ##################################
   # GRAFANA
   ##################################
   grafana:
 
-    # ✅ ENABLE DEFAULT DASHBOARDS
     defaultDashboardsEnabled: true
 
-    # ✅ THIS WAS MISSING (LOAD DASHBOARDS)
     sidecar:
       dashboards:
         enabled: true
@@ -56,9 +70,6 @@ kube-prometheus-stack:
     nodeSelector:
       role: monitoring
 
-    ##################################
-    # ALB INGRESS
-    ##################################
     ingress:
       enabled: true
       ingressClassName: alb
@@ -79,9 +90,6 @@ kube-prometheus-stack:
       paths:
         - /
 
-    ##################################
-    # GRAFANA STORAGE
-    ##################################
     persistence:
       enabled: true
       storageClassName: gp3
@@ -94,3 +102,60 @@ kube-prometheus-stack:
     alertmanagerSpec:
       nodeSelector:
         role: monitoring
+
+##################################
+# CLOUDWATCH EXPORTER
+##################################
+cloudwatchExporter:
+  enabled: true
+  serviceAccount:
+    create: false
+    name: prometheus
+
+  config: |
+    region: us-east-1
+    metrics:
+
+      # RDS
+      - aws_namespace: AWS/RDS
+        aws_metric_name: CPUUtilization
+        aws_dimensions: [DBInstanceIdentifier]
+        aws_dimension_select:
+          DBInstanceIdentifier: ["risk-postgres"]
+        aws_statistics: [Average]
+
+      - aws_namespace: AWS/RDS
+        aws_metric_name: DatabaseConnections
+        aws_dimensions: [DBInstanceIdentifier]
+        aws_dimension_select:
+          DBInstanceIdentifier: ["risk-postgres"]
+        aws_statistics: [Average]
+
+      - aws_namespace: AWS/RDS
+        aws_metric_name: FreeStorageSpace
+        aws_dimensions: [DBInstanceIdentifier]
+        aws_dimension_select:
+          DBInstanceIdentifier: ["risk-postgres"]
+        aws_statistics: [Average]
+
+      # Redis
+      - aws_namespace: AWS/ElastiCache
+        aws_metric_name: CPUUtilization
+        aws_dimensions: [CacheClusterId]
+        aws_dimension_select:
+          CacheClusterId: ["risk-redis"]
+        aws_statistics: [Average]
+
+      - aws_namespace: AWS/ElastiCache
+        aws_metric_name: CurrConnections
+        aws_dimensions: [CacheClusterId]
+        aws_dimension_select:
+          CacheClusterId: ["risk-redis"]
+        aws_statistics: [Average]
+
+      - aws_namespace: AWS/ElastiCache
+        aws_metric_name: FreeableMemory
+        aws_dimensions: [CacheClusterId]
+        aws_dimension_select:
+          CacheClusterId: ["risk-redis"]
+        aws_statistics: [Average]
