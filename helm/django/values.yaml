@@ -1,22 +1,41 @@
-replicaCount: 1
+prometheus-cloudwatch-exporter:
 
-image:
-  repository: 922967232801.dkr.ecr.us-east-1.amazonaws.com/django
-  tag: "1"
-  pullPolicy: IfNotPresent
+  serviceAccount:
+    create: false
+    name: prometheus
 
-service:
-  port: 8000
+  aws:
+    region: us-east-1
 
-nodeSelector:
-  role: web
+  service:
+    type: ClusterIP
+    port: 9106
 
-envFrom:
-  configMapName: django-config
-  secretName: django-secret
+  ##################################
+  # VERY IMPORTANT (PROMETHEUS DISCOVERY)
+  ##################################
+  serviceMonitor:
+    enabled: true
+    namespace: monitoring
+    interval: 30s
+    scrapeTimeout: 10s
 
-ingress:
-  enabled: true
-  host: api.pushparag.online
-  certificateArn: arn:aws:acm:us-east-1:922967232801:certificate/e0af3110-f363-4d3e-85a0-2e428d4cd4a6
-  groupName: risk-engine
+    additionalLabels:
+      release: monitoring
+
+  ##################################
+  # AWS METRICS
+  ##################################
+  config: |
+    region: us-east-1
+    metrics:
+
+      - aws_namespace: AWS/RDS
+        aws_metric_name: CPUUtilization
+        aws_dimensions: [DBInstanceIdentifier]
+        aws_statistics: [Average]
+
+      - aws_namespace: AWS/ElastiCache
+        aws_metric_name: CPUUtilization
+        aws_dimensions: [CacheClusterId]
+        aws_statistics: [Average]

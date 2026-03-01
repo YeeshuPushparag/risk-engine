@@ -1,7 +1,7 @@
 kube-prometheus-stack:
 
   ##################################
-  # CRDs (Required for ArgoCD)
+  # CRDs (ARGOCD FIX)
   ##################################
   crds:
     enabled: true
@@ -33,7 +33,7 @@ kube-prometheus-stack:
                 storage: 100Gi
 
       ##################################
-      # ONLY STATIC SCRAPE (JENKINS)
+      # JENKINS EC2 SCRAPE
       ##################################
       additionalScrapeConfigs:
         - job_name: "jenkins-ec2"
@@ -79,7 +79,6 @@ kube-prometheus-stack:
 
       hosts:
         - grafana.pushparag.online
-
       paths:
         - /
 
