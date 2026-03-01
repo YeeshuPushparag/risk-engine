@@ -15,8 +15,10 @@ prometheus:
               storage: 100Gi
 
 grafana:
-  adminUser: admin
-  adminPassword: strongpasswordchange
+  admin:
+    existingSecret: grafana-admin-secret
+    userKey: admin-user
+    passwordKey: admin-password
 
   nodeSelector:
     role: monitoring
