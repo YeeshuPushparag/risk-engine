@@ -1,7 +1,12 @@
 prometheus:
+  serviceAccount:
+    create: true
+    name: prometheus
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::922967232801:role/risk-engine-prometheus-irsa-role
+
   prometheusSpec:
     retention: 15d
-
     nodeSelector:
       role: monitoring
 
@@ -9,7 +14,8 @@ prometheus:
       volumeClaimTemplate:
         spec:
           storageClassName: gp3
-          accessModes: ["ReadWriteOnce"]
+          accessModes:
+            - ReadWriteOnce
           resources:
             requests:
               storage: 100Gi
@@ -33,10 +39,8 @@ grafana:
       alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:922967232801:certificate/e0af3110-f363-4d3e-85a0-2e428d4cd4a6
       alb.ingress.kubernetes.io/ssl-redirect: "443"
       alb.ingress.kubernetes.io/group.name: risk-engine
-
     hosts:
       - grafana.pushparag.online
-
     path: /
 
   persistence:
