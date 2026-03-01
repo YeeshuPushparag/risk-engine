@@ -1,7 +1,7 @@
 kube-prometheus-stack:
 
   ##################################
-  # CRDs (IMPORTANT FIX)
+  # CRDs (ARGOCD FIX)
   ##################################
   crds:
     enabled: true
@@ -36,7 +36,17 @@ kube-prometheus-stack:
   # GRAFANA
   ##################################
   grafana:
+
+    # ✅ ENABLE DEFAULT DASHBOARDS
     defaultDashboardsEnabled: true
+
+    # ✅ THIS WAS MISSING (LOAD DASHBOARDS)
+    sidecar:
+      dashboards:
+        enabled: true
+        label: grafana_dashboard
+        searchNamespace: ALL
+
     admin:
       existingSecret: grafana-admin-secret
       userKey: admin-user
@@ -45,6 +55,9 @@ kube-prometheus-stack:
     nodeSelector:
       role: monitoring
 
+    ##################################
+    # ALB INGRESS
+    ##################################
     ingress:
       enabled: true
       ingressClassName: alb
@@ -65,6 +78,9 @@ kube-prometheus-stack:
       paths:
         - /
 
+    ##################################
+    # GRAFANA STORAGE
+    ##################################
     persistence:
       enabled: true
       storageClassName: gp3
