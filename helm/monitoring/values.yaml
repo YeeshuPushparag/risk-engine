@@ -1,7 +1,7 @@
 kube-prometheus-stack:
 
   ##################################
-  # CRDs (ARGOCD FIX)
+  # CRDs (Required for ArgoCD)
   ##################################
   crds:
     enabled: true
@@ -33,20 +33,13 @@ kube-prometheus-stack:
                 storage: 100Gi
 
       ##################################
-      # ADDITIONAL SCRAPES
+      # ONLY STATIC SCRAPE (JENKINS)
       ##################################
       additionalScrapeConfigs:
-        # Jenkins EC2
         - job_name: "jenkins-ec2"
           static_configs:
             - targets:
                 - "ip-10-0-1-176.ec2.internal:9100"
-
-        # CloudWatch Exporter (RDS + Redis)
-        - job_name: "cloudwatch-exporter"
-          static_configs:
-            - targets:
-                - "cloudwatch-exporter.monitoring.svc.cluster.local:9106"
 
   ##################################
   # GRAFANA
