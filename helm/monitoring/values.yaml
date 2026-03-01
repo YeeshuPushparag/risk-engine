@@ -36,7 +36,7 @@ kube-prometheus-stack:
   # GRAFANA
   ##################################
   grafana:
-
+    defaultDashboardsEnabled: true
     admin:
       existingSecret: grafana-admin-secret
       userKey: admin-user
