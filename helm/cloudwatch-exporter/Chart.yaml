@@ -1,0 +1,10 @@
+apiVersion: v2
+name: cloudwatch-exporter
+description: Prometheus CloudWatch Exporter
+type: application
+version: 0.1.0
+
+dependencies:
+  - name: prometheus-cloudwatch-exporter
+    version: 0.25.0
+    repository: https://prometheus-community.github.io/helm-charts

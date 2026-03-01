@@ -1,0 +1,42 @@
+prometheus-cloudwatch-exporter:
+
+  serviceAccount:
+    create: false
+    name: prometheus   # uses IRSA you already created
+
+  aws:
+    region: us-east-1
+
+  config: |
+    region: us-east-1
+    metrics:
+
+      # ---------- RDS ----------
+      - aws_namespace: AWS/RDS
+        aws_metric_name: CPUUtilization
+        aws_dimensions: [DBInstanceIdentifier]
+        aws_dimension_select:
+          DBInstanceIdentifier: ["risk-postgres"]
+        aws_statistics: [Average]
+
+      - aws_namespace: AWS/RDS
+        aws_metric_name: DatabaseConnections
+        aws_dimensions: [DBInstanceIdentifier]
+        aws_dimension_select:
+          DBInstanceIdentifier: ["risk-postgres"]
+        aws_statistics: [Average]
+
+      # ---------- REDIS ----------
+      - aws_namespace: AWS/ElastiCache
+        aws_metric_name: CPUUtilization
+        aws_dimensions: [CacheClusterId]
+        aws_dimension_select:
+          CacheClusterId: ["risk-redis"]
+        aws_statistics: [Average]
+
+      - aws_namespace: AWS/ElastiCache
+        aws_metric_name: CurrConnections
+        aws_dimensions: [CacheClusterId]
+        aws_dimension_select:
+          CacheClusterId: ["risk-redis"]
+        aws_statistics: [Average]
