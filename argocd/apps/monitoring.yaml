@@ -10,6 +10,8 @@ spec:
     repoURL: https://github.com/YeeshuPushparag/risk-engine.git
     targetRevision: main
     path: helm/monitoring
+    helm:
+      releaseName: monitoring
 
   destination:
     server: https://kubernetes.default.svc
