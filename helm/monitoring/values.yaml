@@ -1,0 +1,48 @@
+prometheus:
+  prometheusSpec:
+    retention: 15d
+
+    nodeSelector:
+      role: monitoring
+
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 100Gi
+
+grafana:
+  adminUser: admin
+  adminPassword: strongpasswordchange
+
+  nodeSelector:
+    role: monitoring
+
+  ingress:
+    enabled: true
+    ingressClassName: alb
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:922967232801:certificate/e0af3110-f363-4d3e-85a0-2e428d4cd4a6
+      alb.ingress.kubernetes.io/ssl-redirect: "443"
+      alb.ingress.kubernetes.io/group.name: risk-engine
+
+    hosts:
+      - grafana.pushparag.online
+
+    path: /
+
+  persistence:
+    enabled: true
+    storageClassName: gp3
+    size: 20Gi
+
+alertmanager:
+  alertmanagerSpec:
+    nodeSelector:
+      role: monitoring
