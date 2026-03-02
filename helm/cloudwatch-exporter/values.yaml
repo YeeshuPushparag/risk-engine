@@ -32,7 +32,7 @@ prometheus-cloudwatch-exporter:
             - risk-postgres
         aws_statistics: [Average]
         period_seconds: 300
-        range_seconds: 600
+        range_seconds: 3600
 
       # REDIS ✅ FIXED
       - aws_namespace: AWS/ElastiCache
@@ -43,4 +43,4 @@ prometheus-cloudwatch-exporter:
             - risk-redis
         aws_statistics: [Average]
         period_seconds: 300
-        range_seconds: 600
+        range_seconds: 3600
