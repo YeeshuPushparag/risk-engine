@@ -1,16 +1,28 @@
 prometheus-cloudwatch-exporter:
 
+  ##################################
+  # Service Account (IRSA)
+  ##################################
   serviceAccount:
     create: false
     name: prometheus
 
+  ##################################
+  # AWS Region
+  ##################################
   aws:
     region: us-east-1
 
+  ##################################
+  # Service
+  ##################################
   service:
     type: ClusterIP
     port: 9106
 
+  ##################################
+  # ServiceMonitor (Prometheus)
+  ##################################
   serviceMonitor:
     enabled: true
     namespace: monitoring
@@ -19,13 +31,16 @@ prometheus-cloudwatch-exporter:
     additionalLabels:
       release: monitoring
 
+  ##################################
+  # CloudWatch Metrics Configuration
+  ##################################
   config: |
     region: us-east-1
     metrics:
 
-      # ======================
-      # RDS (risk-postgres)
-      # ======================
+      ##################################################
+      # RDS - risk-postgres
+      ##################################################
       - aws_namespace: AWS/RDS
         aws_metric_name: CPUUtilization
         aws_dimensions: [DBInstanceIdentifier]
@@ -36,14 +51,14 @@ prometheus-cloudwatch-exporter:
         period_seconds: 300
         range_seconds: 600
 
-      # ======================
-      # REDIS (risk-redis)
-      # ======================
+      ##################################################
+      # Redis - risk-redis (FIXED DIMENSION)
+      ##################################################
       - aws_namespace: AWS/ElastiCache
         aws_metric_name: CPUUtilization
-        aws_dimensions: [ReplicationGroupId]
+        aws_dimensions: [CacheClusterId]
         aws_dimension_select:
-          ReplicationGroupId:
+          CacheClusterId:
             - risk-redis
         aws_statistics: [Average]
         period_seconds: 300
