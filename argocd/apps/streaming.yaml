@@ -5,6 +5,11 @@ metadata:
   namespace: argocd
 spec:
   project: default
+  ignoreDifferences:
+  - group: apps
+    kind: Deployment
+    jsonPointers:
+      - /spec/replicas
 
   source:
     repoURL: https://github.com/YeeshuPushparag/risk-engine.git

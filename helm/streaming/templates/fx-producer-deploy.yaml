@@ -3,10 +3,6 @@ kind: Deployment
 metadata:
   name: fx-producer
   namespace: streaming
-  annotations:
-    argocd.argoproj.io/ignore-differences: |
-      jsonPointers:
-        - /spec/replicas
 spec:
   replicas: {{ .Values.replicas.fxProducer }}
   selector:

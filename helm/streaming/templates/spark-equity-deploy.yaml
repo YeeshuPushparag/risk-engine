@@ -3,10 +3,6 @@ kind: Deployment
 metadata:
   name: spark-equity
   namespace: streaming
-  annotations:
-    argocd.argoproj.io/ignore-differences: |
-      jsonPointers:
-        - /spec/replicas
 spec:
   replicas: {{ .Values.replicas.sparkEquity }}
   selector:
