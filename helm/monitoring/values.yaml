@@ -14,7 +14,7 @@ kube-prometheus-stack:
       create: true
       name: prometheus
       annotations:
-        eks.amazonaws.com/role-arn: arn:aws:iam::922967232801:role/risk-engine-prometheus-irsa-role
+        eks.amazonaws.com/role-arn: arn:aws:iam::922967232801:role/risk-eks-prometheus-irsa-role
 
     prometheusSpec:
       retention: 15d
