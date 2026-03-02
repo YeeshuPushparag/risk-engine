@@ -12,9 +12,17 @@ resource "aws_iam_role" "prometheus_irsa_role" {
         Federated = aws_iam_openid_connect_provider.eks.arn
       }
       Action = "sts:AssumeRoleWithWebIdentity"
+
       Condition = {
         StringEquals = {
-          "${local.oidc_issuer}:sub" = "system:serviceaccount:monitoring:prometheus"
+          "${local.oidc_issuer}:aud" = "sts.amazonaws.com"
+        }
+
+        StringLike = {
+          "${local.oidc_issuer}:sub" = [
+            "system:serviceaccount:monitoring:prometheus",
+            "system:serviceaccount:monitoring:prometheus-cloudwatch-exporter*"
+          ]
         }
       }
     }]
