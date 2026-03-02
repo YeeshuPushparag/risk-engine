@@ -8,7 +8,7 @@ metadata:
       jsonPointers:
         - /spec/replicas
 spec:
-  replicas: 0
+  replicas: {{ .Values.replicas.fxProducer }}
   selector:
     matchLabels:
       app: fx-producer
