@@ -18,7 +18,25 @@ const fmtCur = (v?: number | null, compact = false) => {
   }).format(v);
 };
 
-const fmtPct = (n?: number | null) => n == null ? "—" : `${(n * 100).toFixed(2)}%`;
+const fmtPct = (n?: number | null, decimals = 2) => {
+  if (n == null || Number.isNaN(n)) return "—";
+
+  // If value looks like it's already a percent (e.g. 1.45),
+  // normalize it back to decimal form.
+  const normalized = Math.abs(n) > 1 ? n / 100 : n;
+
+  return `${(normalized * 100).toFixed(decimals)}%`;
+};
+
+const fmtSpot = (rate?: number | null, pair?: string) => {
+  if (rate == null || Number.isNaN(rate)) return "—";
+
+  const isJPY = pair?.toUpperCase().includes("JPY");
+
+  // JPY pairs: 3 decimals
+  // Others: 5 decimals
+  return rate.toFixed(isJPY ? 3 : 5);
+};
 
 /* ---------------- MAIN PAGE ---------------- */
 export default function FxTickerDetailPage() {
@@ -140,7 +158,9 @@ export default function FxTickerDetailPage() {
 
             <div className="text-right">
               <p className="text-[8px] font-black text-slate-600 uppercase">Spot</p>
-              <p className="text-lg font-mono font-bold text-blue-400">{r.fx_rate.toFixed(5)}</p>
+              <p className="text-lg font-mono font-bold text-blue-400">
+  {fmtSpot(r.fx_rate, r.currency_pair)}
+</p>
             </div>
           </div>
 
@@ -148,7 +168,7 @@ export default function FxTickerDetailPage() {
             <DetailStat label="Return" value={fmtPct(r.fx_return)} color={r.fx_return >= 0 ? "text-emerald-500" : "text-rose-500"} />
             <DetailStat label="30D Vol" value={fmtPct(r.fx_volatility_30d)} />
             <DetailStat label="Pred 21D Vol" value={fmtPct(r.predicted_volatility_21d)} color="text-indigo-400" />
-            <DetailStat label="Int. Diff" value={`${r.interest_diff}%`} color="text-amber-400" />
+            <DetailStat label="Int. Diff" value={fmtPct(r.interest_diff)} color="text-amber-400" />
             <DetailStat label="Daily Carry" value={fmtPct(r.carry_daily)} />
             <DetailStat label="Carry Adj Ret" value={fmtPct(r.return_carry_adj)} />
           </div>
