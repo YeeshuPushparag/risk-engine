@@ -105,12 +105,6 @@ export default function BondsMasterPage() {
             {displayDate}
           </span>
         </div>
-        
-        {/* System Status */}
-        <div className="hidden lg:flex items-center gap-1.5">
-           <span className="text-[9px] font-black text-slate-600 uppercase tracking-widest">Status:</span>
-           <span className="text-[9px] font-black text-emerald-500 uppercase">Live Feed</span>
-        </div>
       </div>
     </div>
 
