@@ -49,6 +49,11 @@ pvc:
     name: spark-ivy-cache-pvc
     storageClassName: gp3
     size: 5Gi
-
+  zookeeperData:
+    enabled: true
+    name: zookeeper-data
+    storageClassName: gp3
+    size: 5Gi
+    
 nodeSelector:
   role: streaming

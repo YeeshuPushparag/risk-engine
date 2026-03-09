@@ -1,10 +1,11 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: zookeeper
   namespace: streaming
 spec:
-  replicas: {{ .Values.replicas.zookeeper }}
+  serviceName: zookeeper
+  replicas: 1
   selector:
     matchLabels:
       app: zookeeper
@@ -14,17 +15,25 @@ spec:
         app: zookeeper
     spec:
       nodeSelector:
-        {{- toYaml .Values.nodeSelector | nindent 8 }}
-      serviceAccountName: {{ .Values.serviceAccount.name }}
+        role: streaming
+      serviceAccountName: streaming-sa
       containers:
         - name: zookeeper
-          image: "{{ .Values.image.zookeeper.repository }}:{{ .Values.image.zookeeper.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: 922967232801.dkr.ecr.us-east-1.amazonaws.com/zookeeper:1
           ports:
             - containerPort: 2181
-          env:
-            - name: ZOOKEEPER_CLIENT_PORT
-              value: "2181"
+          volumeMounts:
+            - name: zookeeper-data
+              mountPath: /var/lib/zookeeper/data
+  volumeClaimTemplates:
+    - metadata:
+        name: zookeeper-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 5Gi
 ---
 apiVersion: v1
 kind: Service
@@ -32,6 +41,7 @@ metadata:
   name: zookeeper
   namespace: streaming
 spec:
+  clusterIP: None 
   selector:
     app: zookeeper
   ports:
