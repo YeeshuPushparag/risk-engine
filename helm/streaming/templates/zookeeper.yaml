@@ -20,8 +20,12 @@ spec:
       containers:
         - name: zookeeper
           image: 922967232801.dkr.ecr.us-east-1.amazonaws.com/zookeeper:1
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 2181
+          env:
+            - name: ZOOKEEPER_CLIENT_PORT
+              value: "2181"
           volumeMounts:
             - name: zookeeper-data
               mountPath: /var/lib/zookeeper/data
@@ -41,7 +45,7 @@ metadata:
   name: zookeeper
   namespace: streaming
 spec:
-  clusterIP: None 
+  clusterIP: None
   selector:
     app: zookeeper
   ports:
