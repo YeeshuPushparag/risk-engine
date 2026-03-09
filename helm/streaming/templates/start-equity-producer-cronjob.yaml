@@ -6,7 +6,7 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-options: Replace=true
 spec:
-  schedule: "20 13 * * 1-5"
+  schedule: "45 13 * * 1-5"
   timeZone: "America/New_York"
   jobTemplate:
     spec:
