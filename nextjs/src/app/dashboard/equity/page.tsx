@@ -62,6 +62,23 @@ const checkMarketOpen = (): MarketStatus => {
   };
 };
 
+
+/* ---------------- DYNAMIC EST → IST CONVERSION ---------------- */
+
+const getMarketTimeIST = (hourEST: number, minuteEST: number) => {
+  const now = new Date();
+  // Create a NY time with today's date
+  const nyTime = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+  nyTime.setHours(hourEST, minuteEST, 0, 0);
+
+  // Convert to IST string
+  return nyTime.toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+};
 /* ---------------- MAIN COMPONENT ---------------- */
 
 export default function EquityLandingPage() {
@@ -71,7 +88,9 @@ export default function EquityLandingPage() {
     day: "Detecting...", 
     time: "00:00 EST" 
   });
-
+ const [nextOpenIST, setNextOpenIST] = useState("");
+  const [nextCloseIST, setNextCloseIST] = useState("");
+  
   useEffect(() => {
     async function loadLatestDate() {
       try {
@@ -83,10 +102,18 @@ export default function EquityLandingPage() {
       }
     }
 
-    const updateStatus = () => setMarketStatus(checkMarketOpen());
+    const updateStatus = () => {
+  const status = checkMarketOpen();
+  setMarketStatus(status);
+
+  // dynamically update IST times
+  setNextOpenIST(getMarketTimeIST(9, 30));
+  setNextCloseIST(getMarketTimeIST(16, 0));
+};
     updateStatus();
     const interval = setInterval(updateStatus, 30000);
-
+ 
+  
     loadLatestDate();
     return () => clearInterval(interval);
   }, []);
@@ -161,7 +188,7 @@ export default function EquityLandingPage() {
                   Real-time session monitoring mapped to local IST.
                 </p>
                 <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-indigo-500/10 text-indigo-400 rounded-lg text-[10px] font-black border border-indigo-500/20 uppercase tracking-widest">
-                  Live: 20:00 – 02:30 IST
+                  Live: {nextOpenIST} – {nextCloseIST} IST
                 </div>
               </div>
             </div>

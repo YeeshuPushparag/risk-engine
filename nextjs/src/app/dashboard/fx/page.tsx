@@ -25,6 +25,50 @@ interface MarketStatus {
 
 /* ---------------- FX MARKET LOGIC (STRICTLY EST) ---------------- */
 
+const getNextMarketOpenIST = () => {
+  const now = new Date();
+  const nyNow = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+
+  let openDate = new Date(nyNow);
+  openDate.setHours(17, 0, 0, 0); // Sunday 17:00 NY time
+
+  const day = nyNow.getDay(); // 0 = Sunday, 6 = Saturday
+
+  if (day === 0 && nyNow.getHours() >= 17) openDate.setDate(openDate.getDate() + 7);
+  else if (day === 6) openDate.setDate(openDate.getDate() + 1);
+  else if (day > 0 && day < 6) openDate.setDate(openDate.getDate() + (7 - day));
+
+  return openDate.toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    weekday: "long",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+};
+
+const getNextMarketCloseIST = () => {
+  const now = new Date();
+  const nyNow = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+
+  let closeDate = new Date(nyNow);
+  closeDate.setHours(17, 0, 0, 0); // Friday 17:00 NY time
+
+  const day = nyNow.getDay(); // 0 = Sunday, 6 = Saturday
+
+  if (day > 5) closeDate.setDate(closeDate.getDate() + ((5 - day + 7) % 7));
+  else if (day === 5 && nyNow.getHours() >= 17) closeDate.setDate(closeDate.getDate() + 7);
+  else if (day < 5) closeDate.setDate(closeDate.getDate() + (5 - day));
+
+  return closeDate.toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    weekday: "long",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+};
+
 const checkFxMarketOpen = (): MarketStatus => {
   const now = new Date();
 
@@ -87,13 +131,19 @@ export default function FxMainPage() {
     timeEST: "00:00 EST",
     timeIST: "00:00 IST"
   });
+ const [nextOpenIST, setNextOpenIST] = useState("");
+  const [nextCloseIST, setNextCloseIST] = useState("");
 
-  useEffect(() => {
-    const update = () => setStatus(checkFxMarketOpen());
-    update();
-    const interval = setInterval(update, 30000);
-    return () => clearInterval(interval);
-  }, []);
+ useEffect(() => {
+  const updateStatus = () => {
+    setStatus(checkFxMarketOpen());
+    setNextOpenIST(getNextMarketOpenIST());
+    setNextCloseIST(getNextMarketCloseIST());
+  };
+  updateStatus();
+  const interval = setInterval(updateStatus, 30000);
+  return () => clearInterval(interval);
+}, []);
 
   return (
     <main className="min-h-screen bg-[#020617] text-slate-300 relative overflow-hidden">
@@ -146,6 +196,7 @@ export default function FxMainPage() {
             icon={<BarChart3 className="w-7 h-7 text-blue-500" />}
             metrics={["Full Portfolio VaR", "Carry Attribution"]}
             isOpen={true}
+            nextOpenIST={nextOpenIST}
           />
 
           <NavCard
@@ -157,6 +208,7 @@ export default function FxMainPage() {
             metrics={["Real-time P&L", "1-Min Spot"]}
             isLive
             isOpen={status.isOpen}
+            nextOpenIST={nextOpenIST}
           />
         </section>
 
@@ -180,12 +232,12 @@ export default function FxMainPage() {
                 <tr className="border-b border-slate-800/50">
                   <td className="py-4 text-slate-300">Market Opens</td>
                   <td className="py-4 text-white">Sunday 17:00</td>
-                  <td className="py-4 text-slate-400">Monday 03:30</td>
+                  <td className="py-4 text-slate-400">{nextOpenIST} IST</td>
                 </tr>
                 <tr>
                   <td className="py-4 text-slate-300">Market Closes</td>
                   <td className="py-4 text-white">Friday 17:00</td>
-                  <td className="py-4 text-slate-400">Saturday 03:30</td>
+                  <td className="py-4 text-slate-400">{nextCloseIST} IST</td>
                 </tr>
               </tbody>
             </table>
@@ -214,7 +266,7 @@ export default function FxMainPage() {
 
 /* ---------------- NAV CARD ---------------- */
 
-function NavCard({ title, description, href, tag, icon, metrics, isLive = false, isOpen = true }: any) {
+function NavCard({ title, description, href, tag, icon, metrics, nextOpenIST, isLive = false, isOpen = true }: any) {
   return (
     <div className="relative group">
       {!isOpen && (
@@ -222,7 +274,7 @@ function NavCard({ title, description, href, tag, icon, metrics, isLive = false,
           <Lock className="w-8 h-8 text-red-500 mb-4" />
           <h4 className="text-sm font-black text-white uppercase tracking-widest mb-1">Market is Offline</h4>
           <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest italic">Logic Gate: Friday 17:00 EST</p>
-          <p className="text-[9px] text-blue-500 font-black uppercase mt-2">Reopens Mon 03:30 IST</p>
+          <p className="text-[9px] text-blue-500 font-black uppercase mt-2">Reopens {nextOpenIST} IST</p>
         </div>
       )}
 
