@@ -17,6 +17,10 @@ spec:
       nodeSelector:
         role: streaming
       serviceAccountName: streaming-sa
+      # Make the PVC writable for uid=1000
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: "OnRootMismatch"
       containers:
         - name: zookeeper
           image: 922967232801.dkr.ecr.us-east-1.amazonaws.com/zookeeper:1
@@ -45,7 +49,7 @@ metadata:
   name: zookeeper
   namespace: streaming
 spec:
-  clusterIP: None
+  clusterIP: None  # headless for StatefulSet
   selector:
     app: zookeeper
   ports:
