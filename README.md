@@ -147,6 +147,11 @@ This repository focuses on the production risk platform where the trained models
 
 ---
 
+# Gitops Workflow
+<img width="1408" height="768" alt="gitops workflow" src="https://github.com/user-attachments/assets/d78e6ca7-6364-4a6c-95c5-319a13da624e" />
+
+---
+
 # Infrastructure
 
 Infrastructure is deployed on AWS using Kubernetes (EKS).
