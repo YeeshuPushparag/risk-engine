@@ -224,7 +224,7 @@ if (!totals || !signals) {
             </div>
           </div>
 
-          <h1 className="text-2xl sm:text-3xl md:text-4xl font-black text-white tracking-tighter uppercase italic leading-none truncate">
+          <h1 className="text-2xl sm:text-3xl md:text-4xl font-black text-white tracking-tighter uppercase italic leading-none">
             {ticker} <span className="text-blue-500 italic">×</span> {manager}
           </h1>
 
