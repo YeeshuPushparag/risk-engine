@@ -173,6 +173,8 @@ Infrastructure provisioning is automated using Terraform.
 ---
 
 # CI/CD Pipeline
+<img width="1366" height="768" alt="ci" src="https://github.com/user-attachments/assets/a15ed150-680e-46c2-bbad-634d0571d849" />
+<img width="1366" height="768" alt="cd" src="https://github.com/user-attachments/assets/45c977c8-d288-4fb3-89e0-0096f2e46d2a" />
 
 Deployment follows a GitOps-based CI/CD workflow.
 
