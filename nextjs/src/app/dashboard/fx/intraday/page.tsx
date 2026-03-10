@@ -316,42 +316,62 @@ function isFXTradingTime() {
 
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
+    weekday: "short",
     hour: "numeric",
     minute: "numeric",
     hour12: false,
   }).formatToParts(now);
 
-const hour = Number(parts.find(p => p.type === "hour")!.value);
-const minute = Number(parts.find(p => p.type === "minute")!.value);
+  const weekday = parts.find(p => p.type === "weekday")!.value;
+  const hour = Number(parts.find(p => p.type === "hour")!.value);
+  const minute = Number(parts.find(p => p.type === "minute")!.value);
 
   const totalMin = hour * 60 + minute;
+  const OPEN_MIN = 17 * 60;      // 5:00 PM
+  const CLOSE_MIN = 17 * 60 + 3; // 5:03 PM Friday
 
-  const OPEN_MIN = 7 * 60 + 40;   // 7:40
-  const CLOSE_MIN = 7 * 60 + 55;  // 7:55
+  // Sunday open
+  if (weekday === "Sun" && totalMin >= OPEN_MIN) return true;
 
-  return totalMin >= OPEN_MIN && totalMin <= CLOSE_MIN;
+  // Monday → Thursday always open
+  if (weekday !== "Sat" && weekday !== "Sun" && weekday !== "Fri") return true;
+
+  // Friday until close
+  if (weekday === "Fri" && totalMin <= CLOSE_MIN) return true;
+
+  return false;
 }
-
 
 function isFXReady() {
   const now = new Date();
 
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
+    weekday: "short",
     hour: "numeric",
     minute: "numeric",
     hour12: false,
   }).formatToParts(now);
 
+  const weekday = parts.find(p => p.type === "weekday")!.value;
   const hour = Number(parts.find(p => p.type === "hour")!.value);
-const minute = Number(parts.find(p => p.type === "minute")!.value);
+  const minute = Number(parts.find(p => p.type === "minute")!.value);
 
   const totalMin = hour * 60 + minute;
 
-  const READY_MIN = 7 * 60 + 43;  // 7:43
-  const CLOSE_MIN = 7 * 60 + 55;  // 7:55
+  const READY_MIN = 17 * 60 + 3; // 5:03 PM
+  const CLOSE_MIN = 17 * 60 + 3; // Friday close
 
-  return totalMin >= READY_MIN && totalMin <= CLOSE_MIN;
+  // Sunday warmup ends
+  if (weekday === "Sun" && totalMin >= READY_MIN) return true;
+
+  // Monday → Thursday always ready
+  if (weekday !== "Sat" && weekday !== "Sun" && weekday !== "Fri") return true;
+
+  // Friday until close
+  if (weekday === "Fri" && totalMin <= CLOSE_MIN) return true;
+
+  return false;
 }
 
 function LoadingTerminal() {
@@ -370,7 +390,7 @@ function MarketClosedView() {
         <Clock className="w-8 h-8 text-slate-700 mx-auto" />
         <h2 className="text-white font-black uppercase tracking-tight text-xl">Market Closed</h2>
         <p className="text-slate-400 text-xs leading-relaxed">
-          The FX market operates from Sunday 5:00 PM to Friday 5:00 PM (ET).
+          The FX market operates from Sunday 5:00 PM to Friday 5:00 PM (New York Time).
         </p>
         <Link href="/dashboard/fx/daily" className="inline-block mt-4 text-blue-500 text-[10px] font-black uppercase tracking-widest border border-blue-500/30 px-6 py-2 rounded-lg hover:bg-blue-500/10 transition">
           ← View Daily Overview

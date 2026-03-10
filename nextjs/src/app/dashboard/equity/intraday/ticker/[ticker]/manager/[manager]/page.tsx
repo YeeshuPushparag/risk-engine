@@ -188,7 +188,7 @@ if (equityEnabled === false) {
         <Clock className="w-12 h-12 text-slate-700 mx-auto" />
         <h2 className="text-xl font-black text-white uppercase tracking-tight">Market Closed</h2>
         <p className="text-slate-400 text-sm leading-relaxed">
-          U.S. equity markets operate <strong>Monday through Friday</strong>, 9:30 AM to 4:00 PM (EST).
+          U.S. equity markets operate <strong>Monday through Friday</strong>, 9:30 AM to 4:00 PM (New York Time).
         </p>
         <Link
           href="/dashboard/equity/daily"

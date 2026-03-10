@@ -224,7 +224,7 @@ useEffect(() => {
         <div className="space-y-4 max-w-md">
           <Clock className="w-12 h-12 text-slate-700 mx-auto" />
           <h2 className="text-xl font-black text-white uppercase tracking-tight">Market Closed</h2>
-          <p className="text-slate-400 text-sm leading-relaxed">U.S. equity markets operate Mon-Fri, 9:30 AM to 4:00 PM (EST).</p>
+          <p className="text-slate-400 text-sm leading-relaxed">U.S. equity markets operate Mon-Fri, 9:30 AM to 4:00 PM (New York Time).</p>
           <Link href="/dashboard/equity/daily" className="inline-block mt-4 text-blue-500 text-[10px] font-black uppercase tracking-widest border border-blue-500/30 px-6 py-2 rounded-lg hover:bg-blue-500/10 transition">
             ← View Daily Equity Data
           </Link>

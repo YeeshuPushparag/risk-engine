@@ -214,7 +214,7 @@ if (equityEnabled === false) {
         <h2 className="text-xl font-black text-white uppercase tracking-tight">Market Closed</h2>
         <p className="text-slate-400 text-sm leading-relaxed">
           U.S. equity markets operate <strong>Monday through Friday</strong>,
-          from <strong>9:30 AM to 4:00 PM (EST)</strong>.
+          from <strong>9:30 AM to 4:00 PM (New York Time)</strong>.
           <br />
           <span className="block mt-1 text-slate-500">
             This corresponds to <strong>8:00 PM – 2:30 AM (IST)</strong>.

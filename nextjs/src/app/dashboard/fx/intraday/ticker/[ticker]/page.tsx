@@ -266,7 +266,7 @@ function MarketClosedView() {
         <Clock className="w-8 h-8 text-slate-700 mx-auto" />
         <h2 className="text-white font-black uppercase tracking-tight text-xl">Market Closed</h2>
         <p className="text-slate-400 text-xs leading-relaxed">
-          The FX Market is currently closed. Trading resumes Sunday 5:00 PM (ET).
+          The FX Market is currently closed. Trading resumes Sunday 5:00 PM (New York Time).
         </p>
         <Link href="/dashboard/fx/daily" className="inline-block mt-4 text-blue-500 text-[10px] font-black uppercase tracking-widest border border-blue-500/30 px-6 py-2 rounded-lg hover:bg-blue-500/10 transition">
           ← Back to Daily
