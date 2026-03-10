@@ -321,13 +321,13 @@ function isFXTradingTime() {
     hour12: false,
   }).formatToParts(now);
 
-  const hour = Number(parts.find(p => p.type === "hour").value);
-  const minute = Number(parts.find(p => p.type === "minute").value);
+const hour = Number(parts.find(p => p.type === "hour")!.value);
+const minute = Number(parts.find(p => p.type === "minute")!.value);
 
   const totalMin = hour * 60 + minute;
 
-  const OPEN_MIN = 7 * 60 + 30;   // 7:30
-  const CLOSE_MIN = 7 * 60 + 45;  // 7:45
+  const OPEN_MIN = 7 * 60 + 40;   // 7:40
+  const CLOSE_MIN = 7 * 60 + 55;  // 7:55
 
   return totalMin >= OPEN_MIN && totalMin <= CLOSE_MIN;
 }
@@ -343,13 +343,13 @@ function isFXReady() {
     hour12: false,
   }).formatToParts(now);
 
-  const hour = Number(parts.find(p => p.type === "hour").value);
-  const minute = Number(parts.find(p => p.type === "minute").value);
+  const hour = Number(parts.find(p => p.type === "hour")!.value);
+const minute = Number(parts.find(p => p.type === "minute")!.value);
 
   const totalMin = hour * 60 + minute;
 
-  const READY_MIN = 7 * 60 + 33;  // 7:33
-  const CLOSE_MIN = 7 * 60 + 45;  // 7:45
+  const READY_MIN = 7 * 60 + 43;  // 7:43
+  const CLOSE_MIN = 7 * 60 + 55;  // 7:55
 
   return totalMin >= READY_MIN && totalMin <= CLOSE_MIN;
 }
