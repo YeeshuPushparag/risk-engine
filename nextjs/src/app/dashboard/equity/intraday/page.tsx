@@ -149,59 +149,65 @@ export default function IntradayEquityOverview() {
     return totalMin >= 570 && totalMin <= CLOSE_MIN;
   }
 
-  function isMarketReady() {
-    const now = new Date();
+ function isMarketReady() {
+  const now = new Date();
 
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/New_York",
-      weekday: "short",
-      hour: "numeric",
-      minute: "numeric",
-      hour12: false,
-    }).formatToParts(now);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    hour: "numeric",
+    minute: "numeric",
+    hour12: false,
+  }).formatToParts(now);
 
-    const weekday = parts.find(p => p.type === "weekday")!.value;
-    const hour = Number(parts.find(p => p.type === "hour")!.value);
-    const minute = Number(parts.find(p => p.type === "minute")!.value);
+  const weekday = parts.find(p => p.type === "weekday")!.value;
+  const hour = Number(parts.find(p => p.type === "hour")!.value);
+  const minute = Number(parts.find(p => p.type === "minute")!.value);
 
-    const totalMin = hour * 60 + minute;
+  const totalMin = hour * 60 + minute;
 
-    const READY_MIN = 573; // 9:33
+  const READY_MIN = 573;      // 9:33
+  const CLOSE_MIN = 960 + 2;  // 4:02
 
-    if (weekday === "Sat" || weekday === "Sun") return false;
+  if (weekday === "Sat" || weekday === "Sun") return false;
 
-    return totalMin >= READY_MIN;
+  return totalMin >= READY_MIN && totalMin <= CLOSE_MIN;
+}
+
+useEffect(() => {
+  let interval;
+
+  async function fetchConfigAndData() {
+    try {
+      const res = await fetch("/api/config");
+      const config = await res.json();
+
+      const open = isMarketTradingTime();
+      const ready = config.forceStream || isMarketReady();
+
+      setMarketOpen(open);
+      setEquityEnabled(ready);
+
+      if (!ready) return;
+
+      setWsBaseUrl(config.wsBaseUrl);
+
+      const dataRes = await fetch("/api/equity/intraday/overview", { cache: "no-store" });
+      if (dataRes.ok) updateState(await dataRes.json());
+
+      // stop polling once ready
+      clearInterval(interval);
+
+    } catch (e) {
+      console.error("Fetch failed", e);
+    }
   }
 
-  useEffect(() => {
-    async function fetchConfigAndData() {
-      try {
-        const res = await fetch("/api/config");
-        const config = await res.json();
+  fetchConfigAndData();
+  interval = setInterval(fetchConfigAndData, 30000);
 
-        setMarketOpen(isMarketTradingTime())
-        const enabled = config.forceStream || isMarketReady();
-        setEquityEnabled(enabled);
-
-        if (!enabled) return;
-
-        setWsBaseUrl(config.wsBaseUrl);
-
-        const dataRes = await fetch("/api/equity/intraday/overview", { cache: "no-store" });
-        if (dataRes.ok) updateState(await dataRes.json());
-      } catch (e) {
-        console.error("Fetch failed", e);
-      }
-    }
-
-    fetchConfigAndData();
-
-    // run every 30 seconds
-    const interval = setInterval(fetchConfigAndData, 30000);
-
-    // cleanup when component unmounts
-    return () => clearInterval(interval);
-  }, []);
+  return () => clearInterval(interval);
+}, []);
 
   // WebSocket unchanged
   useWebSocket(
@@ -210,7 +216,7 @@ export default function IntradayEquityOverview() {
   );
 
   // FX-style return logic
-  if (equityEnabled === null && marketOpen === null) return <LoadingState />;
+  if (equityEnabled === null || marketOpen === null) return <LoadingState />;
 
   if (marketOpen === false) {
     return (

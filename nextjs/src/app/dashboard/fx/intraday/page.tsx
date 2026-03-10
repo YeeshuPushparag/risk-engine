@@ -116,15 +116,20 @@ export default function FxIntradayMain() {
   };
 
   useEffect(() => {
+    let interval;
+
     async function fetchConfig() {
       try {
         const res = await fetch("/api/config");
         const config = await res.json();
-        setFxOpen(isFXTradingTime())
-        const enabled = config.forceStream || isFXReady();
-        setFxEnabled(enabled);
 
-        if (!enabled) return;
+        const open = isFXTradingTime();
+        const ready = config.forceStream || isFXReady();
+
+        setFxOpen(open);
+        setFxEnabled(ready);
+
+        if (!ready) return;
 
         setWsUrl(config.wsBaseUrl + "/fx/overview/");
 
@@ -137,20 +142,25 @@ export default function FxIntradayMain() {
           const initialData = await initialRes.json();
           handleDataUpdate(initialData);
         }
+
+        // stop polling once FX is ready
+        clearInterval(interval);
+
       } catch (e) {
         console.error("Failed to load config or data:", e);
       }
     }
 
     fetchConfig();
-    const interval = setInterval(fetchConfig, 30000);
+    interval = setInterval(fetchConfig, 30000);
 
     return () => clearInterval(interval);
+
   }, []);
 
   useWebSocket(wsUrl, handleDataUpdate);
 
-  if (fxEnabled === null && fxOpen === null) {
+  if (fxEnabled === null || fxOpen === null) {
     return <LoadingTerminal />;
   }
 
@@ -301,31 +311,27 @@ export default function FxIntradayMain() {
 }
 
 /* --- UTILS & SUB-VIEWS --- */
-
 function isFXTradingTime() {
   const now = new Date();
 
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
-    weekday: "short",
     hour: "numeric",
     minute: "numeric",
     hour12: false,
   }).formatToParts(now);
 
-  const weekday = parts.find(p => p.type === "weekday")!.value;
-  const hour = Number(parts.find(p => p.type === "hour")!.value);
-  const minute = Number(parts.find(p => p.type === "minute")!.value);
+  const hour = Number(parts.find(p => p.type === "hour").value);
+  const minute = Number(parts.find(p => p.type === "minute").value);
 
   const totalMin = hour * 60 + minute;
 
-  const OPEN_MIN = 6 * 60 + 15;   // 6:15 AM
-  const CLOSE_MIN = 6 * 60 + 30;  // optional test close
+  const OPEN_MIN = 7 * 60 + 25;   // 7:25
+  const CLOSE_MIN = 7 * 60 + 40;  // 7:40
 
-  if (totalMin >= OPEN_MIN && totalMin <= CLOSE_MIN) return true;
-
-  return false;
+  return totalMin >= OPEN_MIN && totalMin <= CLOSE_MIN;
 }
+
 
 function isFXReady() {
   const now = new Date();
@@ -337,14 +343,15 @@ function isFXReady() {
     hour12: false,
   }).formatToParts(now);
 
-  const hour = Number(parts.find(p => p.type === "hour")!.value);
-  const minute = Number(parts.find(p => p.type === "minute")!.value);
+  const hour = Number(parts.find(p => p.type === "hour").value);
+  const minute = Number(parts.find(p => p.type === "minute").value);
 
   const totalMin = hour * 60 + minute;
 
-  const READY_MIN = 6 * 60 + 20; // 6:20 AM
+  const READY_MIN = 7 * 60 + 28;  // 7:28
+  const CLOSE_MIN = 7 * 60 + 40;  // 7:40
 
-  return totalMin >= READY_MIN;
+  return totalMin >= READY_MIN && totalMin <= CLOSE_MIN;
 }
 
 function LoadingTerminal() {
