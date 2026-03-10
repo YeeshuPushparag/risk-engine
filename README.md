@@ -8,6 +8,8 @@ The platform processes ~3200 financial instruments across multiple asset classes
 ---
 # System Architecture
 
+<img width="1408" height="768" alt="System Architecture" src="https://github.com/user-attachments/assets/8280232d-ac96-485b-8c23-b289fcc51e9c" />
+
 ```
                 yFinance Data Source
                         |
