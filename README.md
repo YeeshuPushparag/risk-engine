@@ -137,6 +137,12 @@ Feature engineering uses datasets from:
 - macroeconomic indicators (FRED)
 - regulatory filings (13F)
 
+The data preparation, feature engineering, and model training workflows are developed in a separate repository:
+
+https://github.com/YeeshuPushparag/risk-modeling
+
+This repository focuses on the production risk platform where the trained models are integrated into batch and streaming analytics pipelines.
+
 ---
 
 # Infrastructure
