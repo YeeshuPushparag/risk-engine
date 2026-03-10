@@ -107,6 +107,7 @@ Real-time communication is implemented using Django Channels.
 ---
 
 # Frontend Dashboard
+<img width="1366" height="768" alt="dashboard" src="https://github.com/user-attachments/assets/b87eaa83-857a-4b5c-944c-d25fb7aa9fdf" />
 
 The frontend dashboard is built using Next.js.
 
