@@ -220,6 +220,8 @@ System observability is implemented using:
 - Grafana
 <img width="1366" height="768" alt="monitoring" src="https://github.com/user-attachments/assets/d69554dd-988d-4253-adbe-c417cd002b46" />
 
+<img width="1366" height="768" alt="prometheus" src="https://github.com/user-attachments/assets/1fbdfd7c-3cc2-4bcb-8cea-35b7a2ee0666" />
+
 These monitor:
 
 - container resource usage
