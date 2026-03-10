@@ -37,6 +37,7 @@ The platform processes ~3200 financial instruments across multiple asset classes
 ---
 
 # Daily Batch Risk Pipeline
+<img width="1366" height="768" alt="airflow" src="https://github.com/user-attachments/assets/7341c915-b3f9-4872-b4f9-fa3e1dffc8d1" />
 
 Daily analytics jobs compute portfolio metrics and machine learning predictions.
 
