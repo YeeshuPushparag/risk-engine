@@ -6,9 +6,9 @@ The system combines batch data pipelines, real-time streaming analytics, machine
 The platform processes ~3200 financial instruments across multiple asset classes and provides both daily risk analytics and real-time intraday portfolio insights.
 
 ---
-
 # System Architecture
 
+```
                 yFinance Data Source
                         |
         ------------------------------------
@@ -31,7 +31,7 @@ The platform processes ~3200 financial instruments across multiple asset classes
                     WebSockets
                         |
                    Next.js Dashboard
-
+```
 ---
 
 # Daily Batch Risk Pipeline
