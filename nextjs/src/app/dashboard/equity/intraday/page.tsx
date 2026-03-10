@@ -175,7 +175,7 @@ export default function IntradayEquityOverview() {
 }
 
 useEffect(() => {
-  let interval;
+ let interval: ReturnType<typeof setInterval>;
 
   async function fetchConfigAndData() {
     try {

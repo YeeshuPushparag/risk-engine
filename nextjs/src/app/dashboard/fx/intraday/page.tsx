@@ -116,7 +116,7 @@ export default function FxIntradayMain() {
   };
 
   useEffect(() => {
-    let interval;
+    let interval: ReturnType<typeof setInterval>;
 
     async function fetchConfig() {
       try {
@@ -326,8 +326,8 @@ function isFXTradingTime() {
 
   const totalMin = hour * 60 + minute;
 
-  const OPEN_MIN = 7 * 60 + 25;   // 7:25
-  const CLOSE_MIN = 7 * 60 + 40;  // 7:40
+  const OPEN_MIN = 7 * 60 + 30;   // 7:30
+  const CLOSE_MIN = 7 * 60 + 45;  // 7:45
 
   return totalMin >= OPEN_MIN && totalMin <= CLOSE_MIN;
 }
@@ -348,8 +348,8 @@ function isFXReady() {
 
   const totalMin = hour * 60 + minute;
 
-  const READY_MIN = 7 * 60 + 28;  // 7:28
-  const CLOSE_MIN = 7 * 60 + 40;  // 7:40
+  const READY_MIN = 7 * 60 + 33;  // 7:33
+  const CLOSE_MIN = 7 * 60 + 45;  // 7:45
 
   return totalMin >= READY_MIN && totalMin <= CLOSE_MIN;
 }
