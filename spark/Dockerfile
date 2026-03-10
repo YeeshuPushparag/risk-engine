@@ -20,9 +20,6 @@ COPY requirements.txt .
 RUN python3 -m pip install --no-cache-dir --upgrade pip && \
     python3 -m pip install --no-cache-dir -r requirements.txt
 
-# Ivy cache directory for Spark packages
-RUN mkdir -p /tmp/.ivy2 && chmod -R 777 /tmp
-
 COPY . .
 
 ENV SPARK_HOME=/opt/spark

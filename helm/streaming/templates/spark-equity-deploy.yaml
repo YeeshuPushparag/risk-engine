@@ -59,7 +59,7 @@ spec:
 
           volumeMounts:
             - name: ivy-cache
-              mountPath: /tmp/.ivy2
+              mountPath: /root/.ivy2
 
       volumes:
         - name: ivy-cache
