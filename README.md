@@ -217,6 +217,7 @@ System observability is implemented using:
 
 - Prometheus
 - Grafana
+<img width="1366" height="768" alt="monitoring" src="https://github.com/user-attachments/assets/d69554dd-988d-4253-adbe-c417cd002b46" />
 
 These monitor:
 
