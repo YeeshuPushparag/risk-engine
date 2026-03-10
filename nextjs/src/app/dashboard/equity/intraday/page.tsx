@@ -7,7 +7,7 @@ import ManagerSearch from "@/components/ManagerSearch";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import {
   Activity, TrendingUp, AlertTriangle, Clock,
-  ArrowUpRight, ArrowDownRight, ExternalLink, 
+  ArrowUpRight, ArrowDownRight, ExternalLink,
   UserCheck, ChevronRight, Search
 } from "lucide-react";
 
@@ -105,102 +105,149 @@ function TickerCard({ t }: { t: any }) {
 
 /* ---------------- MAIN PAGE ---------------- */
 export default function IntradayEquityOverview() {
-const [summary, setSummary] = useState<any>(null);
-const [topMovers, setTopMovers] = useState<any[]>([]);
-const [alerts, setAlerts] = useState<any[]>([]);
-const [tickers, setTickers] = useState<any[]>([]);
-const [managers, setManagers] = useState<any[]>([]);
-const [timeStamp, setTimestamp] = useState("");
+  const [summary, setSummary] = useState<any>(null);
+  const [topMovers, setTopMovers] = useState<any[]>([]);
+  const [alerts, setAlerts] = useState<any[]>([]);
+  const [tickers, setTickers] = useState<any[]>([]);
+  const [managers, setManagers] = useState<any[]>([]);
+  const [timeStamp, setTimestamp] = useState("");
 
-// FX-style change
-const [equityEnabled, setEquityEnabled] = useState<boolean | null>(null);
-const [wsBaseUrl, setWsBaseUrl] = useState<string | null>(null);
+  // FX-style change
+  const [equityEnabled, setEquityEnabled] = useState<boolean | null>(null);
+  const [marketOpen, setMarketOpen] = useState<boolean | null>(null);
+  const [wsBaseUrl, setWsBaseUrl] = useState<string | null>(null);
 
-const updateState = (data: any) => {
-  if (!data) return;
-  setSummary(data.totals);
-  setTopMovers(data.top_movers);
-  setAlerts(data.active_alerts || []);
-  setTimestamp(data.timestamp);
-  setTickers(data.top_tickers_agg);
-  setManagers(data.top_managers_agg);
-};
+  const updateState = (data: any) => {
+    if (!data) return;
+    setSummary(data.totals);
+    setTopMovers(data.top_movers);
+    setAlerts(data.active_alerts || []);
+    setTimestamp(data.timestamp);
+    setTickers(data.top_tickers_agg);
+    setManagers(data.top_managers_agg);
+  };
 
-function isMarketTradingTime() {
-  const now = new Date();
+  function isMarketTradingTime() {
+    const now = new Date();
 
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    weekday: "short",
-    hour: "numeric",
-    minute: "numeric",
-    hour12: false,
-  }).formatToParts(now);
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      weekday: "short",
+      hour: "numeric",
+      minute: "numeric",
+      hour12: false,
+    }).formatToParts(now);
 
-  const weekday = parts.find(p => p.type === "weekday")!.value;
-  const hour = Number(parts.find(p => p.type === "hour")!.value);
-  const minute = Number(parts.find(p => p.type === "minute")!.value);
+    const weekday = parts.find(p => p.type === "weekday")!.value;
+    const hour = Number(parts.find(p => p.type === "hour")!.value);
+    const minute = Number(parts.find(p => p.type === "minute")!.value);
 
-  const totalMin = hour * 60 + minute;
-  const CLOSE_MIN = 960 + 2;
+    const totalMin = hour * 60 + minute;
+    const CLOSE_MIN = 960 + 2;
 
-  if (weekday === "Sat" || weekday === "Sun") return false;
-  return totalMin >= 570 && totalMin <= CLOSE_MIN;
-}
-
-useEffect(() => {
-  async function fetchConfigAndData() {
-    try {
-      const res = await fetch("/api/config");
-      const config = await res.json();
-
-      const enabled = config.forceStream || isMarketTradingTime();
-      setEquityEnabled(enabled);
-
-      if (!enabled) return;
-
-      setWsBaseUrl(config.wsBaseUrl);
-
-      const dataRes = await fetch("/api/equity/intraday/overview", { cache: "no-store" });
-      if (dataRes.ok) updateState(await dataRes.json());
-    } catch (e) {
-      console.error("Fetch failed", e);
-    }
+    if (weekday === "Sat" || weekday === "Sun") return false;
+    return totalMin >= 570 && totalMin <= CLOSE_MIN;
   }
 
-  fetchConfigAndData();
-}, []);
+  function isMarketReady() {
+    const now = new Date();
 
-// WebSocket unchanged
-useWebSocket(
-  equityEnabled && wsBaseUrl ? `${wsBaseUrl}/equity/overview/` : null,
-  updateState
-);
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      weekday: "short",
+      hour: "numeric",
+      minute: "numeric",
+      hour12: false,
+    }).formatToParts(now);
 
-// FX-style return logic
-if (equityEnabled === null) return <LoadingState />;
+    const weekday = parts.find(p => p.type === "weekday")!.value;
+    const hour = Number(parts.find(p => p.type === "hour")!.value);
+    const minute = Number(parts.find(p => p.type === "minute")!.value);
 
-if (equityEnabled === false) {
-  return (
-    <div className="min-h-screen bg-[#020617] flex items-center justify-center p-12 text-center">
-      <div className="space-y-4 max-w-md">
-        <Clock className="w-12 h-12 text-slate-700 mx-auto" />
-        <h2 className="text-xl font-black text-white uppercase tracking-tight">Market Closed</h2>
-        <p className="text-slate-400 text-sm leading-relaxed">U.S. equity markets operate Mon-Fri, 9:30 AM to 4:00 PM (EST).</p>
-        <Link href="/dashboard/equity/daily" className="inline-block mt-4 text-blue-500 text-[10px] font-black uppercase tracking-widest border border-blue-500/30 px-6 py-2 rounded-lg hover:bg-blue-500/10 transition">
-          ← View Daily Equity Data
-        </Link>
-      </div>
-    </div>
+    const totalMin = hour * 60 + minute;
+
+    const READY_MIN = 573; // 9:33
+
+    if (weekday === "Sat" || weekday === "Sun") return false;
+
+    return totalMin >= READY_MIN;
+  }
+
+  useEffect(() => {
+    async function fetchConfigAndData() {
+      try {
+        const res = await fetch("/api/config");
+        const config = await res.json();
+
+        setMarketOpen(isMarketTradingTime())
+        const enabled = config.forceStream || isMarketReady();
+        setEquityEnabled(enabled);
+
+        if (!enabled) return;
+
+        setWsBaseUrl(config.wsBaseUrl);
+
+        const dataRes = await fetch("/api/equity/intraday/overview", { cache: "no-store" });
+        if (dataRes.ok) updateState(await dataRes.json());
+      } catch (e) {
+        console.error("Fetch failed", e);
+      }
+    }
+
+    fetchConfigAndData();
+
+    // run every 30 seconds
+    const interval = setInterval(fetchConfigAndData, 30000);
+
+    // cleanup when component unmounts
+    return () => clearInterval(interval);
+  }, []);
+
+  // WebSocket unchanged
+  useWebSocket(
+    equityEnabled && wsBaseUrl ? `${wsBaseUrl}/equity/overview/` : null,
+    updateState
   );
-}
 
-if (!summary) return <LoadingState />;
+  // FX-style return logic
+  if (equityEnabled === null && marketOpen === null) return <LoadingState />;
+
+  if (marketOpen === false) {
+    return (
+      <div className="min-h-screen bg-[#020617] flex items-center justify-center p-12 text-center">
+        <div className="space-y-4 max-w-md">
+          <Clock className="w-12 h-12 text-slate-700 mx-auto" />
+          <h2 className="text-xl font-black text-white uppercase tracking-tight">Market Closed</h2>
+          <p className="text-slate-400 text-sm leading-relaxed">U.S. equity markets operate Mon-Fri, 9:30 AM to 4:00 PM (EST).</p>
+          <Link href="/dashboard/equity/daily" className="inline-block mt-4 text-blue-500 text-[10px] font-black uppercase tracking-widest border border-blue-500/30 px-6 py-2 rounded-lg hover:bg-blue-500/10 transition">
+            ← View Daily Equity Data
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (marketOpen === true && equityEnabled === false) {
+    return (
+      <div className="min-h-screen bg-[#020617] flex items-center justify-center p-12 text-center">
+        <div className="space-y-4 max-w-md">
+          <Clock className="w-12 h-12 text-slate-700 mx-auto" />
+          <h2 className="text-xl font-black text-white uppercase tracking-tight">Market Just Opened</h2>
+          <p className="text-slate-400 text-sm leading-relaxed">Please Wait for few minutes.</p>
+          <Link href="/dashboard/equity/daily" className="inline-block mt-4 text-blue-500 text-[10px] font-black uppercase tracking-widest border border-blue-500/30 px-6 py-2 rounded-lg hover:bg-blue-500/10 transition">
+            ← View Daily Equity Data
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (!summary) return <LoadingState />;
 
 
   return (
     <main className="min-h-screen bg-[#020617] text-slate-300 p-4 sm:p-8 lg:p-12 space-y-12 pb-24">
-      
+
       {/* RESTORED SEARCH HEADER - Side-by-side and clean */}
       <header className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6 border-b border-slate-800/60 pb-10">
         <div className="space-y-3">
@@ -218,25 +265,25 @@ if (!summary) return <LoadingState />;
           </h1>
         </div>
 
-     <section className="sticky top-4 lg:relative lg:top-0 z-[999] flex flex-col lg:flex-row gap-4 w-full lg:w-[600px] lg:bg-slate-900/40 lg:p-3 lg:rounded-2xl lg:border lg:border-slate-800 lg:backdrop-blur-md">
-    
-    {/* Ticker Search Wrapper */}
-    <div className="w-full lg:flex-1">
-      <label className="lg:hidden text-[9px] font-black text-slate-500 uppercase mb-1 block px-1">Ticker Lookup</label>
-      <div className="w-full [&>div]:w-full [&_input]:w-full relative [&_input]:cursor-text">
-        <TickerSearch ticker_url="equity/intraday" />
-      </div>
-    </div>
+        <section className="sticky top-4 lg:relative lg:top-0 z-[999] flex flex-col lg:flex-row gap-4 w-full lg:w-[600px] lg:bg-slate-900/40 lg:p-3 lg:rounded-2xl lg:border lg:border-slate-800 lg:backdrop-blur-md">
 
-    {/* Manager Search Wrapper */}
-    <div className="w-full lg:flex-1">
-      <label className="lg:hidden text-[9px] font-black text-slate-500 uppercase mb-1 block px-1">Manager Profile</label>
-      <div className="w-full [&>div]:w-full [&_input]:w-full relative [&_input]:cursor-text">
-        <ManagerSearch manager_url="equity/intraday" />
-      </div>
-    </div>
+          {/* Ticker Search Wrapper */}
+          <div className="w-full lg:flex-1">
+            <label className="lg:hidden text-[9px] font-black text-slate-500 uppercase mb-1 block px-1">Ticker Lookup</label>
+            <div className="w-full [&>div]:w-full [&_input]:w-full relative [&_input]:cursor-text">
+              <TickerSearch ticker_url="equity/intraday" />
+            </div>
+          </div>
 
-  </section>
+          {/* Manager Search Wrapper */}
+          <div className="w-full lg:flex-1">
+            <label className="lg:hidden text-[9px] font-black text-slate-500 uppercase mb-1 block px-1">Manager Profile</label>
+            <div className="w-full [&>div]:w-full [&_input]:w-full relative [&_input]:cursor-text">
+              <ManagerSearch manager_url="equity/intraday" />
+            </div>
+          </div>
+
+        </section>
       </header>
 
       {/* METRICS ROW */}
