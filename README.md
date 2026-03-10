@@ -93,13 +93,13 @@ Redis is used as a low-latency cache for real-time dashboard updates.
 ---
 
 # Backend
+<img width="1366" height="768" alt="django" src="https://github.com/user-attachments/assets/dfbc3670-59c9-4b79-bcfb-5fe76a5c4889" />
 
 Backend services are implemented using Django.
 
 Responsibilities include:
 
 - portfolio analytics APIs
-- risk model predictions
 - stress testing outputs
 - real-time streaming updates
 
