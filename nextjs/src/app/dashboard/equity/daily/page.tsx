@@ -293,7 +293,7 @@ export default function EquityPage() {
             icon={ShieldAlert}
             className="xl:col-span-1 border-t-2 border-t-red-500/50"
           >
-            <div className="space-y-4 max-h-[600px] overflow-y-auto no-scrollbar">
+            <div className="space-y-3 max-h-[600px] overflow-y-auto no-scrollbar">
               {alerts.length === 0 ? (
                 <div className="py-12 text-center opacity-30">
                   <Globe className="w-8 h-8 mx-auto mb-2" />
@@ -303,28 +303,34 @@ export default function EquityPage() {
                 alerts.map((a, i) => (
                   <div
                     key={i}
-                    className="p-4 rounded-xl bg-slate-800/20 border border-slate-800 hover:border-red-500/30 transition-all"
+                    className="p-3 rounded-xl bg-slate-800/20 border border-slate-800 hover:border-red-500/30 transition-all"
                   >
-                    <span className="text-[8px] font-black uppercase px-2 py-0.5 rounded bg-red-500/20 text-red-500">
-                      {a.severity}
-                    </span>
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-[8px] font-black uppercase px-2 py-0.5 rounded bg-red-500/20 text-red-500">
+                        {a.severity}
+                      </span>
+                    </div>
 
-                    <p className="text-xs font-bold text-white mt-2 mb-2 leading-tight">
+                    <p className="text-xs font-bold text-white mb-2 leading-tight">
                       {a.alert}
                     </p>
 
-                    <Link
-                      href={`/dashboard/equity/daily/ticker/${a.ticker}/manager/${encodeURIComponent(
-                        a.manager
-                      )}`}
-                      className="text-[10px] text-blue-500 font-black hover:underline block"
-                    >
-                      {a.ticker}
-                    </Link>
+                    <div className="flex items-center gap-2 text-[10px] font-mono">
+                      <Link
+                        href={`/dashboard/equity/daily/ticker/${a.ticker}/manager/${encodeURIComponent(
+                          a.manager
+                        )}`}
+                        className="text-blue-500 font-black hover:underline"
+                      >
+                        {a.ticker}
+                      </Link>
 
-                    <p className="text-[9px] text-slate-400 font-mono">
-                      {a.manager}
-                    </p>
+                      <span className="text-slate-500">-</span>
+
+                      <span className="text-slate-400 truncate">
+                        {a.manager}
+                      </span>
+                    </div>
                   </div>
                 ))
               )}
