@@ -51,9 +51,8 @@ const StatCard = ({ label, value, isWarning, isPositive, version }: any) => (
   <div className="p-5 rounded-2xl border border-slate-800 bg-slate-900/60 relative overflow-hidden group">
     <div key={version} className="absolute inset-0 bg-blue-500/10 pointer-events-none animate-data-flash" />
     <p className="text-[9px] font-black text-slate-500 uppercase mb-2 tracking-widest relative z-10">{label}</p>
-    <p className={`text-xl font-mono font-bold tracking-tighter relative z-10 ${
-      isWarning ? 'text-red-400' : isPositive ? 'text-emerald-400' : 'text-white'
-    }`}>
+    <p className={`text-xl font-mono font-bold tracking-tighter relative z-10 ${isWarning ? 'text-red-400' : isPositive ? 'text-emerald-400' : 'text-white'
+      }`}>
       {value}
     </p>
   </div>
@@ -108,14 +107,14 @@ export default function EquityPage() {
   const loadData = useCallback(async (forcedParams?: Record<string, any>) => {
     setLoading(true);
     const activeParams = forcedParams !== undefined ? forcedParams : stressParams;
-    
+
     try {
       const dateRes = await fetch("/api/equity/daily/main/latest-date");
       const { latest_date } = await dateRes.json();
       setDate(latest_date);
 
       const qs = new URLSearchParams({ date: latest_date, ...activeParams }).toString();
-      
+
       const [overview, mgrs, var_, loss, exposure, alertData] = await Promise.all([
         fetch(`/api/equity/daily/main/overview?${qs}`).then(r => r.json()),
         fetch(`/api/equity/daily/main/managers?${qs}`).then(r => r.json()),
@@ -130,12 +129,12 @@ export default function EquityPage() {
       setRisk({ topVaR: var_, topLoss: loss, topExposure: exposure });
       setAlerts(alertData);
       setVersion(v => v + 1);
-    } catch (err) { console.error(err); } 
+    } catch (err) { console.error(err); }
     finally { setLoading(false); }
   }, [stressParams]);
 
   const handleGlobalReset = () => {
-    setStressParams({}); 
+    setStressParams({});
     loadData({});
   };
 
@@ -147,57 +146,57 @@ export default function EquityPage() {
 
   return (
     <div className="min-h-screen bg-[#020617] text-slate-300 pb-20 font-sans selection:bg-blue-500/30 overflow-x-hidden transition-colors duration-700">
-      
-{/* HEADER */}
-<div className="sticky top-0 z-[100] bg-[#020617]/80 backdrop-blur-xl border-b border-slate-800 px-4 sm:px-8 py-3 sm:py-4 flex justify-between items-center">
-  <div className="flex items-center gap-3 sm:gap-4 min-w-0">
-    <Link href="/dashboard/equity" className="p-1.5 sm:p-2 hover:bg-slate-800 rounded-lg shrink-0 cursor-pointer">
-      <ArrowLeft className="w-4 h-4 sm:w-5 sm:h-5 text-slate-500 hover:text-white" />
-    </Link>
 
-    <div className="min-w-0">
-      <div className="flex items-center gap-1 sm:gap-2 text-[7px] sm:text-[9px] font-black text-slate-500 uppercase tracking-[0.2em] mb-0.5">
-        <span>Risk</span> 
-        <ChevronRight className="w-2.5 h-2.5" /> 
-        <span className="text-blue-500">Equity Daily</span>
-      </div>
+      {/* HEADER */}
+      <div className="sticky top-0 z-[100] bg-[#020617]/80 backdrop-blur-xl border-b border-slate-800 px-4 sm:px-8 py-3 sm:py-4 flex justify-between items-center">
+        <div className="flex items-center gap-3 sm:gap-4 min-w-0">
+          <Link href="/dashboard/equity" className="p-1.5 sm:p-2 hover:bg-slate-800 rounded-lg shrink-0 cursor-pointer">
+            <ArrowLeft className="w-4 h-4 sm:w-5 sm:h-5 text-slate-500 hover:text-white" />
+          </Link>
 
-      <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-3 min-w-0">
-        <h1 className="text-lg sm:text-2xl font-black text-white tracking-tighter uppercase italic shrink-0">
-          Risk Oversight
-        </h1>
+          <div className="min-w-0">
+            <div className="flex items-center gap-1 sm:gap-2 text-[7px] sm:text-[9px] font-black text-slate-500 uppercase tracking-[0.2em] mb-0.5">
+              <span>Risk</span>
+              <ChevronRight className="w-2.5 h-2.5" />
+              <span className="text-blue-500">Equity Daily</span>
+            </div>
 
-        {activeScenarioLabel && (
-          <div className="flex items-center gap-1.5 shrink-0 sm:mt-0.5">
-            <span className="bg-red-500 text-white text-[7px] sm:text-[8px] font-black px-1.5 py-0.5 rounded animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.3)]">
-              STRESSED
-            </span>
-            <span className="text-[8px] sm:text-[10px] text-red-400 font-mono border border-red-500/20 px-1.5 py-0.5 rounded bg-red-500/5 whitespace-nowrap">
-              {activeScenarioLabel}
-            </span>
+            <div className="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-3 min-w-0">
+              <h1 className="text-lg sm:text-2xl font-black text-white tracking-tighter uppercase italic shrink-0">
+                Risk Oversight
+              </h1>
+
+              {activeScenarioLabel && (
+                <div className="flex items-center gap-1.5 shrink-0 sm:mt-0.5">
+                  <span className="bg-red-500 text-white text-[7px] sm:text-[8px] font-black px-1.5 py-0.5 rounded animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.3)]">
+                    STRESSED
+                  </span>
+                  <span className="text-[8px] sm:text-[10px] text-red-400 font-mono border border-red-500/20 px-1.5 py-0.5 rounded bg-red-500/5 whitespace-nowrap">
+                    {activeScenarioLabel}
+                  </span>
+                </div>
+              )}
+            </div>
           </div>
-        )}
+        </div>
+
+        <div className="flex items-center gap-3 sm:gap-4 shrink-0 ml-4">
+          <div className="text-right">
+            <p className="text-[7px] font-black text-slate-600 uppercase tracking-widest">EOD Snapshot</p>
+            <p className="text-[10px] sm:text-xs font-mono font-bold text-slate-400">{displayDate}</p>
+          </div>
+
+          <button
+            onClick={handleGlobalReset}
+            className="p-2 sm:p-2.5 bg-blue-600 text-white rounded-lg sm:rounded-xl hover:bg-blue-500 transition-all cursor-pointer active:scale-90 shadow-lg"
+          >
+            <RefreshCcw className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
       </div>
-    </div>
-  </div>
 
-  <div className="flex items-center gap-3 sm:gap-4 shrink-0 ml-4">
-    <div className="text-right">
-      <p className="text-[7px] font-black text-slate-600 uppercase tracking-widest">EOD Snapshot</p>
-      <p className="text-[10px] sm:text-xs font-mono font-bold text-slate-400">{displayDate}</p>
-    </div>
+      <main className="max-w-[1600px] mx-auto p-4 sm:p-8 space-y-8 animate-in fade-in duration-700">
 
-    <button 
-      onClick={handleGlobalReset} 
-      className="p-2 sm:p-2.5 bg-blue-600 text-white rounded-lg sm:rounded-xl hover:bg-blue-500 transition-all cursor-pointer active:scale-90 shadow-lg"
-    >
-      <RefreshCcw className={`w-3.5 h-3.5 sm:w-4 sm:h-4 ${loading ? 'animate-spin' : ''}`} />
-    </button>
-  </div>
-</div>
-
-    <main className="max-w-[1600px] mx-auto p-4 sm:p-8 space-y-8 animate-in fade-in duration-700">
-        
         {/* SEARCH & STRESS ENGINE */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 relative">
           <Card title="Direct Access" icon={Search} className="lg:col-span-4 overflow-visible relative z-50">
@@ -233,63 +232,67 @@ export default function EquityPage() {
 
         {/* LEDGER & BREACHES */}
         <div className="grid grid-cols-1 xl:grid-cols-4 gap-8">
-       <Card 
-  title="Manager Ledger" 
-  icon={Users} 
-  className="xl:col-span-3"
-  headerExtra={
-    <div className="flex items-center gap-1.5 px-2 py-0.5 rounded border border-blue-500/30 bg-blue-500/10 lg:hidden">
-      <span className="text-[8px] font-black text-blue-400 uppercase">Scroll</span>
-      <MoveRight className="w-2.5 h-2.5 text-blue-400 animate-pulse" />
-    </div>
-  }
->
-  <div className="overflow-x-auto pb-4 no-scrollbar">
-    {/* Using a Grid instead of a Table for absolute control over gaps */}
-    <div className="min-w-[700px]">
-      {/* Header Row */}
-      <div className="grid grid-cols-[180px_120px_120px_140px_80px] gap-4 border-b border-slate-800 pb-4 text-[10px] font-black text-slate-600 uppercase tracking-widest">
-        <div>Entity</div>
-        <div className="text-right">Exposure</div>
-        <div className="text-right">Day P&L</div>
-        <div className="text-right">VaR Usage</div>
-        <div className="text-right">Weight</div>
-      </div>
-
-      {/* Data Rows */}
-      <div key={version} className="divide-y divide-slate-800/50">
-        {managers.map((m) => (
-          <div 
-            key={m.asset_manager} 
-            className="grid grid-cols-[180px_120px_120px_140px_80px] gap-4 py-4 items-center hover:bg-slate-800/30 transition-colors group px-0"
+          <Card
+            title="Manager Ledger"
+            icon={Users}
+            className="xl:col-span-3"
+            headerExtra={
+              <div className="flex items-center gap-1.5 px-2 py-0.5 rounded border border-blue-500/30 bg-blue-500/10 lg:hidden">
+                <span className="text-[8px] font-black text-blue-400 uppercase">Scroll</span>
+                <MoveRight className="w-2.5 h-2.5 text-blue-400 animate-pulse" />
+              </div>
+            }
           >
-            <div className="font-bold text-white truncate">
-              <Link href={`/dashboard/equity/daily/manager/${slugify(m.asset_manager)}`} className="hover:text-blue-400 cursor-pointer">
-                {m.asset_manager}
-              </Link>
-            </div>
-            <div className="text-right font-mono text-slate-300">{formatCurrency(m.exposure)}</div>
-            <div className={`text-right font-black ${m.daily_pnl < 0 ? 'text-red-400' : 'text-emerald-400'}`}>
-              {formatCurrency(m.daily_pnl)}
-            </div>
-            <div className="flex flex-col items-end gap-1">
-              <span className="text-[10px] font-mono text-white">{formatPct(m.var_usage_pct)}</span>
-              <div className="w-full h-1 bg-slate-800 rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-blue-500 transition-all duration-1000" 
-                  style={{ width: `${Math.min(m.var_usage_pct * 100, 100)}%` }} 
-                />
+            <div className="overflow-x-auto pb-4 no-scrollbar">
+              {/* Using a Grid instead of a Table for absolute control over gaps */}
+              <div className="min-w-[700px]">
+                {/* Header Row */}
+                <div className="grid grid-cols-[180px_120px_120px_140px_80px] gap-4 border-b border-slate-800 pb-4 text-[10px] font-black text-slate-600 uppercase tracking-widest">
+                  <div>Entity</div>
+                  <div className="text-right">Exposure</div>
+                  <div className="text-right">Day P&L</div>
+                  <div className="text-right">VaR Usage</div>
+                  <div className="text-right">Weight</div>
+                </div>
+
+                {/* Data Rows */}
+                <div key={version} className="divide-y divide-slate-800/50">
+                  {managers.map((m) => (
+                    <div
+                      key={m.asset_manager}
+                      className="grid grid-cols-[180px_120px_120px_140px_80px] gap-4 py-4 items-center hover:bg-slate-800/30 transition-colors group px-0"
+                    >
+                      <div className="font-bold text-white truncate">
+                        <Link href={`/dashboard/equity/daily/manager/${slugify(m.asset_manager)}`} className="hover:text-blue-400 cursor-pointer">
+                          {m.asset_manager}
+                        </Link>
+                      </div>
+                      <div className="text-right font-mono text-slate-300">{formatCurrency(m.exposure)}</div>
+                      <div className={`text-right font-black ${m.daily_pnl < 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+                        {formatCurrency(m.daily_pnl)}
+                      </div>
+                      <div className="flex flex-col items-end gap-1">
+                        <span className="text-[10px] font-mono text-white">{formatPct(m.var_usage_pct)}</span>
+                        <div className="w-full h-1 bg-slate-800 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-blue-500 transition-all duration-1000"
+                            style={{ width: `${Math.min(m.var_usage_pct * 100, 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                      <div className="text-right text-slate-500 font-mono text-[11px]">{formatPct(m.book_pct)}</div>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
-            <div className="text-right text-slate-500 font-mono text-[11px]">{formatPct(m.book_pct)}</div>
-          </div>
-        ))}
-      </div>
-    </div>
-  </div>
-</Card>
+          </Card>
 
-          <Card title="Systemic Breaches" icon={ShieldAlert} className="xl:col-span-1 border-t-2 border-t-red-500/50">
+          <Card
+            title="Systemic Breaches"
+            icon={ShieldAlert}
+            className="xl:col-span-1 border-t-2 border-t-red-500/50"
+          >
             <div className="space-y-4 max-h-[600px] overflow-y-auto no-scrollbar">
               {alerts.length === 0 ? (
                 <div className="py-12 text-center opacity-30">
@@ -298,13 +301,30 @@ export default function EquityPage() {
                 </div>
               ) : (
                 alerts.map((a, i) => (
-                  <div key={i} className="p-4 rounded-xl bg-slate-800/20 border border-slate-800 transition-all hover:border-red-500/30">
-                    <div className="flex justify-between mb-2">
-                      <span className="text-[8px] font-black uppercase px-2 py-0.5 rounded bg-red-500/20 text-red-500">{a.severity}</span>
-                      <span className="text-[9px] font-mono text-slate-600">{a.eod}</span>
-                    </div>
-                    <p className="text-xs font-bold text-white mb-2 leading-tight">{a.alert}</p>
-                    <Link href={`/dashboard/equity/daily/ticker/${a.ticker}`} className="text-[10px] text-blue-500 font-black cursor-pointer hover:underline">{a.ticker}</Link>
+                  <div
+                    key={i}
+                    className="p-4 rounded-xl bg-slate-800/20 border border-slate-800 hover:border-red-500/30 transition-all"
+                  >
+                    <span className="text-[8px] font-black uppercase px-2 py-0.5 rounded bg-red-500/20 text-red-500">
+                      {a.severity}
+                    </span>
+
+                    <p className="text-xs font-bold text-white mt-2 mb-2 leading-tight">
+                      {a.alert}
+                    </p>
+
+                    <Link
+                      href={`/dashboard/equity/daily/ticker/${a.ticker}/manager/${encodeURIComponent(
+                        a.manager
+                      )}`}
+                      className="text-[10px] text-blue-500 font-black hover:underline block"
+                    >
+                      {a.ticker}
+                    </Link>
+
+                    <p className="text-[9px] text-slate-400 font-mono">
+                      {a.manager}
+                    </p>
                   </div>
                 ))
               )}
@@ -327,7 +347,7 @@ export default function EquityPage() {
 
       </main>
 
-<style jsx global>{`
+      <style jsx global>{`
   @keyframes data-flash {
     0% { background-color: rgba(59, 130, 246, 0.4); opacity: 1; }
     100% { background-color: transparent; opacity: 0; }
@@ -336,7 +356,7 @@ export default function EquityPage() {
   button, a, .cursor-pointer { cursor: pointer !important; }
 `}</style>
 
-</div>
+    </div>
   );
 }
 
