@@ -54,7 +54,7 @@ def create_daily_bond_data(start_date, end_date):
     dgs10 = dgs10.to_frame("DGS10").reset_index().rename(columns={"index": "date"})
     business_days = pd.DataFrame({"date": dates})
 
-    dgs10 = business_days.merge(dgs10, on="date", how="left").ffill()
+    dgs10 = business_days.merge(dgs10, on="date", how="left").ffill().bfill()
 
     dgs10["DGS10_ma"] = dgs10["DGS10"].rolling(20, min_periods=1).mean()
     dgs10["dgs10_anom"] = dgs10["DGS10"] - dgs10["DGS10_ma"]
