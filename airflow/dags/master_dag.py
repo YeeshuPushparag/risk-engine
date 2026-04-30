@@ -7,9 +7,18 @@ US_TZ = timezone("America/New_York")
 
 
 # == Lazy imports inside callables ==
-def run_feature_update():
+def run_feature_update(**context):
     from pipelines.daily.market_features_s3 import update_market_features
-    df, msg = update_market_features()
+
+    dag_run = context.get("dag_run")
+
+    start_date_override = None
+
+    if dag_run and dag_run.conf:
+        start_date_override = dag_run.conf.get("start_date")
+
+    df, msg = update_market_features(start_date_override=start_date_override)
+
     return msg or "OK"
 
 
@@ -18,9 +27,16 @@ def run_risk_pipeline():
     return run_equity_risk_pipeline() or "OK"
 
 
-def run_fx_exposure():
-    from pipelines.daily.fx_exposure_pipeline import run_fx_exposure_pipeline
-    return run_fx_exposure_pipeline() or "OK"
+def run_fx_exposure(**context):
+    from pipelines.daily.fx_exposure_pipeline import update_fx_pipeline
+
+    dag_run = context.get("dag_run")
+    start_date_override = None
+
+    if dag_run and dag_run.conf:
+        start_date_override = dag_run.conf.get("start_date")
+
+    return update_fx_pipeline(start_date_override=start_date_override) or "OK"
 
 
 def run_fx_update():
@@ -28,9 +44,16 @@ def run_fx_update():
     return update_fx_snowflake() or "OK"
 
 
-def run_commodity_update():
-    from pipelines.daily.commodity_update_pipeline import run_commodities_update
-    return run_commodities_update() or "OK"
+def run_commodity_update(**context):
+    from pipelines.daily.commodity_update_pipeline import update_commodity_pipeline
+
+    dag_run = context.get("dag_run")
+    start_date_override = None
+
+    if dag_run and dag_run.conf:
+        start_date_override = dag_run.conf.get("start_date")
+
+    return update_commodity_pipeline(start_date_override=start_date_override) or "OK"
 
 
 def run_commodity_process():
@@ -38,9 +61,16 @@ def run_commodity_process():
     return process_commodities() or "OK"
 
 
-def run_bonds_update():
-    from pipelines.daily.bonds_update_pipeline import update_bonds_snowflake
-    return update_bonds_snowflake() or "OK"
+def run_bonds_update(**context):
+    from pipelines.daily.bonds_update_pipeline import update_bonds_pipeline
+
+    dag_run = context.get("dag_run")
+    start_date_override = None
+
+    if dag_run and dag_run.conf:
+        start_date_override = dag_run.conf.get("start_date")
+
+    return update_bonds_pipeline(start_date_override=start_date_override) or "OK"
 
 
 def run_derivatives():

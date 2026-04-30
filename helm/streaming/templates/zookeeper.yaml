@@ -23,7 +23,7 @@ spec:
         fsGroupChangePolicy: "OnRootMismatch"
       containers:
         - name: zookeeper
-          image: 922967232801.dkr.ecr.us-east-1.amazonaws.com/zookeeper:1
+          image: 369598751710.dkr.ecr.us-east-1.amazonaws.com/zookeeper:1
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 2181

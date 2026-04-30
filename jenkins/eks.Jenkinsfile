@@ -3,8 +3,6 @@ pipeline {
 
   environment {
     AWS_REGION = "us-east-1"
-    TF_DIR     = "infra/eks"
-
     TF_VAR_cluster_name = "risk-eks"
   }
 
@@ -16,34 +14,73 @@ pipeline {
       }
     }
 
-    stage('Terraform Init') {
+    // -------------------------
+    // EKS CLUSTER
+    // -------------------------
+    stage('Cluster Init') {
       steps {
-        dir(env.TF_DIR) {
+        dir("infra/eks/cluster") {
           sh 'terraform init -reconfigure'
         }
       }
     }
 
-    stage('Terraform Validate') {
+    stage('Cluster Validate') {
       steps {
-        dir(env.TF_DIR) {
+        dir("infra/eks/cluster") {
           sh 'terraform validate'
         }
       }
     }
 
-    stage('Terraform Plan') {
+    stage('Cluster Plan') {
       steps {
-        dir(env.TF_DIR) {
+        dir("infra/eks/cluster") {
           sh 'terraform plan -out=tfplan'
         }
       }
     }
 
-    stage('Terraform Apply') {
+    stage('Cluster Apply') {
       steps {
-        input message: 'Apply Terraform to create/update EKS?', ok: 'Apply'
-        dir(env.TF_DIR) {
+        input message: 'Apply EKS Cluster?', ok: 'Apply'
+        dir("infra/eks/cluster") {
+          sh 'terraform apply -input=false tfplan'
+        }
+      }
+    }
+
+    // -------------------------
+    // EKS ADDONS
+    // -------------------------
+    stage('Addons Init') {
+      steps {
+        dir("infra/eks/addons") {
+          sh 'terraform init -reconfigure'
+        }
+      }
+    }
+
+    stage('Addons Validate') {
+      steps {
+        dir("infra/eks/addons") {
+          sh 'terraform validate'
+        }
+      }
+    }
+
+    stage('Addons Plan') {
+      steps {
+        dir("infra/eks/addons") {
+          sh 'terraform plan -out=tfplan'
+        }
+      }
+    }
+
+    stage('Addons Apply') {
+      steps {
+        input message: 'Apply EKS Addons?', ok: 'Apply'
+        dir("infra/eks/addons") {
           sh 'terraform apply -input=false tfplan'
         }
       }

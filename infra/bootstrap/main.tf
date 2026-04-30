@@ -5,7 +5,7 @@ locals {
 
 # Terraform State Bucket
 resource "aws_s3_bucket" "tf_state" {
-  bucket = "${local.project}-tf-state-${local.env}-pushparag"
+  bucket = "${local.project}-tf-state-${local.env}-yeeshu"
 
   tags = {
     Name        = "Terraform State Bucket"
