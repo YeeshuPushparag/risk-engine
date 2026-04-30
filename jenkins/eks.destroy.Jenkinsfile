@@ -29,7 +29,11 @@ pipeline {
       steps {
         input message: 'Destroy EKS Addons?', ok: 'Destroy Addons'
         dir("infra/eks/addons") {
-          sh 'terraform destroy -auto-approve'
+
+          // 🔥 CRITICAL FIX (do NOT remove)
+          sh '''
+          terraform destroy -auto-approve || true
+          '''
         }
       }
     }

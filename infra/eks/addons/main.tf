@@ -9,7 +9,7 @@ data "kubernetes_config_map_v1" "aws_auth" {
 }
 
 # -------------------------
-# aws-auth (PATCH)
+# aws-auth (MANAGE AFTER IMPORT)
 # -------------------------
 resource "kubernetes_config_map_v1" "aws_auth_patch" {
   metadata {

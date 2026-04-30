@@ -81,6 +81,12 @@ pipeline {
       steps {
         input message: 'Apply EKS Addons?', ok: 'Apply'
         dir("infra/eks/addons") {
+
+          // 🔥 CRITICAL FIX (DO NOT REMOVE)
+          sh '''
+          terraform import kubernetes_config_map_v1.aws_auth_patch kube-system/aws-auth || true
+          '''
+
           sh 'terraform apply -input=false tfplan'
         }
       }
