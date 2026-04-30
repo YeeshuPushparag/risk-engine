@@ -1,7 +1,14 @@
 # -------------------------
 # aws-auth ConfigMap
 # -------------------------
-resource "kubernetes_config_map_v1" "aws_auth" {
+data "kubernetes_config_map_v1" "aws_auth" {
+  metadata {
+    name      = "aws-auth"
+    namespace = "kube-system"
+  }
+}
+
+resource "kubernetes_config_map_v1" "aws_auth_patch" {
   metadata {
     name      = "aws-auth"
     namespace = "kube-system"
@@ -16,6 +23,8 @@ resource "kubernetes_config_map_v1" "aws_auth" {
       }
     ])
   }
+
+  force = true
 }
 
 # -------------------------
