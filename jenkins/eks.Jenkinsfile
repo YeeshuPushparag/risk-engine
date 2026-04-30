@@ -36,7 +36,7 @@ pipeline {
     stage('Cluster Plan') {
       steps {
         dir("infra/eks/cluster") {
-          sh 'terraform plan -out=tfplan'
+          sh 'terraform plan'
         }
       }
     }
@@ -45,7 +45,7 @@ pipeline {
       steps {
         input message: 'Apply EKS Cluster?', ok: 'Apply'
         dir("infra/eks/cluster") {
-          sh 'terraform apply -input=false tfplan'
+          sh 'terraform apply -auto-approve'
         }
       }
     }
@@ -69,25 +69,18 @@ pipeline {
       }
     }
 
-    stage('Addons Plan') {
-      steps {
-        dir("infra/eks/addons") {
-          sh 'terraform plan -out=tfplan'
-        }
-      }
-    }
-
     stage('Addons Apply') {
       steps {
         input message: 'Apply EKS Addons?', ok: 'Apply'
         dir("infra/eks/addons") {
 
-          // 🔥 CRITICAL FIX (DO NOT REMOVE)
+          // 🔥 CRITICAL: take ownership before apply
           sh '''
           terraform import kubernetes_config_map_v1.aws_auth_patch kube-system/aws-auth || true
           '''
 
-          sh 'terraform apply -input=false tfplan'
+          // 🔥 apply directly (NO tfplan)
+          sh 'terraform apply -auto-approve'
         }
       }
     }

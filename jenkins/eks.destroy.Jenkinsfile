@@ -30,7 +30,7 @@ pipeline {
         input message: 'Destroy EKS Addons?', ok: 'Destroy Addons'
         dir("infra/eks/addons") {
 
-          // 🔥 CRITICAL FIX (do NOT remove)
+          // 🔥 NON-BLOCKING (important)
           sh '''
           terraform destroy -auto-approve || true
           '''
@@ -51,7 +51,7 @@ pipeline {
 
     stage('Cluster Destroy') {
       steps {
-        input message: 'DESTROY EKS CLUSTER? This cannot be undone.', ok: 'DESTROY'
+        input message: 'DESTROY EKS CLUSTER?', ok: 'DESTROY'
         dir("infra/eks/cluster") {
           sh 'terraform destroy -auto-approve'
         }
