@@ -35,14 +35,14 @@ resource "kubernetes_config_map_v1" "aws_auth_patch" {
   ]
 }
 
-# -------------------------
-# EBS CSI Addon
-# -------------------------
 resource "aws_eks_addon" "ebs_csi" {
-  cluster_name = data.terraform_remote_state.cluster.outputs.cluster_name
-  addon_name   = "aws-ebs-csi-driver"
+  cluster_name             = data.terraform_remote_state.cluster.outputs.cluster_name
+  addon_name               = "aws-ebs-csi-driver"
+
+  service_account_role_arn = aws_iam_role.ebs_csi_irsa_role.arn
 
   depends_on = [
-    kubernetes_config_map_v1.aws_auth_patch
+    kubernetes_config_map_v1.aws_auth_patch,
+    aws_iam_role_policy_attachment.ebs_csi_attach
   ]
 }
