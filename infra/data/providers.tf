@@ -5,7 +5,7 @@ provider "aws" {
 data "terraform_remote_state" "platform" {
   backend = "s3"
   config = {
-    bucket         = "risk-tf-state-platform-pushparag"
+    bucket         = "risk-tf-state-platform-yeeshu"
     key            = "platform/networking/terraform.tfstate"
     region         = "us-east-1"
     dynamodb_table = "risk-tf-locks"
@@ -15,7 +15,7 @@ data "terraform_remote_state" "platform" {
 data "terraform_remote_state" "eks" {
   backend = "s3"
   config = {
-    bucket         = "risk-tf-state-platform-pushparag"
+    bucket         = "risk-tf-state-platform-yeeshu"
     key            = "eks/terraform.tfstate"
     region         = "us-east-1"
     dynamodb_table = "risk-tf-locks"
