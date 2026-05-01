@@ -32,7 +32,7 @@ data "terraform_remote_state" "eks" {
 
   config = {
     bucket = "risk-tf-state-platform-yeeshu"
-    key    = "eks/cluster/terraform.tfstate"   # ✅ FIXED
+    key    = "eks/terraform.tfstate"   
     region = "us-east-1"
   }
 }
@@ -129,7 +129,7 @@ resource "aws_lb_listener" "https" {
 }
 
 # -------------------------
-# EKS ALB Lookup (NOW HERE, NOT IN ADDONS)
+# EKS ALB Lookup 
 # -------------------------
 data "aws_lb" "eks_alb" {
   most_recent = true

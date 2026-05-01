@@ -3,6 +3,8 @@ pipeline {
 
   environment {
     AWS_REGION = "us-east-1"
+    TF_DIR     = "infra/eks"
+
     TF_VAR_cluster_name = "risk-eks"
   }
 
@@ -14,45 +16,19 @@ pipeline {
       }
     }
 
-    // -------------------------
-    // ADDONS DESTROY FIRST
-    // -------------------------
-    stage('Addons Init') {
+    stage('Terraform Init') {
       steps {
-        dir("infra/eks/addons") {
-          sh 'terraform init -reconfigure'
+        dir(env.TF_DIR) {
+          sh 'terraform init'
         }
       }
     }
+  
 
-    stage('Addons Destroy') {
+    stage('Terraform Destroy') {
       steps {
-        input message: 'Destroy EKS Addons?', ok: 'Destroy Addons'
-        dir("infra/eks/addons") {
-
-          // 🔥 NON-BLOCKING (important)
-          sh '''
-          terraform destroy -auto-approve || true
-          '''
-        }
-      }
-    }
-
-    // -------------------------
-    // CLUSTER DESTROY SECOND
-    // -------------------------
-    stage('Cluster Init') {
-      steps {
-        dir("infra/eks/cluster") {
-          sh 'terraform init -reconfigure'
-        }
-      }
-    }
-
-    stage('Cluster Destroy') {
-      steps {
-        input message: 'DESTROY EKS CLUSTER?', ok: 'DESTROY'
-        dir("infra/eks/cluster") {
+        input message: 'DESTROY EKS CLUSTER? This cannot be undone.', ok: 'DESTROY'
+        dir(env.TF_DIR) {
           sh 'terraform destroy -auto-approve'
         }
       }

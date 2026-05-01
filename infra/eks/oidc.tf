@@ -1,5 +1,9 @@
 data "aws_eks_cluster" "this" {
   name = aws_eks_cluster.this.name
+
+  depends_on = [
+    aws_eks_cluster.this
+  ]
 }
 
 data "tls_certificate" "oidc" {
@@ -13,5 +17,9 @@ resource "aws_iam_openid_connect_provider" "eks" {
 
   thumbprint_list = [
     data.tls_certificate.oidc.certificates[0].sha1_fingerprint
+  ]
+
+  depends_on = [
+    aws_eks_cluster.this
   ]
 }

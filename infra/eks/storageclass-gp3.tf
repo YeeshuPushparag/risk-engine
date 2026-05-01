@@ -12,4 +12,7 @@ resource "kubernetes_storage_class" "gp3" {
 
   reclaim_policy      = "Delete"
   volume_binding_mode = "WaitForFirstConsumer"
+
+  allow_volume_expansion = true
+  depends_on = [aws_eks_addon.ebs_csi]
 }

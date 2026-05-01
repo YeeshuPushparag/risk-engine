@@ -3,6 +3,8 @@ pipeline {
 
   environment {
     AWS_REGION = "us-east-1"
+    TF_DIR     = "infra/eks"
+
     TF_VAR_cluster_name = "risk-eks"
   }
 
@@ -14,73 +16,35 @@ pipeline {
       }
     }
 
-    // -------------------------
-    // EKS CLUSTER
-    // -------------------------
-    stage('Cluster Init') {
+    stage('Terraform Init') {
       steps {
-        dir("infra/eks/cluster") {
+        dir(env.TF_DIR) {
           sh 'terraform init -reconfigure'
         }
       }
     }
 
-    stage('Cluster Validate') {
+    stage('Terraform Validate') {
       steps {
-        dir("infra/eks/cluster") {
+        dir(env.TF_DIR) {
           sh 'terraform validate'
         }
       }
     }
 
-    stage('Cluster Plan') {
+    stage('Terraform Plan') {
       steps {
-        dir("infra/eks/cluster") {
-          sh 'terraform plan'
+        dir(env.TF_DIR) {
+          sh 'terraform plan -out=tfplan'
         }
       }
     }
 
-    stage('Cluster Apply') {
+    stage('Terraform Apply') {
       steps {
-        input message: 'Apply EKS Cluster?', ok: 'Apply'
-        dir("infra/eks/cluster") {
-          sh 'terraform apply -auto-approve'
-        }
-      }
-    }
-
-    // -------------------------
-    // EKS ADDONS
-    // -------------------------
-    stage('Addons Init') {
-      steps {
-        dir("infra/eks/addons") {
-          sh 'terraform init -reconfigure'
-        }
-      }
-    }
-
-    stage('Addons Validate') {
-      steps {
-        dir("infra/eks/addons") {
-          sh 'terraform validate'
-        }
-      }
-    }
-
-    stage('Addons Apply') {
-      steps {
-        input message: 'Apply EKS Addons?', ok: 'Apply'
-        dir("infra/eks/addons") {
-
-          // 🔥 CRITICAL: take ownership before apply
-          sh '''
-          terraform import kubernetes_config_map_v1.aws_auth_patch kube-system/aws-auth || true
-          '''
-
-          // 🔥 apply directly (NO tfplan)
-          sh 'terraform apply -auto-approve'
+        input message: 'Apply Terraform to create/update EKS?', ok: 'Apply'
+        dir(env.TF_DIR) {
+          sh 'terraform apply -input=false tfplan'
         }
       }
     }
