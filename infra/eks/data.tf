@@ -3,7 +3,7 @@ data "terraform_remote_state" "platform" {
 
   config = {
     bucket         = "risk-tf-state-platform-yeeshu"
-    key            = "platform/terraform.tfstate"
+    key            = "platform/networking/terraform.tfstate"
     region         = "us-east-1"
     dynamodb_table = "risk-tf-locks"
     encrypt        = true
