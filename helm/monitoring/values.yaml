@@ -72,7 +72,7 @@ kube-prometheus-stack:
         alb.ingress.kubernetes.io/scheme: internet-facing
         alb.ingress.kubernetes.io/target-type: ip
         alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
-        alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:369598751710:certificate/e0af3110-f363-4d3e-85a0-2e428d4cd4a6
+        alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:369598751710:certificate/67ead6d7-4c24-4a1e-b976-e7aa9ba4aff4
         alb.ingress.kubernetes.io/ssl-redirect: "443"
         alb.ingress.kubernetes.io/group.name: risk-engine
         alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=3600
