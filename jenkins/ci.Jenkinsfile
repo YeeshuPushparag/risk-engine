@@ -17,7 +17,7 @@ pipeline {
     // -------------------------
     stage('Resolve AWS Account') {
       steps {
-        container('jnlp') {
+        container('aws-cli') {
           script {
             env.AWS_ACCOUNT_ID = sh(
               script: "aws sts get-caller-identity --query Account --output text",
