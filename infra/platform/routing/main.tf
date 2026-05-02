@@ -25,14 +25,14 @@ data "terraform_remote_state" "network" {
 }
 
 # -------------------------
-# Remote State: EKS (cluster only)
+# Remote State: EKS
 # -------------------------
 data "terraform_remote_state" "eks" {
   backend = "s3"
 
   config = {
     bucket = "risk-tf-state-platform-yeeshu"
-    key    = "eks/terraform.tfstate"   
+    key    = "eks/terraform.tfstate"
     region = "us-east-1"
   }
 }
@@ -48,10 +48,6 @@ locals {
 # -------------------------
 resource "aws_route53_zone" "main" {
   name = "pushparag.online"
-
-  tags = {
-    Project = local.project
-  }
 }
 
 # -------------------------
@@ -129,15 +125,15 @@ resource "aws_lb_listener" "https" {
 }
 
 # -------------------------
-# EKS ALB Lookup 
+# EKS ALB Lookup (FIXED)
 # -------------------------
-data "aws_lb" "eks_alb" {
-  most_recent = true
+data "aws_lbs" "all" {}
 
-  filter {
-    name   = "tag:elbv2.k8s.aws/cluster"
-    values = [data.terraform_remote_state.eks.outputs.cluster_name]
-  }
+data "aws_lb" "eks_alb" {
+  arn = one([
+    for arn in data.aws_lbs.all.arns :
+    arn if strcontains(arn, "k8s")
+  ])
 }
 
 # -------------------------
@@ -156,7 +152,7 @@ resource "aws_route53_record" "jenkins" {
 }
 
 # -------------------------
-# Route53: EKS wildcard
+# Route53: Wildcard for EKS
 # -------------------------
 resource "aws_route53_record" "wildcard" {
   zone_id = aws_route53_zone.main.zone_id
