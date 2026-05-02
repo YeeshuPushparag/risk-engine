@@ -12,15 +12,12 @@ pipeline {
 
   stages {
 
-    // -------------------------
-    // RESOLVE ACCOUNT (FIXED)
-    // -------------------------
     stage('Resolve AWS Account') {
       steps {
-        container('aws-cli') {
+        container('jnlp') {
           script {
             env.AWS_ACCOUNT_ID = sh(
-              script: "aws sts get-caller-identity --query Account --output text",
+              script: "echo $AWS_ROLE_ARN | cut -d: -f5",
               returnStdout: true
             ).trim()
 
