@@ -7,16 +7,20 @@ pipeline {
   }
 
   environment {
-    AWS_REGION     = 'us-east-1'
+    AWS_REGION = 'us-east-1'
   }
 
   stages {
+
+    // -------------------------
+    // RESOLVE ACCOUNT (FIXED)
+    // -------------------------
     stage('Resolve AWS Account') {
       steps {
         container('jnlp') {
           script {
             env.AWS_ACCOUNT_ID = sh(
-              script: "echo $AWS_ROLE_ARN | cut -d: -f5",
+              script: "aws sts get-caller-identity --query Account --output text",
               returnStdout: true
             ).trim()
 
@@ -27,39 +31,31 @@ pipeline {
       }
     }
 
+    // -------------------------
+    // CHECKOUT
+    // -------------------------
     stage('Checkout') {
       steps {
         checkout scm
       }
     }
 
+    // -------------------------
+    // DETECT CHANGES (CLEAN)
+    // -------------------------
     stage('Detect App Changes') {
       steps {
         script {
-          sh '''
-            set -e
-            git fetch origin
+          def changed = sh(
+            script: 'git diff --name-only "$GIT_PREVIOUS_SUCCESSFUL_COMMIT" "$GIT_COMMIT" || true',
+            returnStdout: true
+          ).trim()
 
-            CHANGED=$(git diff --name-only "$GIT_PREVIOUS_SUCCESSFUL_COMMIT" "$GIT_COMMIT" || true)
-
-            echo false > build_airflow
-            echo false > build_django
-            echo false > build_nextjs
-            echo false > build_spark
-            echo false > build_producer
-
-            echo "$CHANGED" | grep -q '^airflow/'   && echo true > build_airflow   || true
-            echo "$CHANGED" | grep -q '^django/'    && echo true > build_django    || true
-            echo "$CHANGED" | grep -q '^nextjs/'    && echo true > build_nextjs    || true
-            echo "$CHANGED" | grep -q '^spark/'     && echo true > build_spark     || true
-            echo "$CHANGED" | grep -q '^producer/'  && echo true > build_producer  || true
-          '''
-
-          env.BUILD_AIRFLOW  = readFile('build_airflow').trim()
-          env.BUILD_DJANGO   = readFile('build_django').trim()
-          env.BUILD_NEXTJS   = readFile('build_nextjs').trim()
-          env.BUILD_SPARK    = readFile('build_spark').trim()
-          env.BUILD_PRODUCER = readFile('build_producer').trim()
+          env.BUILD_AIRFLOW  = changed.contains('airflow/')  ? 'true' : 'false'
+          env.BUILD_DJANGO   = changed.contains('django/')   ? 'true' : 'false'
+          env.BUILD_NEXTJS   = changed.contains('nextjs/')   ? 'true' : 'false'
+          env.BUILD_SPARK    = changed.contains('spark/')    ? 'true' : 'false'
+          env.BUILD_PRODUCER = changed.contains('producer/') ? 'true' : 'false'
 
           env.BUILD_IMAGES = (
             env.BUILD_AIRFLOW  == 'true' ||
@@ -72,6 +68,9 @@ pipeline {
       }
     }
 
+    // -------------------------
+    // BUILD & PUSH (SELECTIVE)
+    // -------------------------
     stage('Build & Push Images') {
       when {
         expression { env.BUILD_IMAGES == 'true' }
@@ -80,7 +79,6 @@ pipeline {
         container('kaniko') {
           script {
 
-            // READ ENV ONCE (sandbox-safe)
             def buildFlags = [
               airflow  : env.BUILD_AIRFLOW,
               django   : env.BUILD_DJANGO,
@@ -133,6 +131,9 @@ pipeline {
       }
     }
 
+    // -------------------------
+    // COMMIT CHANGES
+    // -------------------------
     stage('Commit Helm Changes') {
       when {
         expression { env.BUILD_IMAGES == 'true' }

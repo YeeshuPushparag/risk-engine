@@ -12,21 +12,22 @@ pipeline {
 
   stages {
 
-  stage('Resolve AWS Account') {
-  steps {
-    container('jnlp') {
-      script {
-        env.AWS_ACCOUNT_ID = sh(
-          script: "echo $AWS_ROLE_ARN | cut -d: -f5",
-          returnStdout: true
-        ).trim()
+    stage('Resolve AWS Account') {
+      steps {
+        container('jnlp') {
+          script {
+            env.AWS_ACCOUNT_ID = sh(
+              script: "aws sts get-caller-identity --query Account --output text",
+              returnStdout: true
+            ).trim()
 
-        env.ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
-        env.KANIKO_CACHE = "${env.ECR_REGISTRY}/kaniko-cache"
+            env.ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+            env.KANIKO_CACHE = "${env.ECR_REGISTRY}/kaniko-cache"
+          }
+        }
       }
     }
-  }
-}
+
     stage('Checkout') {
       steps {
         checkout scm
@@ -37,16 +38,17 @@ pipeline {
       steps {
         container('kaniko') {
           script {
-            def singleApps = [
+            def apps = [
               [name: 'airflow', path: 'airflow', values: 'helm/airflow/values.yaml'],
               [name: 'django',  path: 'django',  values: 'helm/django/values.yaml'],
               [name: 'nextjs',  path: 'nextjs',  values: 'helm/nextjs/values.yaml']
             ]
 
-            for (app in singleApps) {
+            for (app in apps) {
               sh """
                 set -e
                 VALUES_FILE="${app.values}"
+
                 CURRENT_TAG=\$(grep '^  tag:' \$VALUES_FILE | awk '{print \$2}' | tr -d '"')
                 NEXT_TAG=\$((CURRENT_TAG + 1))
 
@@ -69,7 +71,7 @@ pipeline {
       steps {
         container('kaniko') {
           script {
-            def streamingImages = [
+            def images = [
               [name: 'producer',  path: 'producer'],
               [name: 'spark',     path: 'spark'],
               [name: 'zookeeper', path: 'tools/zookeeper'],
@@ -77,10 +79,11 @@ pipeline {
               [name: 'kubectl',   path: 'tools/kubectl']
             ]
 
-            for (img in streamingImages) {
+            for (img in images) {
               sh """
                 set -e
                 VALUES_FILE="helm/streaming/values.yaml"
+
                 CURRENT_TAG=\$(awk '/${img.name}:/{f=1} f && /tag:/{print \$2; exit}' \$VALUES_FILE | tr -d '"')
                 NEXT_TAG=\$((CURRENT_TAG + 1))
 
@@ -124,6 +127,5 @@ pipeline {
         }
       }
     }
-
-  } // end of stages
-} // end of pipeline
+  }
+}
