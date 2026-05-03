@@ -11,6 +11,11 @@ resource "aws_instance" "jenkins" {
 
   vpc_security_group_ids = [aws_security_group.jenkins_sg.id]
 
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "optional"
+  }
+
   root_block_device {
     volume_size = 20
     volume_type = "gp3"
@@ -42,4 +47,5 @@ resource "aws_instance" "jenkins" {
   lifecycle {
     ignore_changes = [ami, user_data]
   }
+
 }
