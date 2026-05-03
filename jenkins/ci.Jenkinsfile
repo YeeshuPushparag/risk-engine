@@ -38,29 +38,38 @@ pipeline {
     }
 
     // -------------------------
-    // DETECT CHANGES (CLEAN)
+    // DETECT CHANGES (FIXED)
     // -------------------------
     stage('Detect App Changes') {
       steps {
-        script {
-          def changed = sh(
-            script: 'git diff --name-only "$GIT_PREVIOUS_SUCCESSFUL_COMMIT" "$GIT_COMMIT" || true',
-            returnStdout: true
-          ).trim()
+        container('jnlp') {
+          script {
 
-          env.BUILD_AIRFLOW  = changed.contains('airflow/')  ? 'true' : 'false'
-          env.BUILD_DJANGO   = changed.contains('django/')   ? 'true' : 'false'
-          env.BUILD_NEXTJS   = changed.contains('nextjs/')   ? 'true' : 'false'
-          env.BUILD_SPARK    = changed.contains('spark/')    ? 'true' : 'false'
-          env.BUILD_PRODUCER = changed.contains('producer/') ? 'true' : 'false'
+            sh 'git fetch origin'
 
-          env.BUILD_IMAGES = (
-            env.BUILD_AIRFLOW  == 'true' ||
-            env.BUILD_DJANGO   == 'true' ||
-            env.BUILD_NEXTJS   == 'true' ||
-            env.BUILD_SPARK    == 'true' ||
-            env.BUILD_PRODUCER == 'true'
-          ).toString()
+            def changed = sh(
+              script: 'git diff --name-only "$GIT_PREVIOUS_SUCCESSFUL_COMMIT" "$GIT_COMMIT" || true',
+              returnStdout: true
+            ).trim()
+
+            echo "Changed files:\n${changed}"
+
+            env.BUILD_AIRFLOW  = changed =~ /(^|\\n)airflow\\//  ? 'true' : 'false'
+            env.BUILD_DJANGO   = changed =~ /(^|\\n)django\\//   ? 'true' : 'false'
+            env.BUILD_NEXTJS   = changed =~ /(^|\\n)nextjs\\//   ? 'true' : 'false'
+            env.BUILD_SPARK    = changed =~ /(^|\\n)spark\\//    ? 'true' : 'false'
+            env.BUILD_PRODUCER = changed =~ /(^|\\n)producer\\// ? 'true' : 'false'
+
+            env.BUILD_IMAGES = (
+              env.BUILD_AIRFLOW  == 'true' ||
+              env.BUILD_DJANGO   == 'true' ||
+              env.BUILD_NEXTJS   == 'true' ||
+              env.BUILD_SPARK    == 'true' ||
+              env.BUILD_PRODUCER == 'true'
+            ).toString()
+
+            echo "BUILD_IMAGES=${env.BUILD_IMAGES}"
+          }
         }
       }
     }
