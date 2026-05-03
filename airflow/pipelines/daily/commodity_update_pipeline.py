@@ -1351,7 +1351,7 @@ def write_metadata(
 # =============================================================
 
 def update_commodity_pipeline(
-    bucket:              str        = "pushparag-commodity-bucket",
+    bucket:              str        = "yeeshu-commodity-bucket",
     prefix:              str        = "historical-commodity/",
     tickers:             list[str]  = None,
     start_date_override: str        = None,   # "YYYY-MM-DD" -> backfill mode
@@ -1786,7 +1786,7 @@ def update_commodity_pipeline(
 
 def replay_failed_tickers(
     run_id: str,
-    bucket: str = "pushparag-commodity-bucket",
+    bucket: str = "yeeshu-commodity-bucket",
     prefix: str = "historical-commodity/",
 ) -> tuple[pd.DataFrame | None, str]:
     """
@@ -1846,7 +1846,7 @@ def replay_failed_tickers(
 
 def replay_commodities_from_raw(
     start_date: str,
-    bucket:     str  = "pushparag-commodity-bucket",
+    bucket:     str  = "yeeshu-commodity-bucket",
     prefix:     str  = "historical-commodity/",
     tickers:    list[str] = None,
 ) -> tuple[pd.DataFrame | None, str]:

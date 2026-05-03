@@ -239,7 +239,7 @@ def write_to_postgres_with_retry(df, table_name, retries=3):
 # ============================================================
 # CONSTANTS
 # ============================================================
-S3_BUCKET = "pushparag-commodity-bucket"
+S3_BUCKET = "yeeshu-commodity-bucket"
 s3 = boto3.client("s3")
 
 # === S3 PATH PREFIXES ===

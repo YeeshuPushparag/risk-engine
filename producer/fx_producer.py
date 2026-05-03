@@ -8,7 +8,7 @@ Architecture mirrors equity_kafka_producer.py exactly.
 
 Storage rules
 -------------
-READ-ONLY  : s3://pushparag-fx-bucket       (universe / positions)
+READ-ONLY  : s3://yeeshu-fx-bucket       (universe / positions)
 ALL WRITES : s3://pushparag-risk-analytics  (raw events, DLQ)
 
 Storage layout (writes)
@@ -100,7 +100,7 @@ CONFIG: dict = {
     ],
 
     # S3
-    "read_bucket":                    "pushparag-fx-bucket",
+    "read_bucket":                    "yeeshu-fx-bucket",
     "write_bucket":                   "pushparag-risk-analytics",
     "raw_event_prefix":               "kafka_raw/fx/",
     "dlq_prefix":                     "kafka_dlq/fx/",

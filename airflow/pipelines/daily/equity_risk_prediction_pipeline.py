@@ -28,7 +28,7 @@ MIN_VaR_99 = 0.01
 MIN_CVaR_95 = 0.007
 MIN_CVaR_99 = 0.015
 
-S3_BUCKET = "pushparag-equity-bucket"
+S3_BUCKET = "yeeshu-equity-bucket"
 s3 = boto3.client("s3")
 
 # =========================

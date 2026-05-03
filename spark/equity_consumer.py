@@ -5,24 +5,24 @@ Production-grade Spark Structured Streaming consumer for real-time equity ticks.
 
 Storage rules
 -------------
-READ-ONLY  : s3://pushparag-equity-bucket   (static positions)
-ALL WRITES : s3://pushparag-risk-analytics  (parquet output, DLQ, snapshots)
+READ-ONLY  : s3://yeeshu-equity-bucket   (static positions)
+ALL WRITES : s3://risk-platform-pushparag-analytics  (parquet output, DLQ, snapshots)
 
 Storage layout (writes)
 -----------------------
 Processed output (parquet, partitioned):
-    s3://pushparag-risk-analytics/equity/data/
+    s3://risk-platform-pushparag-analytics/equity/data/
         date=YYYY-MM-DD/hour=HH/batch_<batch_id>.parquet
 
 Consumer DLQ (S3, parquet, partitioned by day):
-    s3://pushparag-risk-analytics/kafka_dlq/consumer/
+    s3://risk-platform-pushparag-analytics/kafka_dlq/consumer/
         year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
 
 Consumer DLQ (Kafka topic, for stream-level routing):
     topic: equity_stream_dlq
 
 Raw Kafka storage (for replay + state rebuild):
-    s3://pushparag-risk-analytics/kafka_raw/equity/
+    s3://risk-platform-pushparag-analytics/kafka_raw/equity/
         year=YYYY/month=MM/day=DD/hour=HH/batch_<batch_id>.parquet
 
 Replay modes
@@ -100,13 +100,13 @@ CONFIG: dict = {
     "replay_hour":          os.getenv("REPLAY_HOUR", ""),         # "HH" optional filter
 
     # S3
-    "read_bucket":          "pushparag-equity-bucket",
-    "write_bucket":         "pushparag-risk-analytics",
+    "read_bucket":          "yeeshu-equity-bucket",
+    "write_bucket":         "risk-platform-pushparag-analytics",
     "positions_key":        "historical-equity/final_merged.parquet",
     "output_prefix":        "equity/data",
     "consumer_dlq_prefix":  "kafka_dlq/consumer",
     "raw_replay_prefix":    "kafka_raw/equity",
-    "checkpoint_dir":       os.getenv("CHECKPOINT_DIR","s3a://pushparag-risk-analytics")+ "/equity/checkpoints",
+    "checkpoint_dir":       os.getenv("CHECKPOINT_DIR","s3a://risk-platform-pushparag-analytics")+ "/equity/checkpoints",
 
     # State rebuild (S3 fallback)
     "state_rebuild_minutes":    15,     # how many minutes of history to reload on startup
@@ -302,7 +302,7 @@ def flush_consumer_dlq_to_s3(
     Batch-flush consumer DLQ records to S3 as parquet (atomic write).
     Called once per batch — not per failed event.
 
-    Path: s3://pushparag-risk-analytics/kafka_dlq/consumer/
+    Path: s3://risk-platform-pushparag-analytics/kafka_dlq/consumer/
               year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
     """
     if not dlq_buffer:
@@ -655,7 +655,7 @@ def save_to_parquet(df: pd.DataFrame, batch_id: str) -> None:
     Write processed batch to S3 as parquet using atomic write.
     Partitioned by date and hour — never overwrites existing batches.
 
-    Path: s3://pushparag-risk-analytics/equity/data/
+    Path: s3://risk-platform-pushparag-analytics/equity/data/
               date=YYYY-MM-DD/hour=HH/batch_<batch_id>.parquet
     """
     if df.empty:
@@ -995,7 +995,7 @@ def load_s3_replay_partitions(
     pipeline as the Kafka stream. Used when REPLAY_MODE = "s3".
 
     Path pattern:
-        s3://pushparag-risk-analytics/kafka_raw/equity/
+        s3://risk-platform-pushparag-analytics/kafka_raw/equity/
             year=Y/month=MM/day=DD/<optional hour filter>/batch_*.parquet
 
     Each parquet file is treated as one "batch" for consistency.

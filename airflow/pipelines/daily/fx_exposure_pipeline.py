@@ -1324,7 +1324,7 @@ def write_metadata(
 # =============================================================
 
 def update_fx_pipeline(
-    bucket:              str       = "pushparag-fx-bucket",
+    bucket:              str       = "yeeshu-fx-bucket",
     prefix:              str       = "historical-fx/",
     input_key:           str       = "historical-fx/final_merged.parquet",
     macro_key:           str       = "historical-fx/macro_data.csv",
@@ -1740,7 +1740,7 @@ def update_fx_pipeline(
 
 def replay_failed_pairs(
     run_id: str,
-    bucket: str = "pushparag-fx-bucket",
+    bucket: str = "yeeshu-fx-bucket",
     prefix: str = "historical-fx/",
 ) -> tuple[pd.DataFrame | None, str]:
     """
@@ -1800,7 +1800,7 @@ def replay_failed_pairs(
 
 def replay_fx_from_raw(
     start_date: str,
-    bucket:     str = "pushparag-fx-bucket",
+    bucket:     str = "yeeshu-fx-bucket",
     prefix:     str = "historical-fx/",
 ) -> tuple[pd.DataFrame | None, str]:
     """

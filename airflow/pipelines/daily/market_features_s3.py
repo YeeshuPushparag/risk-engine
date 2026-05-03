@@ -1229,7 +1229,7 @@ def write_dlq(
 
 def update_market_features(
     input_filename:      str        = "final_tickers.csv",
-    bucket:              str        = "pushparag-equity-bucket",
+    bucket:              str        = "yeeshu-equity-bucket",
     prefix:              str        = "historical-equity/",
     start_date_override: str        = None,   # "YYYY-MM-DD" -> backfill mode
     replay_from_raw:     bool       = False,  # True -> skip yfinance, read Layer 1
@@ -1669,7 +1669,7 @@ def update_market_features(
 
 def replay_failed_tickers(
     run_id: str,
-    bucket: str = "pushparag-equity-bucket",
+    bucket: str = "yeeshu-equity-bucket",
     prefix: str = "historical-equity/",
 ) -> tuple[pd.DataFrame | None, str]:
     """
@@ -1732,7 +1732,7 @@ def replay_failed_tickers(
 
 def replay_features_from_raw(
     start_date: str,
-    bucket:     str  = "pushparag-equity-bucket",
+    bucket:     str  = "yeeshu-equity-bucket",
     prefix:     str  = "historical-equity/",
 ) -> tuple[pd.DataFrame | None, str]:
     """

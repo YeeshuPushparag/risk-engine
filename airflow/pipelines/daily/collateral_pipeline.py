@@ -297,7 +297,7 @@ def load_csv_from_s3_with_retry(bucket, key, retries=3):
 # ============================================================
 # CLIENTS
 # ============================================================
-MACRO_BUCKET = "pushparag-equity-bucket"
+MACRO_BUCKET = "yeeshu-equity-bucket"
 MACRO_KEY = "historical-equity/macro_data.csv"
 
 s3 = boto3.client("s3")

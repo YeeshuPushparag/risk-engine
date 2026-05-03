@@ -80,7 +80,7 @@ CONFIG: dict = {
     "dgs10_rolling_window": 20,        # window for DGS10_ma
 
     # S3 keys
-    "s3_bucket":           "pushparag-bond-bucket",
+    "s3_bucket":           "yeeshu-bond-bucket",
     "base_bond_key":       "synthetic_bond.csv",
     "macro_key":           "macro_data.csv",
     "model_spread_key":    "bond_model_spread5d_xgb.json",

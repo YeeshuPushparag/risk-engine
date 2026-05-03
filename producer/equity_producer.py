@@ -6,17 +6,17 @@ Reads OHLCV snapshots from yfinance and publishes to Kafka.
 
 Storage rules
 -------------
-READ-ONLY  : s3://pushparag-equity-bucket   (tickers list only)
-ALL WRITES : s3://pushparag-risk-analytics  (raw events, DLQ)
+READ-ONLY  : s3://yeeshu-equity-bucket   (tickers list only)
+ALL WRITES : s3://risk-platform-pushparag-analytics  (raw events, DLQ)
 
 Storage layout (writes)
 -----------------------
 Raw events (parquet, partitioned):
-    s3://pushparag-risk-analytics/kafka_raw/equity/
+    s3://risk-platform-pushparag-analytics/kafka_raw/equity/
         year=Y/month=MM/day=DD/batch_<batch_id>.parquet
 
 DLQ (parquet, partitioned by day):
-    s3://pushparag-risk-analytics/kafka_dlq/equity/
+    s3://risk-platform-pushparag-analytics/kafka_dlq/equity/
         year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
 
 Lineage on every event
@@ -93,8 +93,8 @@ CONFIG: dict = {
     "fetch_interval":             "1m",
 
     # S3
-    "read_bucket":                "pushparag-equity-bucket",
-    "write_bucket":               "pushparag-risk-analytics",
+    "read_bucket":                "yeeshu-equity-bucket",
+    "write_bucket":               "risk-platform-pushparag-analytics",
     "ticker_key":                 "historical-equity/tickers50.csv",
     "raw_event_prefix":           "kafka_raw/equity/",
     "dlq_prefix":                 "kafka_dlq/equity/",
@@ -330,7 +330,7 @@ def store_raw_events_parquet(
     """
     Persist raw events to S3 as parquet for replay and audit.
 
-    Path: s3://pushparag-risk-analytics/kafka_raw/equity/
+    Path: s3://risk-platform-pushparag-analytics/kafka_raw/equity/
               year=Y/month=MM/day=DD/batch_<batch_id>.parquet
 
     Uses atomic write (temp -> final) to prevent partial files.
@@ -396,7 +396,7 @@ def flush_dlq_buffer(
     Write all failed events from the current batch to S3 DLQ in a single
     atomic write. Structured as a parquet file for queryability.
 
-    Path: s3://pushparag-risk-analytics/kafka_dlq/equity/
+    Path: s3://risk-platform-pushparag-analytics/kafka_dlq/equity/
               year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
 
     DLQ record structure per row:

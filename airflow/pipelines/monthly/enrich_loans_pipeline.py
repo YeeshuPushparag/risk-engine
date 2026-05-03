@@ -12,7 +12,7 @@ from connections.snowflake_conn import get_snowflake_conn
 from connections.postgre_conn import get_postgre_conn
 from snowflake.connector.pandas_tools import write_pandas
 
-S3_BUCKET = "pushparag-loan-bucket"
+S3_BUCKET = "yeeshu-loan-bucket"
 LOAN_BASE_KEY = "loan_synthetic_base.parquet"
 OUTPUT_KEY = "loan_enriched_fx_bonds_commod_derivatives_collateral.parquet"
 

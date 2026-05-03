@@ -13,7 +13,7 @@ from connections.snowflake_conn import get_snowflake_conn
 from connections.postgre_conn import get_postgre_conn
 from datetime import datetime, timedelta
 
-S3_BUCKET = "pushparag-loan-bucket"
+S3_BUCKET = "yeeshu-loan-bucket"
 OUTPUT_TABLE = "LOANS"
 s3 = boto3.client("s3")
 

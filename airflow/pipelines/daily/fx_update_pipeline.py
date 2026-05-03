@@ -194,7 +194,7 @@ def load_features_from_s3_with_retry(bucket, key, run_id=None, retries=3):
 # ============================================================
 # CONSTANTS
 # ============================================================
-S3_BUCKET = "pushparag-fx-bucket"
+S3_BUCKET = "yeeshu-fx-bucket"
 s3 = boto3.client("s3")
 
 TRADING_DAYS = 252

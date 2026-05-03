@@ -6,7 +6,7 @@ Architecture mirrors equity_kafka_consumer.py exactly, adapted for FX.
 
 Storage rules
 -------------
-READ-ONLY  : s3://pushparag-fx-bucket       (FX universe / positions)
+READ-ONLY  : s3://yeeshu-fx-bucket       (FX universe / positions)
 ALL WRITES : s3://pushparag-risk-analytics  (parquet output, DLQ)
 
 Storage layout (writes)
@@ -97,7 +97,7 @@ CONFIG: dict = {
     "replay_hour":           os.getenv("REPLAY_HOUR", ""),         # "HH" optional
 
     # S3
-    "read_bucket":           "pushparag-fx-bucket",
+    "read_bucket":           "yeeshu-fx-bucket",
     "write_bucket":          "pushparag-risk-analytics",
     "universe_key":          "historical-fx/final_merged.parquet",
     "output_prefix":         "fx/data",
