@@ -29,7 +29,7 @@ export default function ProjectPage() {
         <p className="max-w-3xl text-lg text-slate-400 font-medium leading-relaxed italic border-l-4 border-blue-600 pl-6 mb-10">
           A technical implementation of a multi-asset risk engine, designed to handle 
           high-concurrency data streams and batch-processed historical analytics. 
-          Built to simulate the architectural requirements of institutional portfolio monitoring.
+          Built to reflect the architectural requirements of institutional portfolio monitoring.
         </p>
 
        {/* ACTION BUTTONS */}
