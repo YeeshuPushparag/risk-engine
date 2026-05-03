@@ -16,7 +16,6 @@ resource "aws_eks_cluster" "this" {
 
 ############################################
 # Node Group 1: STREAMING (Kafka, ZK, Spark)
-# 1 × t3.large (FIXED)
 ############################################
 resource "aws_eks_node_group" "streaming" {
   cluster_name    = aws_eks_cluster.this.name
