@@ -1652,7 +1652,8 @@ def update_market_features(
         feat_start = time.time()
 
         if old_rolling_df is not None:
-            cutoff_date = start_date
+
+            cutoff_date = to_utc_timestamp(start_date)
 
             tail_df = (
                 old_rolling_df[old_rolling_df["date"] < cutoff_date]
@@ -1660,14 +1661,15 @@ def update_market_features(
                 .groupby("ticker", group_keys=False)
                 .tail(CONFIG["buffer_days"])
             )
+
         else:
             tail_df = pd.DataFrame(columns=FEATURE_COLS)
 
-        feature_input = (
-            pd.concat([tail_df, clean_df], ignore_index=True)
-            .sort_values(["ticker", "date"])
-            .reset_index(drop=True)
-        )
+                feature_input = (
+                    pd.concat([tail_df, clean_df], ignore_index=True)
+                    .sort_values(["ticker", "date"])
+                    .reset_index(drop=True)
+                )
 
         feature_output = generate_features(feature_input)
 
