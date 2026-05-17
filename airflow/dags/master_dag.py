@@ -1,92 +1,255 @@
 from datetime import datetime
+
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from pendulum import timezone
 
 US_TZ = timezone("America/New_York")
 
-
-# == Lazy imports inside callables ==
-def run_feature_update(**context):
-    from pipelines.daily.market_features_s3 import update_market_features
-
-    dag_run = context.get("dag_run")
-
-    start_date_override = None
-
-    if dag_run and dag_run.conf:
-        start_date_override = dag_run.conf.get("start_date")
-
-    df, msg = update_market_features(start_date_override=start_date_override)
-
-    return msg or "OK"
+# ============================================================
+# SHARED DAG CONFIG PARSER
+# ============================================================
 
 
-def run_risk_pipeline():
-    from pipelines.daily.equity_risk_prediction_pipeline import run_equity_risk_pipeline
-    return run_equity_risk_pipeline() or "OK"
+def get_dag_config(context, replay_key="replay_from_raw"):
+    """
+    Standardized DAG runtime config parser.
 
-
-def run_fx_exposure(**context):
-    from pipelines.daily.fx_exposure_pipeline import update_fx_pipeline
+    Supported dag_run.conf:
+    {
+        "start_date": "2025-01-01",
+        "replay_from_raw": true,
+        "replay": true
+    }
+    """
 
     dag_run = context.get("dag_run")
-    start_date_override = None
+
+    config = {
+        "start_date_override": None,
+        replay_key: False,
+    }
 
     if dag_run and dag_run.conf:
-        start_date_override = dag_run.conf.get("start_date")
+        config["start_date_override"] = dag_run.conf.get("start_date")
 
-    return update_fx_pipeline(start_date_override=start_date_override) or "OK"
+        config[replay_key] = bool(
+            dag_run.conf.get(replay_key, False)
+        )
 
-
-def run_fx_update():
-    from pipelines.daily.fx_update_pipeline import update_fx_snowflake
-    return update_fx_snowflake() or "OK"
-
-
-def run_commodity_update(**context):
-    from pipelines.daily.commodity_update_pipeline import update_commodity_pipeline
-
-    dag_run = context.get("dag_run")
-    start_date_override = None
-
-    if dag_run and dag_run.conf:
-        start_date_override = dag_run.conf.get("start_date")
-
-    return update_commodity_pipeline(start_date_override=start_date_override) or "OK"
+    return config
 
 
-def run_commodity_process():
-    from pipelines.daily.commodity_processing_pipeline import process_commodities
-    return process_commodities() or "OK"
+# ============================================================
+# EQUITY PIPELINES
+# ============================================================
 
 
-def run_bonds_update(**context):
-    from pipelines.daily.bonds_update_pipeline import update_bonds_pipeline
+def run_equity_feature_pipeline(**context):
 
-    dag_run = context.get("dag_run")
-    start_date_override = None
+    from pipelines.daily.market_features_s3 import (
+        update_market_features,
+    )
 
-    if dag_run and dag_run.conf:
-        start_date_override = dag_run.conf.get("start_date")
+    config = get_dag_config(
+        context,
+        replay_key="replay_from_raw",
+    )
 
-    return update_bonds_pipeline(start_date_override=start_date_override) or "OK"
+    return update_market_features(
+        start_date_override=config["start_date_override"],
+        replay_from_raw=config["replay_from_raw"],
+    ) or "OK"
 
 
-def run_derivatives():
-    from pipelines.daily.derivatives_pipeline import run_derivatives_processing
-    return run_derivatives_processing() or "OK"
+def run_equity_processing_pipeline(**context):
+
+    from pipelines.daily.equity_risk_prediction_pipeline import (
+        run_equity_risk_pipeline,
+    )
+
+    config = get_dag_config(
+        context,
+        replay_key="replay",
+    )
+
+    return run_equity_risk_pipeline(
+        start_date_override=config["start_date_override"],
+        replay=config["replay"],
+    ) or "OK"
 
 
-def run_collateral():
-    from pipelines.daily.collateral_pipeline import run_collateral_pipeline
-    return run_collateral_pipeline() or "OK"
+# ============================================================
+# FX PIPELINES
+# ============================================================
 
+
+def run_fx_feature_pipeline(**context):
+
+    from pipelines.daily.fx_exposure_pipeline import (
+        update_fx_pipeline,
+    )
+
+    config = get_dag_config(
+        context,
+        replay_key="replay_from_raw",
+    )
+
+    return update_fx_pipeline(
+        start_date_override=config["start_date_override"],
+        replay_from_raw=config["replay_from_raw"],
+    ) or "OK"
+
+
+def run_fx_processing_pipeline(**context):
+
+    from pipelines.daily.fx_update_pipeline import (
+        update_fx_snowflake,
+    )
+
+    config = get_dag_config(
+        context,
+        replay_key="replay",
+    )
+
+    return update_fx_snowflake(
+        start_date_override=config["start_date_override"],
+        replay=config["replay"],
+    ) or "OK"
+
+
+# ============================================================
+# COMMODITY PIPELINES
+# ============================================================
+
+
+def run_commodity_feature_pipeline(**context):
+
+    from pipelines.daily.commodity_update_pipeline import (
+        update_commodity_pipeline,
+    )
+
+    config = get_dag_config(
+        context,
+        replay_key="replay_from_raw",
+    )
+
+    return update_commodity_pipeline(
+        start_date_override=config["start_date_override"],
+        replay_from_raw=config["replay_from_raw"],
+    ) or "OK"
+
+
+def run_commodity_processing_pipeline(**context):
+
+    from pipelines.daily.commodity_processing_pipeline import (
+        process_commodities,
+    )
+
+    config = get_dag_config(
+        context,
+        replay_key="replay",
+    )
+
+    return process_commodities(
+        start_date_override=config["start_date_override"],
+        replay=config["replay"],
+    ) or "OK"
+
+
+# ============================================================
+# BONDS PIPELINES
+# ============================================================
+
+
+def run_bonds_feature_pipeline(**context):
+
+    from pipelines.daily.bonds_update_pipeline import (
+        update_bonds_pipeline,
+    )
+
+    config = get_dag_config(
+        context,
+        replay_key="replay_from_raw",
+    )
+
+    return update_bonds_pipeline(
+        start_date_override=config["start_date_override"],
+        replay_from_raw=config["replay_from_raw"],
+    ) or "OK"
+
+
+def run_bonds_processing_pipeline(**context):
+
+    from pipelines.daily.bonds_processing_pipeline import (
+        process_bonds,
+    )
+
+    config = get_dag_config(
+        context,
+        replay_key="replay",
+    )
+
+    return process_bonds(
+        start_date_override=config["start_date_override"],
+        replay=config["replay"],
+    ) or "OK"
+
+
+# ============================================================
+# DERIVATIVES
+# ============================================================
+
+def run_derivatives_pipeline(**context):
+
+    from pipelines.daily.derivatives_pipeline import (
+        run_derivatives_processing,
+    )
+
+    config = get_dag_config(
+        context,
+        replay_key="replay",
+    )
+
+    return run_derivatives_processing(
+        start_date_override=config["start_date_override"],
+        replay=config["replay"],
+    ) or "OK"
+
+
+# ============================================================
+# COLLATERAL
+# ============================================================
+
+def run_collateral_pipeline(**context):
+
+    from pipelines.daily.collateral_pipeline import (
+        run_collateral_pipeline,
+    )
+
+    config = get_dag_config(
+        context,
+        replay_key="replay",
+    )
+
+    return run_collateral_pipeline(
+        start_date_override=config["start_date_override"],
+        replay=config["replay"],
+    ) or "OK"
+
+
+# ============================================================
+# AIRFLOW DEFAULTS
+# ============================================================
 
 default_args = {
     "owner": "airflow",
     "retries": 1,
 }
+
+# ============================================================
+# DAG
+# ============================================================
 
 with DAG(
     dag_id="full_cross_asset_risk_pipeline",
@@ -95,54 +258,102 @@ with DAG(
     start_date=datetime(2025, 1, 1, tzinfo=US_TZ),
     catchup=False,
     max_active_runs=1,
-    tags=["risk", "portfolio", "daily", "full-pipeline"],
+    tags=[
+        "risk",
+        "portfolio",
+        "cross-asset",
+        "daily",
+        "production",
+    ],
 ) as dag:
 
-    update_equity_features = PythonOperator(
-        task_id="update_market_features",
-        python_callable=run_feature_update,
+    # ========================================================
+    # EQUITY
+    # ========================================================
+
+    equity_features = PythonOperator(
+        task_id="equity_feature_pipeline",
+        python_callable=run_equity_feature_pipeline,
     )
 
-    run_equity_risk = PythonOperator(
-        task_id="run_equity_risk_pipeline",
-        python_callable=run_risk_pipeline,
+    equity_processing = PythonOperator(
+        task_id="equity_processing_pipeline",
+        python_callable=run_equity_processing_pipeline,
     )
 
-    fx_exposure = PythonOperator(
-        task_id="run_fx_exposure_pipeline",
-        python_callable=run_fx_exposure,
+    # ========================================================
+    # FX
+    # ========================================================
+
+    fx_features = PythonOperator(
+        task_id="fx_feature_pipeline",
+        python_callable=run_fx_feature_pipeline,
     )
 
-    fx_update = PythonOperator(
-        task_id="update_fx_snowflake",
-        python_callable=run_fx_update,
+    fx_processing = PythonOperator(
+        task_id="fx_processing_pipeline",
+        python_callable=run_fx_processing_pipeline,
     )
 
-    commodity_update = PythonOperator(
-        task_id="update_commodities",
-        python_callable=run_commodity_update,
+    # ========================================================
+    # COMMODITIES
+    # ========================================================
+
+    commodity_features = PythonOperator(
+        task_id="commodity_feature_pipeline",
+        python_callable=run_commodity_feature_pipeline,
     )
 
-    commodity_process = PythonOperator(
-        task_id="process_commodities",
-        python_callable=run_commodity_process,
+    commodity_processing = PythonOperator(
+        task_id="commodity_processing_pipeline",
+        python_callable=run_commodity_processing_pipeline,
     )
 
-    bonds_update = PythonOperator(
-        task_id="update_bonds_snowflake",
-        python_callable=run_bonds_update,
+    # ========================================================
+    # BONDS
+    # ========================================================
+
+    bonds_features = PythonOperator(
+        task_id="bonds_feature_pipeline",
+        python_callable=run_bonds_feature_pipeline,
     )
 
-    derivatives_process = PythonOperator(
-        task_id="run_derivatives_processing",
-        python_callable=run_derivatives,
+    bonds_processing = PythonOperator(
+        task_id="bonds_processing_pipeline",
+        python_callable=run_bonds_processing_pipeline,
     )
 
-    collateral_process = PythonOperator(
-        task_id="run_collateral_pipeline",
-        python_callable=run_collateral,
+    # ========================================================
+    # DERIVATIVES
+    # ========================================================
+
+    derivatives_processing = PythonOperator(
+        task_id="derivatives_processing_pipeline",
+        python_callable=run_derivatives_pipeline,
     )
 
-    update_equity_features >> run_equity_risk >> fx_exposure >> fx_update >> \
-    commodity_update >> commodity_process >> bonds_update >> \
-    derivatives_process >> collateral_process
+    # ========================================================
+    # COLLATERAL
+    # ========================================================
+
+    collateral_processing = PythonOperator(
+        task_id="collateral_processing_pipeline",
+        python_callable=run_collateral_pipeline,
+    )
+
+    # ========================================================
+    # PIPELINE FLOW
+    # ========================================================
+
+    (
+        equity_features
+        >> equity_processing
+        >> fx_features
+        >> fx_processing
+        >> commodity_features
+        >> commodity_processing
+        >> bonds_features
+        >> bonds_processing
+        >> derivatives_processing
+        >> collateral_processing
+    )

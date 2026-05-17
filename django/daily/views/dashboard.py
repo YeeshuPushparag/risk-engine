@@ -79,7 +79,7 @@ def global_risk_dashboard(request):
     )
 
     bd = bd_qs.aggregate(
-        exp=Sum("bond_price"),
+        exp=Sum("market_value"),
         pnl=Avg("credit_spread"),
         risk_val=Avg("yield_to_maturity"),
         alerts=Sum(

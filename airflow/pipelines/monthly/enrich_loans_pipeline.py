@@ -179,23 +179,26 @@ def fast_parse_dates(series):
 # ============================================================
 # SNOWFLAKE LOAD WITH RETRY (SOFT FAIL - NO ALERTS PER TABLE)
 # ============================================================
-def load_snowflake_table_chunked_with_retry(name, last_month, run_id=None, retries=2):
+def load_snowflake_table_chunked_with_retry(name, start_date_override, run_id=None, retries=2):
     """
     Load table incrementally from Snowflake with retry.
     NO ALERT per table - pipeline continues if individual table fails.
+    
+    For replay/backfill: loads ALL data >= start_date_override
+    For incremental: loads ONLY new data based on watermark logic (handled in pipeline)
     """
     
     def _load():
-        print(f"  Loading {name} incrementally from Snowflake...")
+        print(f"  Loading {name} from Snowflake...")
         
         where_clause = ""
         params = ()
         
-        if last_month is not None:
-            param_date = f"{last_month.year}-{last_month.month:02d}-01"
+        if start_date_override is not None:
+            param_date = f"{start_date_override.year}-{start_date_override.month:02d}-01"
             where_clause = """
                 WHERE DATE_TRUNC('MONTH', TO_DATE("date", 'YYYY-MM-DD'))
-                      > DATE_TRUNC('MONTH', TO_DATE(%s, 'YYYY-MM-DD'))
+                      >= DATE_TRUNC('MONTH', TO_DATE(%s, 'YYYY-MM-DD'))
             """
             params = (param_date,)
         
@@ -234,26 +237,119 @@ def aggregate_monthly(df, group_cols, agg_dict):
 
 
 # ============================================================
+# MONTH WINDOW OVERWRITE LOGIC
+# ============================================================
+def replace_month_window(prev_df, new_df, recompute_start_period):
+    """
+    Deterministically replace months >= recompute_start_period.
+    
+    Args:
+        prev_df: Previous enriched parquet data
+        new_df: Newly recomputed data for months >= recompute_start_period
+        recompute_start_period: Period to start recompute from
+    
+    Returns:
+        Combined DataFrame with no duplicate month states
+    """
+    if prev_df is None or prev_df.empty:
+        return new_df
+    
+    if new_df.empty:
+        return prev_df
+    
+    # Ensure date column is datetime
+    prev_df["date"] = pd.to_datetime(prev_df["date"])
+    new_df["date"] = pd.to_datetime(new_df["date"])
+    
+    # Create month_year column for comparison
+    prev_df["month_year"] = prev_df["date"].dt.to_period("M")
+    new_df["month_year"] = new_df["date"].dt.to_period("M")
+    
+    # Keep rows from previous that are BEFORE recompute window
+    historical_mask = prev_df["month_year"] < recompute_start_period
+    historical_rows = prev_df[historical_mask].copy()
+    
+    # Remove temporary column from historical rows
+    historical_rows.drop(columns=["month_year"], inplace=True)
+    
+    # Remove temporary column from new rows
+    new_df_clean = new_df.drop(columns=["month_year"], inplace=False)
+    
+    # Combine historical + recomputed rows
+    final_df = pd.concat([historical_rows, new_df_clean], ignore_index=True)
+    
+    return final_df
+
+
+# ============================================================
 # MAIN PIPELINE (WITH CRITICAL ALERTS ONLY)
 # ============================================================
-def run_enrich_loans_pipeline():
+def run_enrich_loans_pipeline(
+    start_date_override=None,
+    replay=False,
+):
     """
-    Complete production-grade loan enrichment pipeline with:
-    1. Retry on all external calls (S3, Snowflake)
-    2. Atomic S3 writes (temp -> copy -> delete) - no partial files
-    3. Slack alerts ONLY for critical failures (base loans, S3 write, pipeline crash)
-    4. Partial success handling (one table failure doesn't kill pipeline)
-    5. Run-level tracking with run_id
-    6. Memory-efficient processing (keeps prev + new only)
+    Complete production-grade loan enrichment pipeline with deterministic replay/backfill.
     
-    NO SUCCESS ALERT - this is not the final loan pipeline.
+    Args:
+        start_date_override: datetime or date string (YYYY-MM-DD) for backfill/replay start
+        replay: If True, force full recompute from start_date_override
+    
+    Returns:
+        str: Pipeline status (SUCCESS, NO_NEW_DATA, NO_OUTPUT_ROWS)
+    
+    Mode Determination:
+        - replay=True: Full deterministic recompute from start_date_override
+        - start_date_override provided: Backfill from start_date_override
+        - both False: Incremental append-only mode
+    
+    Replay/Backfill Semantics:
+        - Recompute ALL months >= start_date_override
+        - Remove overlapping months from existing enriched parquet
+        - Append recomputed months deterministically
+        - No duplicate month states
+    
+    Incremental Semantics:
+        - Load previous enriched parquet
+        - Get watermark from LAST processed month in parquet
+        - Process only months AFTER watermark
+        - Append new rows only
     """
     pipeline_start = time.time()
     run_id = datetime.utcnow().isoformat()
     
-    print(f"\n{'='*66}")
-    print(f"  LOAN ENRICHMENT PIPELINE START - run_id={run_id}")
-    print(f"{'='*66}\n")
+    # ============================================================
+    # MODE DETERMINATION
+    # ============================================================
+    if replay:
+        if not start_date_override:
+            raise ValueError("replay=True requires start_date_override")
+        mode = "replay"
+        print(f"\n{'='*66}")
+        print(f"  LOAN ENRICHMENT PIPELINE - REPLAY MODE")
+        print(f"  run_id={run_id}")
+        print(f"  replay_start={start_date_override}")
+        print(f"{'='*66}\n")
+    elif start_date_override:
+        mode = "backfill"
+        print(f"\n{'='*66}")
+        print(f"  LOAN ENRICHMENT PIPELINE - BACKFILL MODE")
+        print(f"  run_id={run_id}")
+        print(f"  backfill_start={start_date_override}")
+        print(f"{'='*66}\n")
+    else:
+        mode = "incremental"
+        print(f"\n{'='*66}")
+        print(f"  LOAN ENRICHMENT PIPELINE - INCREMENTAL MODE")
+        print(f"  run_id={run_id}")
+        print(f"{'='*66}\n")
+    
+    # Convert start_date_override to period if provided
+    recompute_start_period = None
+    if start_date_override:
+        if isinstance(start_date_override, str):
+            start_date_override = pd.to_datetime(start_date_override)
+        recompute_start_period = pd.Period(start_date_override, freq="M")
     
     # Track failures for partial success reporting
     failed_tables = []
@@ -280,27 +376,53 @@ def run_enrich_loans_pipeline():
         
         prev = read_s3_parquet_with_retry(OUTPUT_KEY, run_id=run_id, retries=2, critical=False)
         
-        if prev is not None:
+        watermark = None
+        if prev is not None and not prev.empty:
             prev["date"] = fast_parse_dates(prev["date"])
             prev = prev[prev["date"].notna()]
             prev = prev[prev["date"] <= pd.Timestamp.today()]
-            last_processed_month = prev["date"].dt.to_period("M").max() if not prev.empty else None
-            print(f"  Last processed month: {last_processed_month}")
+            
+            # Get watermark from enriched parquet (NOT from source tables)
+            watermark = prev["date"].dt.to_period("M").max() if not prev.empty else None
+            print(f"  Watermark from enriched parquet: {watermark}")
             print(f"  Previous rows: {len(prev):,}")
         else:
-            last_processed_month = None
             print("  No previous enriched file - FULL RUN")
         
         # ============================================================
-        # STEP 3: Load Snowflake tables incrementally (SOFT FAIL - no alerts)
+        # STEP 3: Determine date range for Snowflake load
         # ============================================================
-        print("[STEP 3] Loading Snowflake tables incrementally...")
+        print("[STEP 3] Determining date range for Snowflake load...")
+        
+        # For replay/backfill: load ALL data >= start_date_override
+        # For incremental: load ONLY data > watermark (if watermark exists)
+        snowflake_start_date = None
+        
+        if mode in ["replay", "backfill"]:
+            # Load everything from start_date_override onward
+            snowflake_start_date = start_date_override
+            print(f"  Loading Snowflake data from {snowflake_start_date.date()} onward")
+        elif mode == "incremental":
+            if watermark:
+                # Load only data AFTER watermark (add 1 month)
+                snowflake_start_date = (watermark + 1).start_time
+                print(f"  Loading Snowflake data from {snowflake_start_date.date()} onward")
+            else:
+                # No previous data, load everything
+                print("  No previous data - loading all Snowflake data")
+        
+        # ============================================================
+        # STEP 4: Load Snowflake tables (SOFT FAIL - no alerts)
+        # ============================================================
+        print("[STEP 4] Loading Snowflake tables...")
         
         table_names = ["FX", "BONDS", "COMMODITY", "DERIVATIVES", "COLLATERAL"]
         tables = {}
         
         for name in table_names:
-            df = load_snowflake_table_chunked_with_retry(name, last_processed_month, run_id=run_id, retries=2)
+            df = load_snowflake_table_chunked_with_retry(
+                name, snowflake_start_date, run_id=run_id, retries=2
+            )
             if not df.empty:
                 succeeded_tables.append(name)
                 tables[name] = df
@@ -318,35 +440,48 @@ def run_enrich_loans_pipeline():
         print(f"  Failed/empty tables: {failed_tables}")
         
         # ============================================================
-        # STEP 4: Calculate new months to process
+        # STEP 5: Calculate months to process
         # ============================================================
-        print("[STEP 4] Calculating months to process...")
+        print("[STEP 5] Calculating months to process...")
         
-        new_months = pd.concat([df["month_year"] for df in tables.values() if not df.empty])
-        new_months = pd.PeriodIndex(new_months).dropna().sort_values().unique()
+        # Determine months available from source tables
+        source_months = pd.concat([df["month_year"] for df in tables.values() if not df.empty])
+        source_months = pd.PeriodIndex(source_months).dropna().sort_values().unique()
         
         today_period = pd.Period(pd.Timestamp.today(), freq="M")
-        new_months = new_months[new_months <= today_period]
+        source_months = source_months[source_months <= today_period]
         
-        if len(new_months) == 0:
+        # Filter months based on mode
+        if mode == "incremental" and watermark:
+            # Only process months AFTER watermark
+            months_to_process = source_months[source_months > watermark]
+        else:
+            # Process all loaded months
+            months_to_process = source_months
+        
+        if len(months_to_process) == 0:
             print("  No valid months to process after filtering.")
             return "NO_NEW_DATA"
         
-        print(f"  New months count: {len(new_months)}")
-        print(f"  Range: {new_months.min()} -> {new_months.max()}")
+        print(f"  Months to process: {len(months_to_process)}")
+        print(f"  Range: {months_to_process.min()} -> {months_to_process.max()}")
         
         # ============================================================
-        # STEP 5: Active loans cross join with months
+        # STEP 6: Active loans cross join with months
         # ============================================================
-        print("[STEP 5] Expanding loans to monthly view...")
+        print("[STEP 6] Expanding loans to monthly view...")
         
-        month_df = pd.DataFrame({"month_start": new_months.to_timestamp(), "month_year": new_months})
+        month_df = pd.DataFrame({"month_start": months_to_process.to_timestamp(), "month_year": months_to_process})
         min_date = month_df["month_start"].min()
         max_date = month_df["month_start"].max()
         
         active_loans = loans[(loans["maturity_date"] >= min_date) & (loans["issue_date"] <= max_date)].copy()
         print(f"  Active loans: {len(active_loans):,}")
         
+        # Drop date column if exists to avoid date_x/date_y conflict
+        if "date" in active_loans.columns:
+            active_loans = active_loans.drop(columns=["date"])
+
         # Cross join
         active_loans["key"] = 1
         month_df["key"] = 1
@@ -359,9 +494,9 @@ def run_enrich_loans_pipeline():
         print(f"  Expanded rows: {len(loans_expanded):,}")
         
         # ============================================================
-        # STEP 6: Aggregate Snowflake tables monthly
+        # STEP 7: Aggregate Snowflake tables monthly
         # ============================================================
-        print("[STEP 6] Aggregating tables to monthly level...")
+        print("[STEP 7] Aggregating tables to monthly level...")
         
         fx_month = aggregate_monthly(tables["FX"], ["ticker", "month_year"], {
             "fx_rate": "mean", "fx_volatility": "mean", "carry_daily": "mean"
@@ -395,9 +530,9 @@ def run_enrich_loans_pipeline():
         }) if not tables["COLLATERAL"].empty else pd.DataFrame()
         
         # ============================================================
-        # STEP 7: Merge all tables
+        # STEP 8: Merge all tables
         # ============================================================
-        print("[STEP 7] Merging all tables...")
+        print("[STEP 8] Merging all tables...")
         
         merged = loans_expanded
         
@@ -425,50 +560,62 @@ def run_enrich_loans_pipeline():
         merged.drop(columns=["month_year", "month_start"], inplace=True, errors="ignore")
         
         # ============================================================
-        # STEP 8: Combine with previous data and deduplicate
+        # STEP 9: Combine with previous data deterministically
         # ============================================================
-        print("[STEP 8] Combining with previous data...")
+        print("[STEP 9] Combining with previous data deterministically...")
         
-        if prev is not None and not prev.empty:
-            merged = pd.concat([prev, merged], ignore_index=True)
-            merged.drop_duplicates(subset=["loan_id", "date"], keep="last", inplace=True)
+        if mode in ["replay", "backfill"] and recompute_start_period:
+            # Replace months >= recompute_start_period with recomputed data
+            final_df = replace_month_window(prev, merged, recompute_start_period)
+            print(f"  Replaced months from {recompute_start_period} onward")
+        else:
+            # Incremental mode: simple append
+            if prev is not None and not prev.empty:
+                final_df = pd.concat([prev, merged], ignore_index=True)
+                # Remove any duplicates (keep latest for each loan_id + date)
+                final_df.drop_duplicates(subset=["loan_id", "date"], keep="last", inplace=True)
+            else:
+                final_df = merged
         
-        if merged.empty:
+        if final_df.empty:
             print("  No output rows generated")
             return "NO_OUTPUT_ROWS"
         
-        print(f"  Final rows after merge: {len(merged):,}")
+        print(f"  Final rows: {len(final_df):,}")
         
         # Convert date to datetime
-        merged["date"] = pd.to_datetime(merged["date"])
+        final_df["date"] = pd.to_datetime(final_df["date"])
         
         # ============================================================
-        # STEP 9: Add pipeline metadata
+        # STEP 10: Add pipeline metadata
         # ============================================================
-        print("[STEP 9] Adding pipeline metadata...")
+        print("[STEP 10] Adding pipeline metadata...")
         
-        merged["pipeline_name"] = "enrich_loans_pipeline"
-        merged["pipeline_run_id"] = run_id
-        merged["data_source"] = "s3 + snowflake"
-        merged["input_source"] = "loan_base + fx + bonds + commodity + derivatives + collateral"
-        merged["transformation"] = "loan_enrichment_monthly_v1"
-        merged["record_created_at"] = datetime.utcnow()
+        final_df["pipeline_name"] = "enrich_loans_pipeline"
+        final_df["pipeline_run_id"] = run_id
+        final_df["run_mode"] = mode
+        final_df["data_source"] = "s3 + snowflake"
+        final_df["input_source"] = "loan_base + fx + bonds + commodity + derivatives + collateral"
+        final_df["transformation"] = "loan_enrichment_monthly_v1"
+        final_df["record_created_at"] = datetime.utcnow()
         
-        # ============================================================
-        # STEP 10: Write to S3 (ATOMIC - CRITICAL - sends alert on failure)
-        # ============================================================
-        print("[STEP 10] Writing to S3 (atomic write)...")
-        
-        write_s3_parquet_atomic(merged, OUTPUT_KEY, run_id=run_id)
         
         # ============================================================
-        # STEP 11: Success summary (NO SLACK ALERT - not final pipeline)
+        # STEP 11: Write to S3 (ATOMIC - CRITICAL - sends alert on failure)
+        # ============================================================
+        print("[STEP 11] Writing to S3 (atomic write)...")
+        
+        write_s3_parquet_atomic(final_df, OUTPUT_KEY, run_id=run_id)
+        
+        # ============================================================
+        # STEP 12: Success summary (NO SLACK ALERT - not final pipeline)
         # ============================================================
         total_time = time.time() - pipeline_start
         
         print(f"\n{'='*66}")
         print(f"  LOAN ENRICHMENT PIPELINE SUCCESS - run_id={run_id}")
-        print(f"  Final rows: {len(merged):,}")
+        print(f"  Mode: {mode}")
+        print(f"  Final rows: {len(final_df):,}")
         print(f"  Succeeded tables: {succeeded_tables}")
         print(f"  Failed/empty tables: {failed_tables if failed_tables else 'None'}")
         print(f"  Duration: {total_time:.1f}s")
@@ -480,12 +627,13 @@ def run_enrich_loans_pipeline():
         # Send CRITICAL alert for any unhandled exception
         send_critical_alert(
             f"Pipeline failed with unhandled exception",
-            context={"run_id": run_id, "error": str(e)}
+            context={"run_id": run_id, "mode": mode, "error": str(e)}
         )
         
         total_time = time.time() - pipeline_start
         print(f"\n{'='*66}")
         print(f"  LOAN ENRICHMENT PIPELINE FAILED - run_id={run_id}")
+        print(f"  Mode: {mode}")
         print(f"  Error: {str(e)}")
         print(f"  Succeeded tables: {succeeded_tables}")
         print(f"  Failed tables: {failed_tables}")

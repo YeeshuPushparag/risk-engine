@@ -1,5 +1,5 @@
 from django.http import JsonResponse
-from django.db.models import Avg, Count
+from django.db.models import Avg, Count, Sum
 from django.db.models.functions import Coalesce
 
 from ..models import BondData
@@ -26,6 +26,8 @@ def bond_overview(request):
         weighted_credit_spread=Avg("credit_spread"),
         weighted_ytm=Avg("yield_to_maturity"),
         weighted_implied_pd=Avg("implied_pd_annual"),
+        total_market_value=Sum("market_value"),
+        total_issue_size=Sum("issue_size"),
     )
 
     # ---------------- TOP 5 — DEFAULT RISK ----------------
@@ -128,6 +130,12 @@ def bond_ticker_detail(request):
         "implied_pd_annual",
         "implied_pd_multi_year",
         "pred_pd_21d",
+        "vol",
+        "issue_size",
+        "units_issued",
+        "units_outstanding",
+        "market_value",
+        "outstanding_pct",
         "DGS10",
         "DGS10_ma",
         "dgs10_anom",

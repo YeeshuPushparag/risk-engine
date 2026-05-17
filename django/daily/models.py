@@ -251,6 +251,7 @@ class BondData(models.Model):
 
     # Market + Calculation
     date = models.DateField()
+    vol = models.FloatField(null=True, blank=True)
     benchmark_yield = models.FloatField(null=True, blank=True)
     corporate_yield = models.FloatField(null=True, blank=True)
     credit_spread = models.FloatField(null=True, blank=True)
@@ -263,7 +264,12 @@ class BondData(models.Model):
     implied_rating = models.CharField(max_length=32, null=True, blank=True)
 
     market_synthetic_score = models.FloatField(null=True, blank=True)
-
+    # Issuance / Position metrics
+    issue_size = models.FloatField(null=True, blank=True)
+    units_issued = models.FloatField(null=True, blank=True)
+    units_outstanding = models.FloatField(null=True, blank=True)
+    market_value = models.FloatField(null=True, blank=True)
+    outstanding_pct = models.FloatField(null=True, blank=True)
     # Macro
     DGS10 = models.FloatField(null=True, blank=True)
     DGS10_ma = models.FloatField(null=True, blank=True)

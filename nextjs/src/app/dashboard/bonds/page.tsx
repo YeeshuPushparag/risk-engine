@@ -21,7 +21,7 @@ type BondRowMaturity = { ticker: string; bond_id: string; credit_rating: string;
 type BondsOverviewResponse = {
   date: string;
   summary: {
-    bond_count: number; ticker_count: number; weighted_credit_spread: number; weighted_ytm: number; weighted_implied_pd: number;
+    bond_count: number; ticker_count: number; weighted_credit_spread: number; weighted_ytm: number; weighted_implied_pd: number; total_market_value: number; total_issue_size: number;
   };
   top_default_risk: BondRowPD[];
   top_spreads: BondRowSpread[];
@@ -122,12 +122,14 @@ export default function BondsMasterPage() {
 </header>
 
       {/* CORE METRICS GRID */}
-      <section className="grid grid-cols-2 md:grid-cols-5 gap-3 sm:gap-5">
+      <section className="grid grid-cols-2 md:grid-cols-7 gap-3 sm:gap-5">
         <MetricCard label="Total Bonds" value={summary.bond_count} />
         <MetricCard label="Tickers" value={summary.ticker_count} />
         <MetricCard label="Avg Spread" value={pctRaw(summary.weighted_credit_spread)} />
         <MetricCard label="Avg YTM" value={pctRaw(summary.weighted_ytm)} />
         <MetricCard label="Avg PD" value={pctDec(summary.weighted_implied_pd)} />
+        <MetricCard label="Total Market Value" value={fmt(summary.total_market_value)} />
+        <MetricCard label="Total Issue Size" value={fmt(summary.total_issue_size)} />
       </section>
 
       {/* RISK TABLES SECTION */}

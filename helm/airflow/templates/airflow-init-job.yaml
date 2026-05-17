@@ -35,7 +35,7 @@ spec:
               done
 
               echo "Running Airflow DB migrations..."
-              airflow db migrate || true
+              airflow db migrate
 
               echo "Creating admin user (if not exists)..."
               airflow users create \

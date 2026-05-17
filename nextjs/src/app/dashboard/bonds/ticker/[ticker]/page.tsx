@@ -21,8 +21,13 @@ type Bond = {
   coupon_rate: number; issue_date: string; maturity_date: string; maturity_years: number;
   bond_price: number; yield_to_maturity: number; benchmark_yield: number; credit_spread: number;
   implied_hazard: number; implied_pd_annual: number; implied_pd_multi_year: number; pred_pd_21d: number;
+  issue_size: number;
+  units_issued: number;
+  units_outstanding: number;
+  market_value: number;
+  outstanding_pct: number;
   DGS10: number; DGS10_ma: number; dgs10_anom: number; gdp: number; cpi: number; unrate: number; fedfunds: number;
-  pred_spread_5d: number; market_synthetic_score: number;
+  pred_spread_5d: number; market_synthetic_score: number; vol: number;
 };
 
 type BondTickerResponse = { date: string; bond: Bond; };
@@ -159,7 +164,7 @@ export default function BondTickerPage() {
 
 
       {/* PRIMARY DATA GRID */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
 
         {/* SECTION: PRICING & CREDIT */}
         <DataCard title="Pricing & Credit" icon={<TrendingUp className="w-4 h-4 text-indigo-400" />}>
@@ -175,6 +180,11 @@ export default function BondTickerPage() {
           <DataRow label="Annual PD" value={fmtPctRaw(r.implied_pd_annual)} color="text-red-400" />
           <DataRow label="Multi-Year PD" value={fmtPctRaw(r.implied_pd_multi_year)} />
           <DataRow label="Pred. PD (21d)" value={fmtPctRaw(r.pred_pd_21d)} bold />
+          <DataRow
+            label="Volatility"
+            value={fmtPctDecimal(r.vol)}
+            color="text-orange-400"
+          />
         </DataCard>
 
         {/* SECTION: FORWARD SIGNALS */}
@@ -186,6 +196,39 @@ export default function BondTickerPage() {
         </DataCard>
 
       </div>
+
+      {/* SECTION: ISSUANCE & FLOAT */}
+      <DataCard
+        title="Issuance & Float"
+        icon={<BarChart3 className="w-4 h-4 text-cyan-400" />}
+      >
+        <DataRow
+          label="Issue Size"
+          value={fmtCurCompact(r.issue_size)}
+          bold
+        />
+
+        <DataRow
+          label="Units Issued"
+          value={r.units_issued?.toLocaleString() || "—"}
+        />
+
+        <DataRow
+          label="Units Outstanding"
+          value={r.units_outstanding?.toLocaleString() || "—"}
+        />
+
+        <DataRow
+          label="Market Value"
+          value={fmtCurCompact(r.market_value)}
+          color="text-cyan-400"
+        />
+
+        <DataRow
+          label="Outstanding %"
+          value={fmtPctRaw(r.outstanding_pct)}
+        />
+      </DataCard>
 
       {/* MACRO SECTION */}
       <section className="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl">

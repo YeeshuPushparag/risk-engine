@@ -14,7 +14,7 @@ Layer 1 — Raw       (immutable, append-only, partitioned by date)
 
 Layer 2 — Features  (versioned per run_id, partitioned by date)
     s3://<bucket>/<prefix>features/year=Y/month=MM/day=DD/run_id=<id>/data.parquet
-    s3://<bucket>/<prefix>features/latest.json   ← pointer to most recent run_id
+    s3://<bucket>/<prefix>features/latest.json   <- pointer to most recent run_id
 
 Layer 3 — Rolling   (mutable serving layer, last N calendar days)
     s3://<bucket>/<prefix>rolling/commodities_30d.parquet
@@ -94,7 +94,7 @@ CONFIG: dict = {
     # Rolling serving layer
     "window_days":             30,
 
-    # Lineage  ← bump feature_version when engineering logic changes
+    # Lineage  <- bump feature_version when engineering logic changes
     "pipeline_name":           "commodity_update_pipeline",
     "feature_version":         "v1",
     "transformation":          "commodity_features_v1",
@@ -575,7 +575,7 @@ def fetch_commodity_data(
         data = data[keep_cols].copy()
 
         data["commodity_symbol"]  = tkr
-        data["data_quality_flag"] = "REAL"         # ← source of truth flag
+        data["data_quality_flag"] = "REAL"         # <- source of truth flag
         data["record_id"]         = tkr + "_" + data["date"].astype(str)
         data["ingestion_ts"]      = run_ts
         data["pipeline_run_id"]   = run_id
@@ -659,87 +659,142 @@ def read_raw_layer(
 
 
 # =============================================================
-# SYNTHETIC ROW BUILDER  —  fills today when market data unavailable
+# SYNTHETIC ROW BUILDER  —  fills ALL missing dates (not just today)
 # =============================================================
 
 def build_synthetic_rows(
     fetched_df:   pd.DataFrame,
     old_rolling:  pd.DataFrame | None,
     tickers:      list[str],
+    start_date:   date_type,        # <- REQUIRED for full backfill
     today:        date_type,
     run_id:       str,
     run_ts:       datetime,
 ) -> pd.DataFrame:
     """
-    For every ticker where today's row is absent in fetched_df, generate
-    a synthetic row using the mean of the last CONFIG["synthetic_history_days"]
-    rows from the rolling layer (existing history).
+    Production-grade synthetic builder.
 
-    Synthetic rows are stamped data_quality_flag="SYNTHETIC" to ensure
-    they are always distinguishable from real market data.
+    What this FIXES:
+    ----------------
+    Previously:
+        - Only filled today's missing data
+        - Ignored gaps if yfinance missed multiple days
 
-    This exactly mirrors the original pipeline logic: if today's data is
-    missing, fill with the last-3-day average from existing history.
+    Now:
+        - Fills ALL missing business dates between start_date -> today
+        - Uses rolling average of last N available rows
+        - Works for 1-day or multi-day gaps (e.g., 10 missing days)
 
-    Returns a DataFrame of synthetic rows only (may be empty if all tickers
-    have real data or insufficient history to synthesize).
+    Key behavior:
+    -------------
+    - Missing dates are filled sequentially
+    - Each synthetic row uses last CONFIG["synthetic_history_days"] rows
+    - Synthetic rows are clearly marked (data_quality_flag="SYNTHETIC")
+    - No schema changes — same columns as before
+
+    Important note:
+    ---------------
+    Synthetic values may be used in future synthetic calculations
+    (controlled rolling window — standard production approach)
     """
+
+    # If no historical data -> cannot synthesize anything
     if old_rolling is None or old_rolling.empty:
         return pd.DataFrame()
 
     synth_records: list = []
-    today_ts           = to_utc_timestamp(today)
-    history_n          = CONFIG["synthetic_history_days"]
+    history_n = CONFIG["synthetic_history_days"]
+
+    # Convert date range into UTC timestamps
+    all_dates = pd.date_range(start=start_date, end=today, freq="B")
 
     for tkr in tickers:
-        # Check if today is already present in fetched data for this ticker
-        tkr_today = fetched_df[
-            (fetched_df["commodity_symbol"] == tkr) &
-            (fetched_df["date"].dt.date == today)
-        ] if not fetched_df.empty else pd.DataFrame()
 
-        if not tkr_today.empty:
-            continue  # real data exists — no synthetic needed
+        # ---------------------------------------------------------
+        # STEP 1: Build full history (old rolling + fetched data)
+        # ---------------------------------------------------------
+        history = pd.concat([
+            old_rolling[old_rolling["commodity_symbol"] == tkr],
+            fetched_df[fetched_df["commodity_symbol"] == tkr]
+        ], ignore_index=True)
 
-        # Look up recent history from rolling layer
-        prev = (
-            old_rolling[old_rolling["commodity_symbol"] == tkr]
-            .sort_values("date")
-            .tail(history_n)
-        )
-
-        if prev.empty:
-            send_alert(
-                f"Insufficient history to synthesize today's row for {tkr} — skipping.",
-                level="WARNING",
-                context={"ticker": tkr, "today": str(today)},
-            )
+        if history.empty:
             continue
 
-        avg_row = {
-            "date":              today_ts,
-            "open":              round(float(prev["open"].mean()),   2),
-            "high":              round(float(prev["high"].mean()),   2),
-            "low":               round(float(prev["low"].mean()),    2),
-            "close":             round(float(prev["close"].mean()),  2),
-            "volume":            round(float(prev["volume"].mean()), 2),
-            "commodity_symbol":  tkr,
-            "data_quality_flag": "SYNTHETIC",   # ← explicit imputation flag
-            "record_id":         tkr + "_" + str(today),
-            "ingestion_ts":      run_ts,
-            "pipeline_run_id":   run_id,
-        }
-        synth_records.append(avg_row)
-        print(
-            f"  [SYNTHETIC] {TICKER_NAMES.get(tkr, tkr)}: "
-            f"today's data missing — filled with {history_n}-day average."
+        history = history.sort_values("date")
+
+        # Remove duplicates (keep latest version of same date)
+        history = history.drop_duplicates(
+            ["commodity_symbol", "date"],
+            keep="last"
         )
 
+        # Track existing dates for quick lookup
+        existing_dates = set(history["date"].dt.date)
+
+        # ---------------------------------------------------------
+        # STEP 2: Loop over ALL expected dates
+        # ---------------------------------------------------------
+        for d in all_dates:
+            d_date = d.date()
+
+            # If data already exists -> skip
+            if d_date in existing_dates:
+                continue
+
+            # -----------------------------------------------------
+            # STEP 3: Get last N available rows BEFORE this date
+            # -----------------------------------------------------
+            prev = history[history["date"] < d].tail(history_n)
+
+            if prev.empty:
+                send_alert(
+                    f"Insufficient history to synthesize {tkr} on {d_date}",
+                    level="WARNING",
+                    context={"ticker": tkr, "date": str(d_date)},
+                )
+                continue
+
+            # -----------------------------------------------------
+            # STEP 4: Create synthetic row (rolling average)
+            # -----------------------------------------------------
+            avg_row = {
+                "date":              to_utc_timestamp(d_date),
+                "open":              round(float(prev["open"].mean()),   2),
+                "high":              round(float(prev["high"].mean()),   2),
+                "low":               round(float(prev["low"].mean()),    2),
+                "close":             round(float(prev["close"].mean()),  2),
+                "volume":            round(float(prev["volume"].mean()), 2),
+                "commodity_symbol":  tkr,
+                "data_quality_flag": "SYNTHETIC",
+                "record_id":         tkr + "_" + str(d_date),
+                "ingestion_ts":      run_ts,
+                "pipeline_run_id":   run_id,
+            }
+
+            # Add to history (IMPORTANT -> enables incremental fill)
+            history = pd.concat(
+                [history, pd.DataFrame([avg_row])],
+                ignore_index=True
+            )
+
+            # Track created synthetic row
+            synth_records.append(avg_row)
+
+            print(
+                f"  [SYNTHETIC] {TICKER_NAMES.get(tkr, tkr)}: "
+                f"{d_date} missing — filled using last {history_n} rows."
+            )
+
+    # ---------------------------------------------------------
+    # STEP 5: Return results
+    # ---------------------------------------------------------
     if not synth_records:
         return pd.DataFrame()
 
-    synth_df         = pd.DataFrame(synth_records)
+    synth_df = pd.DataFrame(synth_records)
     synth_df["date"] = pd.to_datetime(synth_df["date"], utc=True)
+
     return synth_df
 
 
@@ -1040,6 +1095,7 @@ def add_metadata(
     start_date,
     replay_mode:      bool,
     is_partial_run:   bool,
+    mode_label:       str,
 ) -> pd.DataFrame:
     """
     Stamp every output row with complete lineage and observability fields.
@@ -1079,7 +1135,7 @@ def add_metadata(
     # Mode flags
     df["replay_mode"]    = replay_mode
     df["partial_run"]    = is_partial_run
-
+    df["run_mode"]       = mode_label
     # data_quality_flag and record_id are preserved from earlier stages —
     # not re-stamped here.
 
@@ -1534,6 +1590,7 @@ def update_commodity_pipeline(
                 fetched_df  = raw_df,
                 old_rolling = old_rolling_df,
                 tickers     = active_tickers,
+                start_date  = start_date,
                 today       = today,
                 run_id      = run_id,
                 run_ts      = run_ts,
@@ -1690,6 +1747,7 @@ def update_commodity_pipeline(
             start_date        = start_date,
             replay_mode       = replay_from_raw,
             is_partial_run    = is_partial_run,
+            mode_label:       = mode_label,
         )
 
         # ── STAGE 10: Schema enforcement — features ──────────────────────

@@ -10,7 +10,7 @@ Layer 1 — Raw       (immutable, append-only, partitioned by date)
 
 Layer 2 — Features  (versioned per run_id, partitioned by date)
     s3://<bucket>/<prefix>features/year=Y/month=MM/day=DD/run_id=<id>/data.parquet
-    s3://<bucket>/<prefix>features/latest.json   ← points to most recent run_id
+    s3://<bucket>/<prefix>features/latest.json   <- points to most recent run_id
 
 Layer 3 — Rolling   (mutable serving layer, last N calendar days)
     s3://<bucket>/<prefix>rolling/market_features_30d.parquet
@@ -141,7 +141,7 @@ FEATURE_SCHEMA: dict[str, str] = {
     "sortino_ratio":   "float64",
     "outlier_flag":    "bool",
 
-    # 🔥 metadata (THIS WAS MISSING)
+    # metadata 
     "pipeline_name":      "object",
     "pipeline_run_id":    "object",
     "data_source":        "object",
@@ -560,10 +560,19 @@ def fetch_raw_data(
         if data is None or data.empty:
             continue
 
-        for t in batch:
-            if t not in data.columns.get_level_values(0):
-                continue
+        # Get tickers that actually returned data
+        returned_tickers = set(data.columns.get_level_values(0))
 
+        # Identify missing tickers (FAILED ones)
+        missing = [t for t in batch if t not in returned_tickers]
+
+        # Add to failed_tickers (DLQ)
+        if missing:
+            print(f"[FETCH][MISSING] {missing}")
+            failed_tickers.extend(missing)
+
+        # Process only valid tickers
+        for t in returned_tickers:
             sub = data[t].reset_index().rename(columns={
                 "Date":   "date",
                 "Open":   "open",
@@ -572,12 +581,13 @@ def fetch_raw_data(
                 "Close":  "close",
                 "Volume": "volume",
             })
-            # Drop any extra yfinance columns (e.g. "Adj Close")
+
             sub = sub[[c for c in sub.columns if c in FEATURE_COLS]]
             sub["ticker"]          = t
             sub["record_id"]       = t + "_" + sub["date"].astype(str)
             sub["ingestion_ts"]    = run_ts
             sub["pipeline_run_id"] = run_id
+
             new_records.append(sub)
 
     if not new_records:
@@ -911,9 +921,10 @@ def add_metadata(
     input_rows:           int,
     output_rows:          int,
     processing_time_s:    float,
-    ingestion_start_date,
+    ingestion_start_date: date_type,
     replay_mode:          bool,
     is_partial_run:       bool,
+    mode_label:           str,
 ) -> pd.DataFrame:
     """
     Stamp every output row with complete lineage and observability fields.
@@ -951,7 +962,7 @@ def add_metadata(
     # Mode flags
     df["replay_mode"]          = replay_mode
     df["partial_run"]          = is_partial_run
-
+    df["run_mode"]             = mode_label
     # record_id preserved from fetch / raw-read stage — NOT re-stamped here.
     # This is the link from feature row -> raw source event.
 
@@ -1211,16 +1222,20 @@ def write_dlq(
         return
 
     key = f"{prefix}dlq/run_id={run_id}/failed_tickers.json"
-    write_json_to_s3(
-        {
-            "run_id":         run_id,
-            "failed_tickers": failed_tickers,
-            "count":          len(failed_tickers),
-            "written_at":     utc_now().isoformat(),
-        },
-        bucket,
-        key,
-    )
+    write_json_to_s3({
+        "run_id": run_id,
+        "failures": [
+            {
+                "ticker": t,
+                "reason": "missing_from_yfinance",
+                "stage": "fetch",
+                "detected_at": utc_now().isoformat()
+            }
+            for t in set(failed_tickers)
+        ],
+        "count": len(set(failed_tickers)),
+        "written_at": utc_now().isoformat()
+    })
     print(f"  [DLQ] {len(failed_tickers)} ticker(s) -> s3://{bucket}/{key}")
 
 # =============================================================
@@ -1415,6 +1430,24 @@ def update_market_features(
 
             # DLQ — written before anything that could raise
             write_dlq(failed_tickers, run_id, bucket, prefix)
+            
+            # ============================
+            # DLQ ALERT + CLEANUP (ADD THIS)
+            # ============================
+
+            # Remove duplicates (production safety)
+            failed_tickers = list(set(failed_tickers))
+
+            # Alert if any failures happened
+            if failed_tickers:
+                send_alert(
+                    f"{len(failed_tickers)} tickers failed during fetch",
+                    level="WARNING",
+                    context={
+                        "run_id": run_id,
+                        "failed_count": len(failed_tickers)
+                    }
+                )
 
             if raw_df.empty:
                 msg = "No data fetched from yfinance."
@@ -1566,6 +1599,7 @@ def update_market_features(
             ingestion_start_date = start_date,
             replay_mode          = replay_from_raw,
             is_partial_run       = is_partial_run,
+            mode_label           = mode_label,
         )
         # --------------------------------------------------------------
         # STAGE 9 — Schema enforcement on feature output (inter-stage)
@@ -1723,7 +1757,7 @@ def replay_failed_tickers(
         prefix               = prefix,
         start_date_override  = original_start,
         force_overwrite      = True,
-        tickers_override     = failed,   # ← selective, not full pipeline
+        tickers_override     = failed,   # <- selective, not full pipeline
     )
 
 # =============================================================

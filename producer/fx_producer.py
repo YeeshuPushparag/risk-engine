@@ -501,6 +501,13 @@ def fetch_fx_snapshot_with_retry(
                     context={"batch_id": batch_id}
                 )
                 
+                log("WARNING", "Batch fully failed — all pairs sent to DLQ", {
+                    "batch_id": batch_id,
+                    "total_pairs": len(pairs),
+                    "attempts": CONFIG["fetch_max_retries"],
+                    "error": str(exc),
+                })
+                
                 # Send entire batch to DLQ
                 for pair in pairs:
                     dlq_buffer.append({

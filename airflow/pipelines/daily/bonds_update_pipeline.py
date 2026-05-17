@@ -1,51 +1,84 @@
 """
-bond_pipeline.py
-=================
-Production-grade bond ingestion + computation pipeline — hedge-fund quality.
+bonds_update_pipeline.py
+=========================
+FIRST PIPELINE — Ingestion + Feature Engineering
 
-Architecture note
------------------
-This pipeline differs from market_features_pipeline and fx_exposure_pipeline
-intentionally: Snowflake is the system of record for full bond history, so
-no S3 raw/feature/rolling layers, DLQ system, or schema-hash tracking are used.
-
-Data flow
----------
-S3 (synthetic_bond.csv)      -> base bond universe
-FRED (DGS10)                 -> 10-year Treasury yield
-Snowflake (BONDS.date,DGS10) -> last 20 rows of DGS10 history (rolling warm-up)
-S3 (macro_data.csv)          -> macro features (GDP, UNRATE, FEDFUNDS, CPI)
-S3 (XGBoost models)          -> credit spread + PD predictions
-
-Output destinations
--------------------
-Snowflake  : BONDS table
-PostgreSQL : public.bond_data table
-
-fill_method_flag
+Responsibilities
 ----------------
-Every DGS10-aligned row carries this column:
-  "REAL"             -> FRED returned an observed value for that date
-  "FORWARD_FILLED"   -> date was a business day with no FRED observation;
-                       value was forward-filled from the most recent prior value
-  "BACKWARD_FILLED"  -> date was a business day with no FRED observation and
-                       no prior value available; value was backward-filled
-This flag is preserved through the entire pipeline into both databases.
+- Load static base bond universe from S3
+- Generate one row per bond per business day
+- Fetch FRED DGS10 (live API, or load S3 raw snapshot for replay)
+- Load DGS10 warm-up history (rolling parquet, or S3 raw snapshot for replay)
+- Build DGS10 rolling features (DGS10_ma, dgs10_anom, fill_method_flag)
+- Merge macro data (GDP, UNRATE, FEDFUNDS, CPI)
+- Write Layer 2 feature partitions (one parquet per date per run_id)
+- Maintain 30-day rolling serving parquet
+- Save run metadata for replay resolution
+- NO ML predictions
+- NO Snowflake writes
+- NO Postgres writes
 
-DGS10 rolling fix
+S3 storage layout
 -----------------
-The original pipeline computed rolling(20) using only newly fetched data,
-producing NaN or incorrect values for the first 19 rows of every run.
-This pipeline queries the last 20 DGS10 values from Snowflake before fetching
-new data, prepends them as history context, computes rolling(20) correctly,
-then strips the history rows before writing — ensuring every output row has
-a valid DGS10_ma value.
+RAW SNAPSHOTS (for deterministic replay):
+    s3://<bucket>/historical-bonds/raw/fred/
+        year=Y/month=MM/day=DD/run_id=<id>/data.parquet
+
+    s3://<bucket>/historical-bonds/raw/dgs10_history/
+        year=Y/month=MM/day=DD/run_id=<id>/data.parquet
+
+LAYER 2 FEATURES (versioned per run_id, partitioned by date):
+    s3://<bucket>/historical-bonds/features/
+        year=Y/month=MM/day=DD/run_id=<id>/data.parquet
+
+ROLLING SERVING LAYER (mutable, last 30 calendar days):
+    s3://<bucket>/historical-bonds/rolling/bonds_features_30d.parquet
+
+RUN METADATA (for replay run_id resolution by start_date):
+    s3://<bucket>/historical-bonds/run_metadata/<run_id>.json
+
+Mode detection
+--------------
+Derived exclusively from function parameters — never from data columns.
+    replay=True                   <- mode = "replay"
+    start_date_override provided  <- mode = "backfill"
+    default                       <- mode = "incremental"
+
+Mode behaviour
+--------------
+incremental:
+    - Watermark = max(date) from rolling parquet (or today-30d if absent)
+    - Fetch fresh FRED DGS10 and generate rows from watermark+1 <- today
+    - Save raw FRED snapshot + DGS10 history snapshot
+    - Write Layer 2 partitions + update rolling parquet
+
+backfill:
+    - Use start_date_override as window start
+    - Fetch fresh FRED DGS10 and generate rows for the full window
+    - Save raw FRED snapshot + DGS10 history snapshot
+    - Write Layer 2 partitions + update rolling parquet (safe deduplication)
+
+replay:
+    - Load raw FRED snapshot + DGS10 history snapshot from S3 by run_id
+    - Rebuild features deterministically — no live API calls
+    - Write a NEW Layer 2 partition under a new run_id
+    - Update rolling parquet (safe deduplication)
+    - Original run's snapshots are never modified
+
+DGS10 warm-up
+-------------
+Rolling(20) for DGS10_ma requires 20 prior rows. The pipeline:
+  1. Loads the last 20 DGS10 rows from the rolling parquet (before start_date).
+  2. Prepends them to the new FRED observations.
+  3. Computes rolling(20) over the combined series.
+  4. Strips warm-up rows before writing (build_dgs10_series does this).
 
 Airflow notes
 -------------
+- Entry point: update_bonds_pipeline(start_date_override, replay_from_raw)
 - Recommended: retries=2, retry_delay=timedelta(minutes=5)
-- max_active_runs=1 to prevent concurrent Snowflake writes
-- Entry point: update_bonds_pipeline()
+- max_active_runs=1 (S3 rolling write is not concurrent-safe)
+- DAG order: run_bonds_update >> run_bonds_processing
 """
 
 import os
@@ -54,17 +87,13 @@ import json
 import time
 import pandas as pd
 import numpy as np
-import xgboost as xgb
-import joblib
 import boto3
+import requests
 from botocore.exceptions import ClientError
 from datetime import datetime, timedelta, timezone, date as date_type
-from io import BytesIO, StringIO
+from io import BytesIO
 from fredapi import Fred
-from connections.snowflake_conn import get_snowflake_conn
-from connections.postgre_conn import get_postgre_conn
-from snowflake.connector.pandas_tools import write_pandas
-import requests
+
 
 # =============================================================
 # CONFIG  —  single source of truth.  No magic numbers in code.
@@ -72,54 +101,38 @@ import requests
 
 CONFIG: dict = {
     # FRED fetch
-    "max_retries":         3,
-    "retry_backoff_s":     5,          # seconds; multiplied by attempt number
+    "max_retries":          3,
+    "retry_backoff_s":      5,         # seconds; multiplied by attempt number
 
     # DGS10 rolling warm-up
-    "dgs10_history_rows":  20,         # rows loaded from Snowflake to warm rolling(20)
+    "dgs10_history_rows":   20,        # rows loaded to warm rolling(20)
     "dgs10_rolling_window": 20,        # window for DGS10_ma
 
-    # S3 keys
-    "s3_bucket":           "yeeshu-bond-bucket",
-    "base_bond_key":       "synthetic_bond.csv",
-    "macro_key":           "macro_data.csv",
-    "model_spread_key":    "bond_model_spread5d_xgb.json",
-    "model_pd_key":        "bond_model_pd21d_xgb.json",
-    "features_spread_key": "bond_features_spread5d.pkl",
-    "features_pd_key":     "bond_features_pd21d.pkl",
+    # Rolling serving layer
+    "window_days":          30,        # calendar days retained in rolling parquet
 
-    # Snowflake
-    "snowflake_table":     "BONDS",
-    "snowflake_chunk":     20000,
+    # S3 bucket
+    "s3_bucket": "pushparag-bond-bucket",
 
-    # PostgreSQL
-    "postgres_table":      "bond_data",
-    "postgres_schema":     "public",
+    # S3 reference file paths (at bucket root)
+    "base_bond_key": "synthetic_bond.csv",
+    "macro_key":     "macro_data.csv",
 
-    # Final output columns — defines exact column contract for both DBs
-    "final_cols": [
-        "bond_id", "ticker", "sector", "industry", "credit_rating",
-        "coupon_rate", "issue_date", "maturity_date", "maturity_years",
-        "date", "benchmark_yield", "corporate_yield", "credit_spread",
-        "bond_price", "yield_to_maturity", "implied_hazard",
-        "implied_pd_annual", "implied_pd_multi_year", "implied_rating",
-        "market_synthetic_score", "DGS10", "DGS10_ma", "dgs10_anom",
-        "fill_method_flag",
-        "gdp", "unrate", "fedfunds", "cpi",
-        "pred_spread_5d", "pred_pd_21d",
-        # Lineage
-        "pipeline_name", "pipeline_run_id", "data_source",
-        "input_source", "transformation", "record_created_at",
-    ],
+    # S3 partitioned path prefixes
+    "raw_fred_prefix":     "historical-bonds/raw/fred/",
+    "raw_dgs10_prefix":    "historical-bonds/raw/dgs10_history/",
+    "features_prefix":     "historical-bonds/features/",
+    "rolling_key":         "historical-bonds/rolling/bonds_features_30d.parquet",
+    "run_metadata_prefix": "historical-bonds/run_metadata/",
 
-    # Lineage  ← bump transformation when model or logic changes
+    # Lineage — bump transformation when feature engineering logic changes
     "pipeline_name":  "bonds_update_pipeline",
     "data_source":    "fred+synthetic+macro",
     "input_source":   "synthetic_bond+fred+macro",
     "transformation": "bond_features_v1",
 }
 
-# Volatility mapping by credit rating — same as original pipeline
+# Volatility mapping by credit rating — unchanged from original pipeline
 VOL_MAP: dict[str, int] = {
     "AAA":  2,  "AA+":  3, "AA":  4, "A+":  5,
     "A":    6,  "A-":   8,
@@ -127,12 +140,37 @@ VOL_MAP: dict[str, int] = {
     "BB+":  20, "BB":  25, "B":   35, "CCC": 50,
 }
 
+# Layer 2 output columns — contract between first and second pipelines.
+# run_mode is written here for replay traceability. The second pipeline
+# will rename pipeline_* to source_* and add its own lineage columns.
+LAYER2_OUTPUT_COLS: list[str] = [
+    "bond_id", "ticker", "sector", "industry", "credit_rating",
+    "coupon_rate", "issue_date", "maturity_date", "maturity_years",
+    "date", "vol",
+    "benchmark_yield", "corporate_yield", "credit_spread",
+    "bond_price", "yield_to_maturity", "implied_hazard",
+    "implied_pd_annual", "implied_pd_multi_year", "implied_rating",
+    "market_synthetic_score",
+    "issue_size",
+    "units_issued",
+    "units_outstanding",
+    "market_value",
+    "outstanding_pct",
+    "DGS10", "DGS10_ma", "dgs10_anom", "fill_method_flag",
+    "gdp", "unrate", "fedfunds", "cpi",
+    # First pipeline lineage (second pipeline renames these to source_*)
+    "pipeline_name", "pipeline_run_id", "data_source",
+    "input_source", "transformation", "record_created_at",
+    "run_mode",   # informational; second pipeline knows which mode produced this
+]
+
+
 # =============================================================
 # CUSTOM EXCEPTIONS
 # =============================================================
 
 class BondPipelineError(Exception):
-    """Raised for unrecoverable pipeline failures."""
+    """Raised for unrecoverable first-pipeline failures."""
 
 
 class DataValidationError(Exception):
@@ -140,50 +178,106 @@ class DataValidationError(Exception):
 
 
 # =============================================================
-# PRODUCTION-GRADE ALERTING
+# PRODUCTION-GRADE ALERTING (CRITICAL ONLY)
 # =============================================================
 
-def send_alert(message: str, level: str = "INFO", context: dict = None):
+def send_critical_alert(message: str, context: dict = None) -> None:
     """
-    Production-grade alert dispatcher with rate limiting and safe Slack integration.
-    
-    Args:
-        message: Alert message
-        level: INFO, WARNING, ERROR, CRITICAL
-        context: Additional context dict
-    
-    Design principles:
-        - Slack calls are safe (timeout + silent failure)
-        - Rate limiting by severity prevents alert spam
-        - Only CRITICAL/ERROR go to Slack by default
-        - INFO alerts go to logs only (observability without noise)
+    Send CRITICAL alert to Slack only for unrecoverable pipeline failures.
+
+    Triggers for:
+    - FRED fetch failure (after all retries)
+    - S3 write failure for Layer 2 partitions or rolling parquet
+    - Data validation failure
+    - Any unhandled pipeline exception
+
+    Does NOT trigger for:
+    - Individual retry attempts (only on final exhaustion)
+    - Rolling parquet not existing on first run (expected initial state)
     """
     payload = {
-        "level": level,
-        "pipeline": CONFIG["pipeline_name"],
-        "message": message,
-        "context": context or {},
+        "level":     "CRITICAL",
+        "pipeline":  CONFIG["pipeline_name"],
+        "message":   message,
+        "context":   context or {},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+    print(f"[CRITICAL] {message} | context={payload['context']}")
 
-    # Always print to stdout for log aggregation (CloudWatch, Datadog, etc.)
-    print(f"[ALERT][{level}] {message} | context={payload['context']}")
+    webhook = os.getenv("SLACK_WEBHOOK_URL")
+    if webhook:
+        try:
+            truncated = message[:500] + "..." if len(message) > 500 else message
+            run_id    = context.get("run_id", "unknown") if context else "unknown"
+            text = (
+                f"*[CRITICAL]* {CONFIG['pipeline_name']}\n"
+                f"{truncated}\n"
+                f"run_id: {run_id}"
+            )
+            requests.post(webhook, json={"text": text}, timeout=3)
+        except Exception as e:
+            print(f"[ALERT ERROR] Slack notification failed: {e}")
 
-    # Only send to Slack for ERROR/CRITICAL or when explicitly forced
-    if level in ["ERROR", "CRITICAL"]:
-        webhook = os.getenv("SLACK_WEBHOOK_URL")
-        if webhook:
-            try:
-                # Truncate long messages to avoid Slack payload limits
-                truncated_msg = message[:500] + "..." if len(message) > 500 else message
-                text = f"*[{level}]* {CONFIG['pipeline_name']}\n" \
-                       f"{truncated_msg}\n" \
-                       f"run_id: {payload['context'].get('run_id', 'unknown')}"
-                # Use timeout to prevent Slack from hanging the pipeline
-                requests.post(webhook, json={"text": text}, timeout=3)
-            except Exception as e:
-                # Silent fail - don't crash pipeline for alerting
-                print(f"[ALERT ERROR] Slack notification failed: {e}")
+
+def send_info_alert(message: str, context: dict = None) -> None:
+    """Emit structured INFO log to stdout. No Slack (prevents noise)."""
+    print(f"[INFO] {message} | context={json.dumps(context or {}, default=str)}")
+
+
+# =============================================================
+# RETRY WITH EXPONENTIAL BACKOFF
+# =============================================================
+
+def retry_with_backoff(
+    func,
+    retries=3,
+    backoff_factor=2,
+    exceptions=(Exception,),
+    critical_name=None,
+    run_id=None,
+):
+    """
+    Retry a callable with exponential backoff.
+
+    Sends CRITICAL alert only when all retries are exhausted AND
+    critical_name is provided. Individual retry attempts log to stdout only.
+
+    Args:
+        func:           Zero-argument callable to retry.
+        retries:        Maximum number of retry attempts (not counting first).
+        backoff_factor: Wait = backoff_factor ** attempt.
+        exceptions:     Exception types to catch and retry.
+        critical_name:  Human-readable operation name for alert messages.
+                        Pass None for non-critical / soft-fail operations.
+        run_id:         Pipeline run identifier for alert context.
+
+    Returns:
+        Return value of func() on success.
+
+    Raises:
+        Last caught exception when all retries are exhausted.
+    """
+    last_exception = None
+
+    for attempt in range(retries + 1):
+        try:
+            return func()
+        except exceptions as e:
+            last_exception = e
+            if attempt < retries:
+                wait_time = backoff_factor ** attempt
+                print(f"  Retry {attempt + 1}/{retries} after {wait_time}s: {e}")
+                time.sleep(wait_time)
+            else:
+                print(f"  All {retries} retries exhausted: {e}")
+
+    if critical_name:
+        send_critical_alert(
+            f"{critical_name} failed after {retries} retries",
+            context={"run_id": run_id, "error": str(last_exception)},
+        )
+
+    raise last_exception
 
 
 # =============================================================
@@ -201,12 +295,21 @@ def today_utc() -> date_type:
 
 
 # =============================================================
-# S3 HELPERS
+# S3 HELPERS  —  basic I/O
 # =============================================================
 
 def get_s3():
     """Return a boto3 S3 client per-call to avoid stale sessions."""
     return boto3.client("s3")
+
+
+def s3_key_exists(bucket: str, key: str) -> bool:
+    """Return True if the S3 key exists, False otherwise."""
+    try:
+        get_s3().head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError:
+        return False
 
 
 def read_csv_from_s3(bucket: str, key: str) -> pd.DataFrame:
@@ -216,30 +319,163 @@ def read_csv_from_s3(bucket: str, key: str) -> pd.DataFrame:
         obj = get_s3().get_object(Bucket=bucket, Key=key)
         return pd.read_csv(BytesIO(obj["Body"].read()))
     except ClientError as exc:
-        raise BondPipelineError(
-            f"Failed to read s3://{bucket}/{key}: {exc}"
-        ) from exc
+        raise BondPipelineError(f"Failed to read s3://{bucket}/{key}: {exc}") from exc
 
 
-def read_bytes_from_s3(bucket: str, key: str) -> bytes:
-    """Read raw bytes from S3. Raises BondPipelineError on failure."""
+def read_parquet_from_s3(bucket: str, key: str) -> pd.DataFrame:
+    """Read a Parquet from S3. Raises BondPipelineError on failure."""
     try:
-        print(f"  [S3 READ BYTES]   s3://{bucket}/{key}")
-        return get_s3().get_object(Bucket=bucket, Key=key)["Body"].read()
+        print(f"  [S3 READ PARQUET] s3://{bucket}/{key}")
+        obj = get_s3().get_object(Bucket=bucket, Key=key)
+        return pd.read_parquet(BytesIO(obj["Body"].read()))
     except ClientError as exc:
-        raise BondPipelineError(
-            f"Failed to read s3://{bucket}/{key}: {exc}"
-        ) from exc
+        raise BondPipelineError(f"Failed to read s3://{bucket}/{key}: {exc}") from exc
+
+
+def write_parquet_to_s3(df: pd.DataFrame, bucket: str, key: str) -> None:
+    """Write a DataFrame as Parquet to S3. Raises BondPipelineError on failure."""
+    try:
+        print(f"  [S3 WRITE PARQUET] s3://{bucket}/{key}  rows={len(df):,}")
+        buf = BytesIO()
+        df.to_parquet(buf, index=False)
+        buf.seek(0)
+        get_s3().put_object(Bucket=bucket, Key=key, Body=buf.getvalue())
+    except ClientError as exc:
+        raise BondPipelineError(f"Failed to write s3://{bucket}/{key}: {exc}") from exc
 
 
 # =============================================================
-# STAGE 1 — load_base_bond_data
+# S3 PARTITION PATH HELPERS  —  deterministic key construction
+# =============================================================
+
+def _raw_fred_key(start_date, run_id: str) -> str:
+    """
+    Construct the S3 key for a FRED DGS10 raw snapshot.
+    Partitioned by start_date so replay can locate it by window start.
+
+    Example:
+        historical-bonds/raw/fred/year=2024/month=01/day=15/run_id=<id>/data.parquet
+    """
+    d = pd.Timestamp(start_date)
+    return (
+        f"{CONFIG['raw_fred_prefix']}"
+        f"year={d.year}/month={d.month:02d}/day={d.day:02d}/"
+        f"run_id={run_id}/data.parquet"
+    )
+
+
+def _raw_dgs10_key(start_date, run_id: str) -> str:
+    """
+    Construct the S3 key for a DGS10 warm-up history raw snapshot.
+    Partitioned by start_date so replay can locate the exact history rows.
+
+    Example:
+        historical-bonds/raw/dgs10_history/year=2024/month=01/day=15/run_id=<id>/data.parquet
+    """
+    d = pd.Timestamp(start_date)
+    return (
+        f"{CONFIG['raw_dgs10_prefix']}"
+        f"year={d.year}/month={d.month:02d}/day={d.day:02d}/"
+        f"run_id={run_id}/data.parquet"
+    )
+
+
+def _feature_partition_key(date, run_id: str) -> str:
+    """
+    Construct the S3 key for a Layer 2 feature partition.
+    One file per date per run_id.
+
+    Example:
+        historical-bonds/features/year=2024/month=01/day=15/run_id=<id>/data.parquet
+    """
+    d = pd.Timestamp(date)
+    return (
+        f"{CONFIG['features_prefix']}"
+        f"year={d.year}/month={d.month:02d}/day={d.day:02d}/"
+        f"run_id={run_id}/data.parquet"
+    )
+
+
+# =============================================================
+# RUN METADATA  —  persistence for replay run_id resolution
+# =============================================================
+
+def _save_run_metadata(
+    bucket:     str,
+    run_id:     str,
+    mode:       str,
+    start_date: date_type,
+    end_date:   date_type,
+    nrows:      int,
+    run_ts:     datetime,
+) -> None:
+    """
+    Persist run metadata to S3 so replay mode can look up run_id by start_date.
+    Non-fatal on failure — never blocks the pipeline.
+    """
+    key = f"{CONFIG['run_metadata_prefix']}{run_id}.json"
+    payload = {
+        "run_id":     run_id,
+        "mode":       mode,
+        "start_date": str(start_date),
+        "end_date":   str(end_date),
+        "rows":       nrows,
+        "timestamp":  run_ts.isoformat(),
+    }
+    try:
+        get_s3().put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=json.dumps(payload, indent=2).encode("utf-8"),
+        )
+        print(f"  [METADATA] Run summary saved: s3://{bucket}/{key}")
+    except Exception as exc:
+        print(f"  [METADATA][WARN] Could not save run metadata: {exc}")
+
+
+def _resolve_run_id_for_replay(bucket: str, start_date: date_type) -> str:
+    """
+    Look up the run_id from a prior normal/backfill run for a given start_date.
+    Used so replay mode can locate the correct FRED and DGS10 history snapshots.
+
+    Raises BondPipelineError if no matching run is found.
+    """
+    prefix = CONFIG["run_metadata_prefix"]
+    try:
+        paginator = get_s3().get_paginator("list_objects_v2")
+        pages     = paginator.paginate(Bucket=bucket, Prefix=prefix)
+    except ClientError as exc:
+        raise BondPipelineError(
+            f"Could not list run metadata in s3://{bucket}/{prefix}: {exc}"
+        ) from exc
+
+    for page in pages:
+        for obj in page.get("Contents", []):
+            try:
+                raw  = get_s3().get_object(Bucket=bucket, Key=obj["Key"])["Body"].read()
+                data = json.loads(raw)
+                if str(data.get("start_date")) == str(start_date):
+                    run_id = data["run_id"]
+                    print(f"  [REPLAY] Resolved run_id={run_id} for start_date={start_date}")
+                    return run_id
+            except Exception:
+                continue  # skip corrupt metadata entries
+
+    raise BondPipelineError(
+        f"No run metadata found for start_date={start_date}. "
+        f"A prior normal or backfill run for this date must exist before replaying."
+    )
+
+
+# =============================================================
+# STAGE 1 — load_base_bond_data  (UNCHANGED)
 # =============================================================
 
 def load_base_bond_data(bucket: str) -> pd.DataFrame:
     """
     Load the static synthetic bond universe from S3.
-    This is the base dataset repeated for each business day.
+    This is the base dataset expanded to one row per business day.
+    Unchanged from original pipeline.
     """
     base = read_csv_from_s3(bucket, CONFIG["base_bond_key"])
 
@@ -253,7 +489,7 @@ def load_base_bond_data(bucket: str) -> pd.DataFrame:
 
 
 # =============================================================
-# STAGE 2 — generate_daily_rows
+# STAGE 2 — generate_daily_rows  (UNCHANGED)
 # =============================================================
 
 def generate_daily_rows(
@@ -264,8 +500,7 @@ def generate_daily_rows(
     """
     Expand the base bond universe to one row per bond per business day.
     Applies volatility mapping. Pure function — no I/O.
-
-    Business logic preserved exactly from original pipeline.
+    Unchanged from original pipeline.
     """
     dates  = pd.date_range(start_date, end_date, freq="B")
     n_days = len(dates)
@@ -275,110 +510,166 @@ def generate_daily_rows(
             f"No business days in range [{start_date}, {end_date}]."
         )
 
-    daily        = base.loc[base.index.repeat(n_days)].copy()
+    daily         = base.loc[base.index.repeat(n_days)].copy()
     daily["date"] = np.tile(dates, len(base))
-
-    # Volatility mapping by credit rating (original logic preserved)
-    daily["vol"] = (
-        daily["credit_rating"].map(VOL_MAP).fillna(10) / 100
-    )
+    daily["vol"]  = daily["credit_rating"].map(VOL_MAP).fillna(10) / 100
 
     print(f"  [STAGE 2] Generated {len(daily):,} daily rows across {n_days} business days.")
     return daily
 
 
 # =============================================================
-# STAGE 3 — load_dgs10_history_from_snowflake
+# STAGE 3 — load_dgs10_history  (warm-up rows for rolling window)
 # =============================================================
 
-def load_dgs10_history_from_snowflake(start_date=None) -> pd.DataFrame:
+def load_dgs10_history(
+    start_date:   date_type,
+    run_id:       str,
+    mode:         str,
+    bucket:       str,
+    old_rolling:  pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """
-    Load the last CONFIG["dgs10_history_rows"] DGS10 observations from
-    Snowflake to use as warm-up history for rolling(20) computation.
+    Load the last N DGS10 rows strictly before start_date for rolling warm-up.
 
-    Without this step, the first 19 rows of every run produce NaN for
-    DGS10_ma — incorrect in a production system.
+    Replay mode:
+        Loads the raw snapshot written by the original run.
+        Path: historical-bonds/raw/dgs10_history/year=Y/month=MM/day=DD/run_id=<id>/data.parquet
+        No Snowflake or rolling parquet access — fully deterministic.
 
-    Returns a DataFrame with columns [date, DGS10] sorted ascending.
-    Returns empty DataFrame if Snowflake query fails (non-fatal — pipeline
-    can proceed but rolling values may be less accurate for early rows).
+    Normal / Backfill mode:
+        Extracts the last N rows (with DGS10 not null, date < start_date)
+        from the rolling parquet (already loaded by the caller).
+        Saves a snapshot to S3 so the same history can be loaded in replay.
+
+    Returns DataFrame with columns [date, DGS10] sorted ascending.
+    Empty DataFrame is valid (rolling computation uses min_periods=1).
+
+    Args:
+        start_date:  Processing window start date.
+        run_id:      Current pipeline run identifier.
+        mode:        "replay" | "backfill" | "incremental".
+        bucket:      S3 bucket name.
+        old_rolling: Rolling parquet DataFrame (None if first ever run).
     """
-    n = CONFIG["dgs10_history_rows"]
-    try:
-        with get_snowflake_conn() as ctx:
-            with ctx.cursor() as cs:
-                if start_date:
-                    cs.execute(f'''
-                        SELECT "date", "DGS10"
-                        FROM "{CONFIG["snowflake_table"]}"
-                        WHERE "DGS10" IS NOT NULL
-                        AND "date" < '{start_date}'
-                        ORDER BY "date" DESC
-                        LIMIT {n}
-                    ''')
-                else:
-                    cs.execute(f'''
-                        SELECT "date", "DGS10"
-                        FROM "{CONFIG["snowflake_table"]}"
-                        WHERE "DGS10" IS NOT NULL
-                        ORDER BY "date" DESC
-                        LIMIT {n}
-                    ''')
-                rows = cs.fetchall()
+    n           = CONFIG["dgs10_history_rows"]
+    snapshot_key = _raw_dgs10_key(start_date, run_id)
 
-        if not rows:
-            print(f"  [STAGE 3] No DGS10 history found in Snowflake — proceeding without warm-up.")
-            return pd.DataFrame(columns=["date", "DGS10"])
-
-        history = pd.DataFrame(rows, columns=["date", "DGS10"])
+    if mode == "replay":
+        if not s3_key_exists(bucket, snapshot_key):
+            raise BondPipelineError(
+                f"DGS10 history snapshot not found for replay: "
+                f"s3://{bucket}/{snapshot_key}"
+            )
+        history          = read_parquet_from_s3(bucket, snapshot_key)
         history["date"]  = pd.to_datetime(history["date"])
         history["DGS10"] = pd.to_numeric(history["DGS10"], errors="coerce")
-        history = history.sort_values("date").reset_index(drop=True)
-
-        print(f"  [STAGE 3] Loaded {len(history)} historical DGS10 rows from Snowflake "
-              f"({history['date'].min().date()} -> {history['date'].max().date()}).")
+        history          = history.sort_values("date").reset_index(drop=True)
+        print(
+            f"  [STAGE 3] Loaded {len(history)} DGS10 history rows from S3 snapshot "
+            f"(replay mode)."
+        )
         return history
 
-    except Exception as exc:
-        print(f"  [STAGE 3][WARN] Could not load DGS10 history from Snowflake: {exc}")
-        print(f"  [STAGE 3][WARN] Proceeding without warm-up — rolling values may be imprecise.")
+    # Normal / Backfill — extract from rolling parquet
+    if old_rolling is None or old_rolling.empty:
+        print(
+            "  [STAGE 3] No rolling parquet available — proceeding without warm-up. "
+            "DGS10_ma will rely on min_periods=1 for the first runs."
+        )
         return pd.DataFrame(columns=["date", "DGS10"])
+
+    start_ts = pd.Timestamp(start_date)
+    hist_rows = (
+        old_rolling[
+            (old_rolling["date"] < start_ts) &
+            (old_rolling["DGS10"].notna())
+        ]
+        [["date", "DGS10"]]
+        .sort_values("date")
+        .tail(n)
+        .reset_index(drop=True)
+    )
+
+    if not hist_rows.empty:
+        # Save snapshot so this run is replayable later
+        try:
+            write_parquet_to_s3(hist_rows, bucket, snapshot_key)
+            print(
+                f"  [STAGE 3] Loaded {len(hist_rows)} DGS10 history rows from rolling parquet "
+                f"({hist_rows['date'].min().date()} <- {hist_rows['date'].max().date()}). "
+                f"Snapshot saved."
+            )
+        except Exception as exc:
+            # Non-fatal — snapshot is best-effort
+            print(f"  [STAGE 3][WARN] Could not save DGS10 history snapshot: {exc}")
+    else:
+        print(
+            "  [STAGE 3] No prior DGS10 history found in rolling parquet — "
+            "proceeding without warm-up."
+        )
+
+    return hist_rows
 
 
 # =============================================================
-# STAGE 4 — fetch_dgs10_from_fred (IMPROVED ALERTING)
+# STAGE 4 — fetch_dgs10_from_fred  (UNCHANGED logic, new S3 paths)
 # =============================================================
 
 def fetch_dgs10_from_fred(
     start_date: str,
     end_date:   str,
-    run_id:     str = None,  # Added for alert context
+    run_id:     str,
+    mode:       str,
+    bucket:     str,
 ) -> pd.DataFrame:
     """
     Fetch DGS10 (10-year Treasury yield) from FRED for the date range.
 
-    Retry strategy: up to CONFIG["max_retries"] with exponential backoff.
-    Returns a DataFrame with columns [date, DGS10] for observed dates only.
-    Raises BondPipelineError if all retries are exhausted.
-    """
-    fred_api_key = os.getenv("FRED_API_KEY")
-    
-    # Validate API key before attempting fetch
-    if not fred_api_key:
-        send_alert(
-            "FRED_API_KEY environment variable not set",
-            level="CRITICAL",
-            context={"run_id": run_id, "start_date": start_date, "end_date": end_date}
-        )
-        raise BondPipelineError("FRED_API_KEY not configured")
+    Normal / Backfill mode:
+        Calls the live FRED API with retry + backoff.
+        Saves a raw Parquet snapshot keyed by (start_date, run_id).
 
+    Replay mode:
+        Loads the snapshot written by the original run — no FRED API call.
+        Same run_id <- always same FRED observations <- deterministic output.
+
+    Raises BondPipelineError if the FRED fetch fails after all retries
+    (normal/backfill only).
+    """
+    snapshot_key = _raw_fred_key(start_date, run_id)
+
+    if mode == "replay":
+        if not s3_key_exists(bucket, snapshot_key):
+            raise BondPipelineError(
+                f"FRED snapshot not found for replay: s3://{bucket}/{snapshot_key}"
+            )
+        df          = read_parquet_from_s3(bucket, snapshot_key)
+        df["date"]  = pd.to_datetime(df["date"])
+        df["DGS10"] = pd.to_numeric(df["DGS10"], errors="coerce")
+        print(
+            f"  [STAGE 4] Loaded {len(df)} DGS10 observations from S3 snapshot "
+            f"(replay mode)."
+        )
+        return df
+
+    # Normal / Backfill — call live FRED API
+    fred_api_key = os.getenv("FRED_API_KEY")
+    if not fred_api_key:
+        send_critical_alert(
+            "FRED_API_KEY environment variable not set",
+            context={"run_id": run_id},
+        )
+        raise BondPipelineError("FRED_API_KEY not configured.")
+
+    last_exc = None
     for attempt in range(1, CONFIG["max_retries"] + 1):
         try:
             fred   = Fred(api_key=fred_api_key)
             series = fred.get_series(
                 "DGS10",
-                observation_start = start_date,
-                observation_end   = end_date,
+                observation_start=start_date,
+                observation_end=end_date,
             )
             if series is None or series.empty:
                 raise ValueError("FRED returned empty series for DGS10.")
@@ -391,118 +682,99 @@ def fetch_dgs10_from_fred(
             df["date"]  = pd.to_datetime(df["date"])
             df["DGS10"] = pd.to_numeric(df["DGS10"], errors="coerce")
 
+            # Save raw snapshot for future replays
+            write_parquet_to_s3(df, bucket, snapshot_key)
             print(
                 f"  [STAGE 4] Fetched {len(df)} DGS10 observations from FRED "
-                f"({df['date'].min().date()} -> {df['date'].max().date()})."
+                f"({df['date'].min().date()} <- {df['date'].max().date()}). "
+                f"Snapshot saved: s3://{bucket}/{snapshot_key}"
             )
             return df
 
         except Exception as exc:
+            last_exc = exc
             print(
                 f"  [STAGE 4] FRED fetch attempt {attempt}/{CONFIG['max_retries']} "
                 f"failed: {exc}"
             )
             if attempt < CONFIG["max_retries"]:
                 time.sleep(CONFIG["retry_backoff_s"] * attempt)
-            else:
-                # Send CRITICAL alert only on final failure (not on retries)
-                send_alert(
-                    f"FRED DGS10 fetch failed after {CONFIG['max_retries']} attempts",
-                    level="CRITICAL",
-                    context={
-                        "run_id": run_id,
-                        "start_date": start_date,
-                        "end_date": end_date,
-                        "last_error": str(exc)
-                    }
-                )
-                raise BondPipelineError(
-                    f"FRED DGS10 fetch failed after {CONFIG['max_retries']} attempts: {exc}"
-                ) from exc
+
+    send_critical_alert(
+        f"FRED DGS10 fetch failed after {CONFIG['max_retries']} attempts",
+        context={
+            "run_id":     run_id,
+            "start_date": start_date,
+            "end_date":   end_date,
+            "error":      str(last_exc),
+        },
+    )
+    raise BondPipelineError(
+        f"FRED DGS10 fetch failed after {CONFIG['max_retries']} attempts: {last_exc}"
+    )
 
 
 # =============================================================
-# STAGE 5 — build_dgs10_series
+# STAGE 5 — build_dgs10_series  (UNCHANGED)
 # =============================================================
 
 def build_dgs10_series(
-    history_df:   pd.DataFrame,
-    new_fred_df:  pd.DataFrame,
-    start_date:   str,
-    end_date:     str,
+    history_df:  pd.DataFrame,
+    new_fred_df: pd.DataFrame,
+    start_date:  str,
+    end_date:    str,
 ) -> pd.DataFrame:
     """
     Combine Snowflake history with new FRED data, align to business days,
-    apply forward/backward fill with explicit fill_method_flag tracking,
-    and compute DGS10_ma (rolling 20-day mean) and dgs10_anom.
+    apply forward/backward fill with fill_method_flag tracking, and compute
+    DGS10_ma (rolling 20-day mean) and dgs10_anom.
 
-    The fill_method_flag column captures exactly how each value was sourced:
-      "REAL"           -> FRED observed value for that business day
-      "FORWARD_FILLED" -> no FRED value; filled forward from prior observation
-      "BACKWARD_FILLED"-> no FRED value and no prior observation; filled backward
-
-    Steps:
-      1. Combine history + new FRED rows (history provides rolling warm-up).
-      2. Create the full business-day spine for the new-data range.
-      3. Left-join FRED data onto spine; mark REAL vs missing.
-      4. Forward-fill, marking newly filled rows as FORWARD_FILLED.
-      5. Backward-fill remaining NaNs, marking as BACKWARD_FILLED.
-      6. Compute DGS10_ma and dgs10_anom over the combined series.
-      7. Strip warm-up history rows — return only the new-date rows.
+    fill_method_flag values:
+      "REAL"             — FRED observed value for that business day
+      "FORWARD_FILLED"   — no FRED value; filled forward from prior observation
+      "BACKWARD_FILLED"  — no FRED value and no prior; filled backward
 
     Returns DataFrame with columns:
         date, DGS10, fill_method_flag, DGS10_ma, dgs10_anom
+    (new-date rows only — warm-up history is stripped after rolling computation)
+
+    Unchanged from original pipeline.
     """
     business_days = pd.date_range(start_date, end_date, freq="B")
     spine         = pd.DataFrame({"date": business_days})
 
-    # Combine Snowflake history with new FRED data
-    # History provides the pre-period context needed for rolling(20)
+    # Combine warm-up history + new FRED rows
     combined_fred = pd.concat(
         [history_df[["date", "DGS10"]], new_fred_df[["date", "DGS10"]]],
         ignore_index=True,
     ).drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
 
-    # Left-join onto business-day spine — missing dates will be NaN
     spine = spine.merge(combined_fred, on="date", how="left")
 
-    # ── Fill method tracking ────────────────────────────────────────────
-    # Step 1: mark all positions that currently have a REAL FRED observation
+    # ── Fill method tracking ──────────────────────────────────────────────
     real_mask                    = spine["DGS10"].notna()
     spine["fill_method_flag"]    = np.where(real_mask, "REAL", pd.NA)
 
-    # Step 2: forward-fill — capture which rows changed from NaN
     spine["_dgs10_before_ffill"] = spine["DGS10"].copy()
     spine["DGS10"]               = spine["DGS10"].ffill()
-
     ffill_mask = spine["_dgs10_before_ffill"].isna() & spine["DGS10"].notna()
     spine.loc[ffill_mask, "fill_method_flag"] = "FORWARD_FILLED"
 
-    # Step 3: backward-fill any remaining NaNs (typically only at series start)
     spine["_dgs10_before_bfill"] = spine["DGS10"].copy()
     spine["DGS10"]               = spine["DGS10"].bfill()
-
     bfill_mask = spine["_dgs10_before_bfill"].isna() & spine["DGS10"].notna()
     spine.loc[bfill_mask, "fill_method_flag"] = "BACKWARD_FILLED"
 
-    # Fill any remaining flag NaN (all-NaN series edge case)
     spine["fill_method_flag"] = spine["fill_method_flag"].fillna("BACKWARD_FILLED")
-
     spine = spine.drop(columns=["_dgs10_before_ffill", "_dgs10_before_bfill"])
 
-    # ── Rolling features over full series (history + new) ───────────────
-    # Sorting is already guaranteed; compute on the complete series so
-    # rolling(20) is fully warm for the first new-date row.
-    spine["DGS10_ma"]  = (
-        spine["DGS10"].rolling(
-            CONFIG["dgs10_rolling_window"], min_periods=1
-        ).mean()
-    )
+    # ── Rolling features over combined series (warm-up + new) ────────────
+    spine["DGS10_ma"]   = spine["DGS10"].rolling(
+        CONFIG["dgs10_rolling_window"], min_periods=1
+    ).mean()
     spine["dgs10_anom"] = spine["DGS10"] - spine["DGS10_ma"]
 
-    # ── Strip warm-up rows ───────────────────────────────────────────────
-    # Only return dates within the requested new range; history rows were
-    # needed only to warm the rolling window.
+    # ── Strip warm-up rows — return only new-date rows ───────────────────
     start_ts = pd.Timestamp(start_date)
     spine     = spine[spine["date"] >= start_ts].reset_index(drop=True)
 
@@ -519,23 +791,18 @@ def build_dgs10_series(
 
 
 # =============================================================
-# STAGE 6 — merge_macro_data
+# STAGE 6 — merge_macro_data  (UNCHANGED)
 # =============================================================
 
-def merge_macro_data(
-    daily:  pd.DataFrame,
-    bucket: str,
-) -> pd.DataFrame:
+def merge_macro_data(daily: pd.DataFrame, bucket: str) -> pd.DataFrame:
     """
     Merge macro features (GDP, UNRATE, FEDFUNDS, CPI) by month-year key.
     Preserves original pipeline logic exactly.
-
-    On failure, logs a warning and returns the input DataFrame unchanged
-    (macro merge is non-fatal — bond rows without macro are still valuable).
+    Non-fatal on failure — bond rows without macro are still written.
     """
     try:
-        macro = read_csv_from_s3(bucket, CONFIG["macro_key"])
-        macro = macro.copy()
+        macro          = read_csv_from_s3(bucket, CONFIG["macro_key"])
+        macro          = macro.copy()
         macro["date"]  = pd.to_datetime(macro["date"])
         macro["mm_yy"] = macro["date"].dt.strftime("%m-%y")
 
@@ -544,522 +811,501 @@ def merge_macro_data(
 
         merged = daily.merge(
             macro.drop(columns=["date"]),
-            on    = "mm_yy",
-            how   = "inner",
+            on="mm_yy",
+            how="inner",
         ).drop(columns=["mm_yy"])
 
-        print(f"  [STAGE 6] Macro merge: {len(daily):,} -> {len(merged):,} rows.")
+        print(f"  [STAGE 6] Macro merge: {len(daily):,} <- {len(merged):,} rows.")
         return merged
 
     except Exception as exc:
         print(f"  [STAGE 6][WARN] Macro merge failed — proceeding without macro: {exc}")
-        if "mm_yy" in daily.columns:
-            daily = daily.drop(columns=["mm_yy"])
-        return daily
+        return daily.drop(columns=["mm_yy"], errors="ignore")
 
 
 # =============================================================
-# STAGE 7 — run_predictions
+# LAYER 2 — write_layer2_features
 # =============================================================
 
-def run_predictions(df: pd.DataFrame, bucket: str) -> pd.DataFrame:
+def write_layer2_features(
+    df:     pd.DataFrame,
+    bucket: str,
+    run_id: str,
+) -> dict:
     """
-    Load XGBoost models + feature lists from S3 and generate:
-      - pred_spread_5d
-      - pred_pd_21d
+    Write one Parquet per calendar date to the Layer 2 feature store.
 
-    Design:
-    - Model loading failure → soft fail (skip predictions)
-    - Feature/data issues → HARD fail (data integrity)
+    Partition structure:
+        historical-bonds/features/year=Y/month=MM/day=DD/run_id=<id>/data.parquet
+
+    One file per date means the second pipeline can efficiently resolve
+    the latest partition per date using S3 LastModified — even when
+    multiple run_ids exist for the same date (backfill / replay reruns).
+
+    Args:
+        df:     Fully featured DataFrame with date column.
+        bucket: S3 bucket name.
+        run_id: Current pipeline run identifier.
+
+    Returns:
+        dict: {date_str <- {"key": s3_key, "rows": int}} partition log.
+
+    Raises:
+        BondPipelineError: Propagated from write_parquet_to_s3 on S3 failures.
     """
+    df_copy           = df.copy()
+    df_copy["_date_"] = pd.to_datetime(df_copy["date"]).dt.date
+    partition_log     = {}
 
-    if df.empty:
-        return df
+    for date_val, group in df_copy.groupby("_date_"):
+        clean_group = group.drop(columns=["_date_"])
+        key         = _feature_partition_key(date_val, run_id)
+        write_parquet_to_s3(clean_group, bucket, key)
+        partition_log[str(date_val)] = {"key": key, "rows": len(clean_group)}
 
-    # =========================
-    # LOAD MODELS + FEATURES
-    # =========================
-    try:
-        model_spread = xgb.Booster()
-        model_spread.load_model(
-            bytearray(read_bytes_from_s3(bucket, CONFIG["model_spread_key"]))
-        )
-
-        model_pd = xgb.Booster()
-        model_pd.load_model(
-            bytearray(read_bytes_from_s3(bucket, CONFIG["model_pd_key"]))
-        )
-
-        features_spread = joblib.load(
-            BytesIO(read_bytes_from_s3(bucket, CONFIG["features_spread_key"]))
-        )
-
-        features_pd = joblib.load(
-            BytesIO(read_bytes_from_s3(bucket, CONFIG["features_pd_key"]))
-        )
-
-    except BondPipelineError as exc:
-        print(f"  [STAGE 7][WARN] Model loading failed — skipping predictions: {exc}")
-        return df
-
-    df = df.copy()
-
-    # =========================
-    # SPREAD MODEL (STRICT)
-    # =========================
-    missing_spread = [f for f in features_spread if f not in df.columns]
-    if missing_spread:
-        raise DataValidationError(
-            f"[BOND MODEL ERROR] Missing features (spread): {missing_spread}"
-        )
-
-    null_spread = [c for c in features_spread if df[c].isna().any()]
-    if null_spread:
-        raise DataValidationError(
-            f"[BOND MODEL ERROR] Null values (spread): {null_spread}"
-        )
-
-    df["pred_spread_5d"] = model_spread.predict(
-        xgb.DMatrix(df[features_spread])
+    print(
+        f"  [LAYER 2] Written {len(partition_log)} date partitions "
+        f"for run_id={run_id}"
     )
+    return partition_log
 
-    print(f"  [STAGE 7] pred_spread_5d computed for {len(df):,} rows.")
 
-    # =========================
-    # PD MODEL (STRICT)
-    # =========================
-    missing_pd = [f for f in features_pd if f not in df.columns]
-    if missing_pd:
-        raise DataValidationError(
-            f"[BOND MODEL ERROR] Missing features (pd): {missing_pd}"
+# =============================================================
+# ROLLING LAYER — load + update
+# =============================================================
+
+def load_rolling_layer(bucket: str) -> pd.DataFrame | None:
+    """
+    Load the current 30-day rolling serving parquet.
+
+    Returns None if the file does not exist (expected on first ever run).
+    Raises BondPipelineError if the key exists but cannot be read.
+    """
+    key = CONFIG["rolling_key"]
+    if not s3_key_exists(bucket, key):
+        print(
+            f"  [ROLLING] Rolling parquet not found: s3://{bucket}/{key} "
+            f"(expected on first run)."
         )
+        return None
 
-    null_pd = [c for c in features_pd if df[c].isna().any()]
-    if null_pd:
-        raise DataValidationError(
-            f"[BOND MODEL ERROR] Null values (pd): {null_pd}"
-        )
-
-    df["pred_pd_21d"] = model_pd.predict(
-        xgb.DMatrix(df[features_pd])
+    df          = read_parquet_from_s3(bucket, key)
+    df["date"]  = pd.to_datetime(df["date"])
+    print(
+        f"  [ROLLING] Loaded {len(df):,} rows from rolling parquet "
+        f"(date range: {df['date'].min().date()} <- {df['date'].max().date()})."
     )
-
-    print(f"  [STAGE 7] pred_pd_21d computed for {len(df):,} rows.")
-
     return df
 
 
-# =============================================================
-# LINEAGE METADATA
-# =============================================================
-
-def add_lineage_metadata(
-    df:     pd.DataFrame,
-    run_id: str,
-    run_ts: datetime,
+def update_rolling_layer(
+    new_features:   pd.DataFrame,
+    old_rolling_df: pd.DataFrame | None,
+    bucket:         str,
+    window_days:    int = 30,
 ) -> pd.DataFrame:
     """
-    Stamp every output row with pipeline lineage.
+    Merge new features into the rolling serving parquet and trim to window_days.
 
-    Guarantees:
-    - pipeline_run_id and record_created_at are identical across all rows
-      in the same run — enabling exact run reconstruction from either DB.
-    - fill_method_flag is preserved from Stage 5 and not overwritten here.
+    Safe for replay and backfill — new rows overwrite existing rows for the
+    same (bond_id, date) pair (keep="last" after sort). This ensures the
+    rolling parquet always reflects the latest recomputed state.
+
+    Steps:
+      1. Concatenate old rolling data + new features.
+      2. Deduplicate by (bond_id, date) — keep last (newest run wins).
+      3. Trim rows older than max(date) - window_days.
+      4. Sort by (bond_id, date) and write atomically to S3.
+
+    Args:
+        new_features:   Fully featured DataFrame for the processing window.
+        old_rolling_df: Existing rolling parquet (None if first run).
+        bucket:         S3 bucket name.
+        window_days:    Calendar days to retain (default 30).
+
+    Returns:
+        Updated rolling DataFrame after write.
+    """
+    if old_rolling_df is not None and not old_rolling_df.empty:
+        combined = pd.concat([old_rolling_df, new_features], ignore_index=True)
+    else:
+        combined = new_features.copy()
+
+    combined["date"] = pd.to_datetime(combined["date"])
+
+    # Deduplicate — new run takes precedence over prior rolling data
+    combined = (
+        combined
+        .sort_values(["bond_id", "date"])
+        .drop_duplicates(subset=["bond_id", "date"], keep="last")
+        .reset_index(drop=True)
+    )
+
+    # Trim to last window_days
+    max_date  = combined["date"].max()
+    cutoff    = max_date - pd.Timedelta(days=window_days)
+    rolling   = combined[combined["date"] > cutoff].reset_index(drop=True)
+
+    write_parquet_to_s3(rolling, bucket, CONFIG["rolling_key"])
+    print(
+        f"  [ROLLING] Updated rolling layer: {len(rolling):,} rows "
+        f"(cutoff={cutoff.date()}, max_date={max_date.date()})."
+    )
+    return rolling
+
+
+# =============================================================
+# LINEAGE — first pipeline metadata stamp
+# =============================================================
+
+def _add_pipeline_metadata(
+    df:      pd.DataFrame,
+    run_id:  str,
+    run_ts:  datetime,
+    mode:    str,
+) -> pd.DataFrame:
+    """
+    Stamp every output row with first-pipeline lineage.
+
+    These columns will be renamed to source_* by the second pipeline so
+    both pipeline lineage sets coexist in the final Snowflake/Postgres output.
+
+    run_mode is stamped here so Layer 2 consumers know which mode produced
+    a given partition (informational — does not affect second-pipeline mode).
     """
     df = df.copy()
-    df["pipeline_name"]    = CONFIG["pipeline_name"]
-    df["pipeline_run_id"]  = run_id                  # constant per run
-    df["data_source"]      = CONFIG["data_source"]
-    df["input_source"]     = CONFIG["input_source"]
-    df["transformation"]   = CONFIG["transformation"]
-    df["record_created_at"] = run_ts.isoformat()     # constant per run, UTC-aware
+    df["pipeline_name"]     = CONFIG["pipeline_name"]
+    df["pipeline_run_id"]   = run_id
+    df["data_source"]       = CONFIG["data_source"]
+    df["input_source"]      = CONFIG["input_source"]
+    df["transformation"]    = CONFIG["transformation"]
+    df["record_created_at"] = run_ts.isoformat()
+    df["run_mode"]          = mode
     return df
 
 
 # =============================================================
-# DATA VALIDATION (IMPROVED ALERTING)
+# MAIN PIPELINE  —  update_bonds_pipeline  (FIRST PIPELINE)
 # =============================================================
-def validate_output(df: pd.DataFrame, run_date: date_type, run_id: str = None) -> None:
+
+def update_bonds_pipeline(
+    start_date_override: str = None,
+    replay_from_raw: bool = False,
+) -> str:
     """
-    Lightweight validation before database writes.
-    Raises DataValidationError on any hard failure.
+    FIRST PIPELINE — Bond ingestion and feature engineering.
+
+    Mode detection (derived from parameters ONLY — never from data columns):
+    ┌──────────────────────────────────┬──────────────┐
+    │ Condition                        │ mode         │
+    ├──────────────────────────────────┼──────────────┤
+    │ replay_from_raw = True           │ "replay"     │
+    │ start_date_override provided     │ "backfill"   │
+    │ default (neither)                │ "incremental"│
+    └──────────────────────────────────┴──────────────┘
+
+    Outputs (written to S3 — NO Snowflake or Postgres writes):
+    - Layer 2 feature partitions (one per date per run_id)
+    - Updated 30-day rolling serving parquet
+    - Run metadata JSON
+    - Raw FRED snapshot + DGS10 history snapshot (normal/backfill only)
+
+    Args:
+        start_date_override: "YYYY-MM-DD" string. Required for replay mode.
+                             If provided without replay_from_raw=True <- backfill mode.
+        replay_from_raw:     True <- replay mode. Loads raw S3 snapshots
+                             instead of calling live APIs — deterministic.
+
+    Returns:
+        str: Status string for Airflow XCom
+             ("ALREADY_CURRENT" | "NO_NEW_ROWS" | "SUCCESS_<n>_ROWS")
+
+    Raises:
+        BondPipelineError:   For unrecoverable pipeline failures.
+        DataValidationError: For output data contract violations.
     """
+    pipeline_start = time.time()
+    run_ts         = utc_now()
+    today          = today_utc()
+    bucket         = CONFIG["s3_bucket"]
 
-    errors = []
-
-    # ── Check 1: Empty DataFrame ─────────────────────────────
-    if df.empty:
-        errors.append("Output DataFrame is empty — nothing to upload")
-
-    # ── Check 2: Freshness ───────────────────────────────────
+    # ──────────────────────────────────────────
+    # MODE DETECTION — single, explicit decision
+    # ──────────────────────────────────────────
+    if replay_from_raw:
+        mode = "replay"
+    elif start_date_override:
+        mode = "backfill"
     else:
-        max_date = pd.to_datetime(df["date"]).dt.date.max()
-        if max_date < run_date:
-            errors.append(
-                f"Freshness check failed: latest date {max_date}, expected >= {run_date}"
-            )
+        mode = "incremental"
 
-    # ── Check 3: fill_method_flag exists ─────────────────────
-    if "fill_method_flag" not in df.columns:
-        errors.append("fill_method_flag column is missing")
+    if mode == "replay" and not start_date_override:
+        raise BondPipelineError("Replay mode requires start_date_override.")
 
-    else:
-        valid_flags   = {"REAL", "FORWARD_FILLED", "BACKWARD_FILLED"}
-        invalid_flags = set(df["fill_method_flag"].unique()) - valid_flags
+    end_date = today
 
-        if invalid_flags:
-            errors.append(f"Unexpected fill_method_flag values: {invalid_flags}")
+    print(f"\n{'=' * 66}")
+    print(f"  BOND UPDATE PIPELINE (FIRST) START")
+    print(f"  mode                : {mode}")
+    print(f"  start_date_override : {start_date_override}")
+    print(f"  replay_from_raw     : {replay_from_raw}")
+    print(f"  end_date            : {end_date}")
+    print(f"{'=' * 66}\n")
 
-    # ── FINAL: Alert + Raise (ONLY ONCE) ─────────────────────
-    if errors:
-        send_alert(
-            "Bond pipeline validation failed",
-            level="CRITICAL",
-            context={
-                "run_id": run_id,
-                "errors": errors
-            }
-        )
-        raise DataValidationError("; ".join(errors))
-
-    # ── SUCCESS LOG ──────────────────────────────────────────
-    print(
-        f"  [VALIDATION] OK — {len(df):,} rows, "
-        f"max_date={max_date}, "
-        f"fill_flags={df['fill_method_flag'].value_counts().to_dict()}"
-    )
-
-def drop_metadata_for_serving(df):
-    drop_cols = [
-        "pipeline_name",
-        "pipeline_run_id",
-        "data_source",
-        "input_source",
-        "transformation",
-        "record_created_at",
-    ]
-    return df.drop(columns=[c for c in drop_cols if c in df.columns])
-
-
-# =============================================================
-# STAGE 8A — upload_to_snowflake (IMPROVED ALERTING)
-# =============================================================
-
-def upload_to_snowflake(df: pd.DataFrame, run_id: str = None) -> int:
-    """
-    Write new bond rows to Snowflake BONDS table using write_pandas.
-    Returns the number of rows successfully written.
-    Raises BondPipelineError on failure.
-    """
     try:
-        with get_snowflake_conn() as ctx:
-            success, _, nrows, _ = write_pandas(
-                ctx,
-                df,
-                CONFIG["snowflake_table"],
-                chunk_size       = CONFIG["snowflake_chunk"],
-                quote_identifiers = True,
+        # ══════════════════════════════════════════════════════════════
+        # STEP 1 — Load rolling layer (needed for watermark + DGS10 history)
+        # Non-critical: None is acceptable on first ever run.
+        # ══════════════════════════════════════════════════════════════
+        print("  [STEP 1] Loading rolling layer...")
+        old_rolling_df = load_rolling_layer(bucket)
+
+        # ══════════════════════════════════════════════════════════════
+        # STEP 2 — Determine processing window + run_id
+        # ══════════════════════════════════════════════════════════════
+        print("\n  [STEP 2] Determining processing window...")
+
+        if mode in ("replay", "backfill"):
+            start_date = pd.Timestamp(start_date_override).date()
+            print(
+                f"  [{mode.upper()}] Processing window: "
+                f"{start_date} <- {end_date}"
             )
 
-        if not success:
-            send_alert(
-                f"Snowflake write_pandas returned failure",
-                level="CRITICAL",
-                context={
-                    "run_id": run_id,
-                    "table": CONFIG["snowflake_table"],
-                    "rows_attempted": len(df)
-                }
-            )
-            raise BondPipelineError(
-                f"write_pandas returned failure for table={CONFIG['snowflake_table']}."
+        else:  # incremental
+            # Watermark from rolling parquet — self-contained, no Snowflake needed
+            if old_rolling_df is not None and not old_rolling_df.empty:
+                last_date = pd.to_datetime(old_rolling_df["date"]).dt.date.max()
+            else:
+                # First ever run — default to window_days ago
+                last_date = today - timedelta(days=CONFIG["window_days"])
+                print(
+                    f"  [INCREMENTAL] No rolling parquet found — "
+                    f"defaulting start to {last_date} ({CONFIG['window_days']} days ago)."
+                )
+
+            print(f"  [INCREMENTAL] Last processed date: {last_date}")
+            print(f"  [INCREMENTAL] Today              : {today}")
+
+            if last_date >= today:
+                print(
+                    "  [INCREMENTAL] Rolling parquet is current — no new data to process."
+                )
+                return "ALREADY_CURRENT"
+
+            start_date = last_date  # business days from last_date+1 generated below
+
+        # Resolve run_id — fresh for new runs, looked up for replay
+        if mode == "replay":
+            run_id = _resolve_run_id_for_replay(bucket, start_date)
+        else:
+            run_id = f"run_{run_ts.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+
+        print(f"  run_id: {run_id}")
+
+        # String forms for pd.date_range and FRED API calls
+        start_str = (
+            pd.Timestamp(start_date + timedelta(days=1)).strftime("%Y-%m-%d")
+            if mode == "incremental"
+            else pd.Timestamp(start_date).strftime("%Y-%m-%d")
+        )
+        end_str = end_date.strftime("%Y-%m-%d")
+
+        # ══════════════════════════════════════════════════════════════
+        # STEP 3 — Load base bond data from S3
+        # ══════════════════════════════════════════════════════════════
+        print("\n  [STEP 3] Loading base bond data from S3...")
+        base = load_base_bond_data(bucket)
+
+        # ══════════════════════════════════════════════════════════════
+        # STEP 4 — Generate daily bond rows (business day expansion)
+        # ══════════════════════════════════════════════════════════════
+        print("\n  [STEP 4] Generating daily bond rows...")
+        daily = generate_daily_rows(base, start_str, end_str)
+
+        if daily.empty:
+            print("  No business days in processing window — pipeline complete.")
+            return "NO_NEW_ROWS"
+
+        print(f"  Generated {len(daily):,} rows for window [{start_str}, {end_str}]")
+
+        # ══════════════════════════════════════════════════════════════
+        # STEP 5 — Load DGS10 warm-up history
+        # ══════════════════════════════════════════════════════════════
+        print("\n  [STEP 5] Loading DGS10 history for rolling warm-up...")
+        dgs10_history = load_dgs10_history(
+            start_date  = pd.Timestamp(start_str).date(),
+            run_id      = run_id,
+            mode        = mode,
+            bucket      = bucket,
+            old_rolling = old_rolling_df,
+        )
+
+        # ══════════════════════════════════════════════════════════════
+        # STEP 6 — Fetch DGS10 from FRED (or load S3 snapshot for replay)
+        # ══════════════════════════════════════════════════════════════
+        print("\n  [STEP 6] Fetching DGS10 data...")
+        dgs10_new = fetch_dgs10_from_fred(
+            start_date = start_str,
+            end_date   = end_str,
+            run_id     = run_id,
+            mode       = mode,
+            bucket     = bucket,
+        )
+
+        # ══════════════════════════════════════════════════════════════
+        # STEP 7 — Build DGS10 series with fill flags + rolling features
+        # ══════════════════════════════════════════════════════════════
+        print("\n  [STEP 7] Building DGS10 series with fill method flags...")
+        dgs10_series = build_dgs10_series(
+            history_df  = dgs10_history,
+            new_fred_df = dgs10_new,
+            start_date  = start_str,
+            end_date    = end_str,
+        )
+        daily["market_value"] = (
+            daily["bond_price"] * daily["units_outstanding"]
+        )
+        # Merge DGS10 enrichment into daily bond rows
+        daily = daily.merge(dgs10_series, on="date", how="left")
+
+        # ══════════════════════════════════════════════════════════════
+        # STEP 8 — Merge macro data
+        # ══════════════════════════════════════════════════════════════
+        print("\n  [STEP 8] Merging macro data...")
+        daily = merge_macro_data(daily, bucket)
+
+        if daily.empty:
+            raise DataValidationError(
+                "DataFrame is empty after macro merge — "
+                "check macro_data.csv date coverage."
             )
 
-        print(f"  [STAGE 8] Snowflake upload complete — {nrows:,} rows written.")
-        return nrows
+        # ══════════════════════════════════════════════════════════════
+        # STEP 9 — Stamp first-pipeline lineage metadata
+        # ══════════════════════════════════════════════════════════════
+        print("\n  [STEP 9] Stamping first-pipeline lineage metadata...")
+        daily = _add_pipeline_metadata(daily, run_id, run_ts, mode)
 
-    except BondPipelineError:
+        # Convert date to Python date for consistent partition logic
+        daily["date"] = pd.to_datetime(daily["date"]).dt.date
+
+        # Select output columns — only those present in the DataFrame
+        df_output = daily[
+            [c for c in LAYER2_OUTPUT_COLS if c in daily.columns]
+        ].copy()
+
+        output_rows = len(df_output)
+        print(f"\n  Output rows: {output_rows:,}")
+
+        # ══════════════════════════════════════════════════════════════
+        # STEP 10 — Write Layer 2 feature partitions
+        # One parquet per date per run_id.
+        # Raises BondPipelineError on S3 write failure.
+        # ══════════════════════════════════════════════════════════════
+        print(f"\n  [STEP 10] Writing Layer 2 feature partitions...")
+        partition_log = retry_with_backoff(
+            lambda: write_layer2_features(df_output, bucket, run_id),
+            retries=3,
+            critical_name="Layer 2 feature partition write",
+            run_id=run_id,
+        )
+
+        # ══════════════════════════════════════════════════════════════
+        # STEP 11 — Update 30-day rolling serving parquet
+        # Safe deduplication ensures replay/backfill does not corrupt it.
+        # ══════════════════════════════════════════════════════════════
+        print("\n  [STEP 11] Updating rolling serving layer...")
+        df_for_rolling    = df_output.copy()
+        df_for_rolling["date"] = pd.to_datetime(df_for_rolling["date"])
+
+        retry_with_backoff(
+            lambda: update_rolling_layer(
+                new_features   = df_for_rolling,
+                old_rolling_df = old_rolling_df,
+                bucket         = bucket,
+                window_days    = CONFIG["window_days"],
+            ),
+            retries=3,
+            critical_name="Rolling layer S3 write",
+            run_id=run_id,
+        )
+
+        # ══════════════════════════════════════════════════════════════
+        # STEP 12 — Save run metadata (for future replay resolution)
+        # Non-fatal. Replay mode does NOT overwrite prior metadata.
+        # ══════════════════════════════════════════════════════════════
+        if mode != "replay":
+            _save_run_metadata(
+                bucket     = bucket,
+                run_id     = run_id,
+                mode       = mode,
+                start_date = pd.Timestamp(start_str).date(),
+                end_date   = end_date,
+                nrows      = output_rows,
+                run_ts     = run_ts,
+            )
+
+        # ══════════════════════════════════════════════════════════════
+        # STEP 13 — Pipeline success
+        # ══════════════════════════════════════════════════════════════
+        processing_time = round(time.time() - pipeline_start, 2)
+
+        fill_summary = (
+            df_output["fill_method_flag"].value_counts().to_dict()
+            if "fill_method_flag" in df_output.columns else {}
+        )
+
+        print(f"\n{'=' * 66}")
+        print(f"  BOND UPDATE PIPELINE SUCCESS")
+        print(f"  run_id             : {run_id}")
+        print(f"  mode               : {mode}")
+        print(f"  rows produced      : {output_rows:,}")
+        print(f"  date partitions    : {len(partition_log)}")
+        print(f"  window             : {start_str} <- {end_str}")
+        print(f"  duration           : {processing_time}s")
+        print(f"  fill_flags         : {fill_summary}")
+        print(f"  Layer 2            : OK")
+        print(f"  Rolling parquet    : OK")
+        print(f"{'=' * 66}\n")
+
+        send_info_alert(
+            "Bond update pipeline completed successfully",
+            context={
+                "run_id":      run_id,
+                "mode":        mode,
+                "rows":        output_rows,
+                "partitions":  len(partition_log),
+                "date_range":  f"{start_str} <- {end_str}",
+                "fill_flags":  fill_summary,
+                "duration_s":  processing_time,
+            },
+        )
+
+        return f"SUCCESS_{output_rows}_ROWS"
+
+    except (BondPipelineError, DataValidationError):
+        # Already alerted inside the raising function — just re-raise cleanly
         raise
+
     except Exception as exc:
-        send_alert(
-            f"Snowflake upload failed with exception",
-            level="CRITICAL",
+        processing_time = round(time.time() - pipeline_start, 2)
+
+        send_critical_alert(
+            "Bond update pipeline failed with unhandled exception",
             context={
-                "run_id": run_id,
-                "table": CONFIG["snowflake_table"],
-                "error": str(exc)
-            }
+                "mode":     mode,
+                "duration": f"{processing_time}s",
+                "error":    str(exc),
+            },
         )
-        raise BondPipelineError(f"Snowflake upload failed: {exc}") from exc
 
-
-# =============================================================
-# STAGE 8B — upload_to_postgres
-# =============================================================
-
-def upload_to_postgres(df: pd.DataFrame) -> None:
-    """
-    Write new bond rows to PostgreSQL using COPY FROM STDIN.
-
-    Design:
-    - Snowflake = full metadata
-    - Postgres  = serving layer (NO metadata)
-    - Strict schema enforcement (fail-fast)
-    - Non-fatal: errors logged but don't raise (Snowflake is source of truth)
-    """
-
-    try:
-        # =========================
-        # STEP 1: REMOVE METADATA
-        # =========================
-        df_clean = drop_metadata_for_serving(df.copy())
-
-        with get_postgre_conn() as pg_conn:
-            with pg_conn.cursor() as pg_cur:
-
-                # =========================
-                # STEP 2: FETCH DB SCHEMA
-                # =========================
-                pg_cur.execute(
-                    """
-                    SELECT column_name
-                    FROM information_schema.columns
-                    WHERE table_schema = %s
-                      AND table_name   = %s
-                    ORDER BY ordinal_position
-                    """,
-                    (CONFIG["postgres_schema"], CONFIG["postgres_table"]),
-                )
-
-                pg_cols_order = [
-                    row[0] for row in pg_cur.fetchall()
-                    if row[0] != "id"
-                ]
-
-                if not pg_cols_order:
-                    raise RuntimeError(
-                        f"No columns found for "
-                        f"{CONFIG['postgres_schema']}.{CONFIG['postgres_table']}"
-                    )
-
-                # =========================
-                # STEP 3: VALIDATE SCHEMA (FAIL-FAST)
-                # =========================
-                missing = set(pg_cols_order) - set(df_clean.columns)
-                if missing:
-                    raise ValueError(
-                        f"[BONDS POSTGRES ERROR] Missing columns: {missing}"
-                    )
-
-                # =========================
-                # STEP 4: ENFORCE SCHEMA
-                # =========================
-                df_pg = df_clean[pg_cols_order].copy()
-
-                # =========================
-                # STEP 5: COPY TO POSTGRES
-                # =========================
-                buf = StringIO()
-                df_pg.to_csv(buf, index=False, header=False)
-                buf.seek(0)
-
-                quoted_cols = [f'"{col}"' for col in pg_cols_order]
-
-                copy_sql = (
-                    f'COPY {CONFIG["postgres_schema"]}.{CONFIG["postgres_table"]} '
-                    f'({", ".join(quoted_cols)}) '
-                    f'FROM STDIN WITH CSV'
-                )
-
-                with pg_cur.copy(copy_sql) as copy:
-                    copy.write(buf.getvalue())
-
-            pg_conn.commit()
-
-        print(f"[POSTGRES] Bonds upload complete — {len(df_pg):,} rows written.")
-
-    except Exception as exc:
-        # Non-fatal: Snowflake is system of record, Postgres is serving layer
-        print(f"[POSTGRES][WARN] Bonds upload failed (Snowflake preserved): {exc}")
-        # No alert for Postgres failure - prevents noise, Snowflake is source of truth
-
-
-# =============================================================
-# MAIN PIPELINE  —  update_bonds_pipeline (WITH SUCCESS ALERT)
-# =============================================================
-
-def update_bonds_pipeline(start_date_override=None) -> str:
-    """
-    Main Airflow-callable entry point.
-
-    Execution order
-    ---------------
-    STAGE 1  -> Load base bond data from S3
-    STAGE 2  -> Generate daily bond rows (business day expansion)
-    STAGE 3  -> Load last 20 DGS10 rows from Snowflake (rolling warm-up)
-    STAGE 4  -> Fetch new DGS10 from FRED
-    STAGE 5  -> Apply fill logic + compute DGS10_ma / dgs10_anom + fill_method_flag
-    STAGE 6  -> Merge macro data
-    STAGE 7  -> Run ML model predictions (spread + PD)
-    STAGE 8  -> Validate output, attach lineage, upload to Snowflake + PostgreSQL
-
-    Returns a status string suitable for Airflow task logging.
-    """
-
-    # ── 0. INIT ────────────────────────────────────────────────────────
-    run_ts  = utc_now()
-    run_id  = f"run_{run_ts.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-    today   = today_utc()
-    bucket  = CONFIG["s3_bucket"]
-
-    print(f"\n{'=' * 66}")
-    print(f"  BOND PIPELINE START   run_id={run_id}")
-    print(f"  run_date={today}")
-    print(f"{'=' * 66}\n")
-
-    # ── Determine incremental date range from Snowflake watermark ───────
-    try:
-        with get_snowflake_conn() as ctx:
-            with ctx.cursor() as cs:
-                cs.execute(
-                    f'SELECT MAX("date") FROM "{CONFIG["snowflake_table"]}"'
-                )
-                last_date_sf = cs.fetchone()[0]
-    except Exception as exc:
-        send_alert(
-            f"Could not query Snowflake watermark",
-            level="CRITICAL",
-            context={"run_id": run_id, "error": str(exc)}
-        )
-        raise BondPipelineError(
-            f"Could not query Snowflake watermark: {exc}"
-        ) from exc
-
-    last_date_sf = (
-        pd.Timestamp(last_date_sf).date()
-        if last_date_sf
-        else pd.Timestamp("1970-01-01").date()
-    )
-
-    if start_date_override:
-        start_date = pd.to_datetime(start_date_override).date()
-    else:
-        start_date = last_date_sf + timedelta(days=1)
-
-    print(f"Override mode: {bool(start_date_override)}")
-
-    if start_date >= today:
-        print("  [SKIP] Already up to date — no new business days to process.")
+        print(f"\n{'=' * 66}")
+        print(f"  BOND UPDATE PIPELINE FAILED")
+        print(f"  mode     : {mode}")
+        print(f"  error    : {exc}")
+        print(f"  duration : {processing_time}s")
         print(f"{'=' * 66}\n")
-        
-        # INFO alert for skip (not noisy)
-        send_alert(
-            f"No new data to process",
-            level="INFO",
-            context={"run_id": run_id, "start_date": str(start_date), "today": str(today)},
-        )
-        return "ALREADY_UPDATED"
 
-    print(f"  Incremental range: {start_date} -> {today}")
-
-    start_str = start_date.strftime("%Y-%m-%d")
-    end_str   = today.strftime("%Y-%m-%d")
-
-    # ── STAGE 1: Load base bond data ─────────────────────────────────────
-    print("\n[ STAGE 1 ] Load base bond data from S3")
-    base = load_base_bond_data(bucket)
-
-    # ── STAGE 2: Generate daily rows ─────────────────────────────────────
-    print("\n[ STAGE 2 ] Generate daily bond rows")
-    daily = generate_daily_rows(base, start_str, end_str)
-
-    # Weekday filter (original pipeline logic)
-    daily = daily[daily["date"].dt.weekday < 5].copy()
-    if not start_date_override:
-        daily = daily[daily["date"].dt.date > last_date_sf].copy()
-
-    if daily.empty:
-        print("  No new weekday rows after filtering.")
-        print(f"{'=' * 66}\n")
-        return "NO_NEW_ROWS"
-
-    # ── STAGE 3: Load DGS10 history from Snowflake ───────────────────────
-    print("\n[ STAGE 3 ] Load last 20 days DGS10 from Snowflake")
-    dgs10_history = load_dgs10_history_from_snowflake(start_date)
-
-    # ── STAGE 4: Fetch new DGS10 from FRED (with run_id for alerts) ──────
-    print("\n[ STAGE 4 ] Fetch new DGS10 from FRED")
-    dgs10_new = fetch_dgs10_from_fred(start_str, end_str, run_id=run_id)
-
-    # ── STAGE 5: Build DGS10 series with fill flags ──────────────────────
-    print("\n[ STAGE 5 ] Apply fill logic + compute rolling features")
-    dgs10_series = build_dgs10_series(
-        history_df  = dgs10_history,
-        new_fred_df = dgs10_new,
-        start_date  = start_str,
-        end_date    = end_str,
-    )
-
-    # Merge DGS10 enrichment into daily bond rows
-    daily = daily.merge(dgs10_series, on="date", how="left")
-
-    # ── STAGE 6: Merge macro data ────────────────────────────────────────
-    print("\n[ STAGE 6 ] Merge macro data")
-    daily = merge_macro_data(daily, bucket)
-
-    if daily.empty:
-        raise DataValidationError(
-            "DataFrame is empty after macro merge — check macro_data.csv date coverage."
-        )
-
-    # ── STAGE 7: Run ML model predictions ────────────────────────────────
-    print("\n[ STAGE 7 ] Run ML model predictions")
-    predicted_df = run_predictions(daily, bucket)
-
-    # ── STAGE 8: Validate + attach lineage + upload ───────────────────────
-    print("\n[ STAGE 8 ] Validate, attach lineage, upload")
-
-    # Attach lineage metadata to every output row
-    predicted_df = add_lineage_metadata(predicted_df, run_id, run_ts)
-
-    # Convert date to Python date for DB compatibility (original logic)
-    predicted_df["date"] = pd.to_datetime(predicted_df["date"]).dt.date
-
-    # Select final columns — only include those present in the DataFrame
-    final_cols   = CONFIG["final_cols"]
-    df_to_upload = predicted_df[
-        [c for c in final_cols if c in predicted_df.columns]
-    ].copy()
-
-    # Data validation before any DB write (with run_id for alerts)
-    validate_output(df_to_upload, today, run_id=run_id)
-
-    # Upload to Snowflake (primary store — raises on failure) (with run_id for alerts)
-    nrows = upload_to_snowflake(df_to_upload, run_id=run_id)
-
-    # Upload to PostgreSQL (secondary store — non-fatal on failure)
-    upload_to_postgres(df_to_upload)
-
-    # ── SUCCESS ALERT (INFO level, once per run) ─────────────────────────
-    fill_summary = df_to_upload["fill_method_flag"].value_counts().to_dict() \
-        if "fill_method_flag" in df_to_upload.columns else {}
-    
-    send_alert(
-        f"Pipeline completed successfully",
-        level="INFO",
-        context={
-            "run_id": run_id,
-            "rows_written": nrows,
-            "date_range": f"{start_date} -> {today}",
-            "fill_flags": fill_summary
-        },
-    )
-
-    print(f"\n{'=' * 66}")
-    print(f"  BOND PIPELINE SUCCESS   run_id={run_id}")
-    print(f"  rows written : {nrows:,}")
-    print(f"  date range   : {start_date} -> {today}")
-    print(f"  fill flags   : {fill_summary}")
-    print(f"{'=' * 66}\n")
-
-    return f"SUCCESS_{nrows}_ROWS"
+        # Re-raise so Airflow marks the task as FAILED
+        raise

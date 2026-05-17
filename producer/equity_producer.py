@@ -525,6 +525,13 @@ def fetch_snapshot_with_retry(
                     level="CRITICAL"
                 )
                 
+                log("WARNING", "Batch fully failed — all tickers sent to DLQ", {
+                    "batch_id": batch_id,
+                    "total_tickers": len(tickers),
+                    "attempts": CONFIG["fetch_max_retries"],
+                    "error": str(exc),
+                })
+                
                 # Send entire batch to DLQ
                 for ticker in tickers:
                     dlq_buffer.append({

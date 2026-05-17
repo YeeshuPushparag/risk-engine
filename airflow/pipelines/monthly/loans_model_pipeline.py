@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 
 S3_BUCKET = "yeeshu-loan-bucket"
 OUTPUT_TABLE = "LOANS"
+HISTORY_TABLE = "LOANS_HISTORY"
 s3 = boto3.client("s3")
 
 
@@ -29,7 +30,7 @@ def send_critical_alert(message: str, context: dict = None):
     - S3 loan enriched data load failure
     - Snowflake watermark query failure
     - Model/feature/encoder loading failures
-    - Snowflake MERGE failures (system of record)
+    - Snowflake table write failures (system of record)
     - Complete pipeline failures
     """
     payload = {
@@ -79,13 +80,17 @@ def send_success_alert(context: dict = None):
         try:
             run_id = context.get('run_id', 'unknown') if context else 'unknown'
             snowflake_rows = context.get('snowflake_rows', 0)
+            history_rows = context.get('history_rows', 0)
             postgres_status = context.get('postgres_status', 'UNKNOWN')
             duration = context.get('duration_seconds', 0)
+            mode = context.get('mode', 'incremental')
             
             text = f"*[SUCCESS]* loans_model_pipeline\n" \
-                   f"✅ FINAL LOAN PIPELINE completed successfully\n" \
+                   f"FINAL LOAN PIPELINE completed successfully\n" \
                    f"run_id: {run_id}\n" \
-                   f"Snowflake rows: {snowflake_rows:,}\n" \
+                   f"mode: {mode}\n" \
+                   f"Snowflake clean rows: {snowflake_rows:,}\n" \
+                   f"Snowflake history rows: {history_rows:,}\n" \
                    f"Postgres: {postgres_status}\n" \
                    f"duration: {duration}s"
             requests.post(webhook, json={"text": text}, timeout=3)
@@ -127,85 +132,289 @@ def retry_with_backoff(func, retries=3, backoff_factor=2, exceptions=(Exception,
 
 
 # ============================================================
-# SNOWFLAKE IDEMPOTENT WRITE (MERGE - NO DUPLICATES)
+# SNOWFLAKE WAREHOUSE HELPERS (DETERMINISTIC + TRANSACTIONAL)
 # ============================================================
-def write_to_snowflake_idempotent(df, table_name, key_columns, run_id=None, chunk_size=100000):
+def write_to_snowflake_history(df, table_name, run_id=None, chunk_size=100000):
     """
-    Write to Snowflake with MERGE logic to prevent duplicates.
-    Sends CRITICAL alert on failure.
+    Append-only write to history table.
+    ALWAYS appends - NEVER deletes.
+    Contains run_mode and full lineage metadata.
     """
     if df.empty:
         return 0
     
-    temp_table = f"{table_name}_TEMP_{int(time.time())}"
-    
     try:
         with get_snowflake_conn() as ctx:
             with ctx.cursor() as cs:
-                # Step 1: Create temp table with same structure
-                cs.execute(f"""
-                    CREATE TEMPORARY TABLE {temp_table} 
-                    LIKE {table_name}
-                """)
+                # Write to history table (append-only)
+                write_pandas(ctx, df, table_name, chunk_size=chunk_size, quote_identifiers=True)
                 
-                # Step 2: Write to temp table
-                write_pandas(ctx, df, temp_table, chunk_size=chunk_size, quote_identifiers=True)
+                # Get row count
+                cs.execute(f"SELECT COUNT(*) FROM {table_name}")
+                total_rows = cs.fetchone()[0]
                 
-                # Step 3: Get column list (exclude ID column if exists)
-                cs.execute(f"""
-                    SELECT COLUMN_NAME 
-                    FROM INFORMATION_SCHEMA.COLUMNS 
-                    WHERE TABLE_NAME = '{table_name}'
-                    AND COLUMN_NAME != 'ID'
-                """)
-                columns = [row[0] for row in cs.fetchall()]
-                col_list = ', '.join([f'"{c}"' for c in columns])
-                
-                # Step 4: Build MERGE statement
-                merge_condition = ' AND '.join([f'target."{col}" = source."{col}"' for col in key_columns])
-                update_set = ', '.join([f'target."{col}" = source."{col}"' for col in columns])
-                insert_cols = ', '.join([f'source."{col}"' for col in columns])
-                
-                merge_sql = f"""
-                    MERGE INTO {table_name} AS target
-                    USING {temp_table} AS source
-                    ON {merge_condition}
-                    WHEN MATCHED THEN UPDATE SET {update_set}
-                    WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({insert_cols})
-                """
-                
-                # Step 5: Execute MERGE
-                cs.execute(merge_sql)
-                
-                # Step 6: Get affected rows count
-                cs.execute("SELECT ROW_COUNT()")
-                affected_rows = cs.fetchone()[0]
-                
-                print(f"  Snowflake MERGE {table_name}: {affected_rows} rows affected")
-                return affected_rows
+                print(f"  Snowflake HISTORY append {table_name}: {len(df)} rows added (total: {total_rows})")
+                return len(df)
                 
     except Exception as exc:
         send_critical_alert(
-            f"Snowflake MERGE failed for table {table_name}",
+            f"Snowflake HISTORY write failed for table {table_name}",
             context={"run_id": run_id, "table": table_name, "rows": len(df), "error": str(exc)}
         )
         raise
 
 
-# ============================================================
-# POSTGRES WRITE WITH RETRY (NO ALERTS - NON-CRITICAL)
-# ============================================================
-def write_to_postgres_with_retry(df, table_name, retries=3):
+def transactional_delete_insert_snowflake_clean(df, table_name, target_months, run_id=None, chunk_size=100000):
     """
-    Write to Postgres with retry logic.
-    Returns success flag and error message if any.
-    NO ALERTS - Postgres is serving layer, Snowflake is source of truth.
+    TRANSACTIONAL delete + insert for Snowflake clean table.
+    
+    Args:
+        df: DataFrame to insert
+        table_name: Target table name
+        target_months: List of Period objects to delete/replace
+        run_id: Run identifier for alerts
+    
+    Returns:
+        Number of rows inserted
+    
+    Transaction guarantees:
+        - BEGIN transaction
+        - DELETE rows for target_months
+        - INSERT new rows
+        - COMMIT on success
+        - ROLLBACK on failure
+    """
+    if df.empty:
+        return 0
+    
+    if not target_months:
+        # No months specified - simple insert
+        return write_to_snowflake_clean(df, table_name, run_id, chunk_size)
+    
+    try:
+        with get_snowflake_conn() as ctx:
+            with ctx.cursor() as cs:
+                # Begin transaction
+                cs.execute("BEGIN")
+                
+                try:
+                    # Delete rows for target months
+                    month_conditions = []
+                    for period in target_months:
+                        start_date = period.start_time.strftime("%Y-%m-%d")
+                        end_date = period.end_time.strftime("%Y-%m-%d")
+                        month_conditions.append(f'("date" >= \'{start_date}\' AND "date" <= \'{end_date}\')')
+                    
+                    delete_condition = " OR ".join(month_conditions)
+                    delete_sql = f'DELETE FROM {table_name} WHERE {delete_condition}'
+                    cs.execute(delete_sql)
+                    deleted_rows = cs.rowcount
+                    print(f"    Deleted {deleted_rows} rows from {table_name} for {len(target_months)} months")
+                    
+                    # Insert new rows
+                    write_pandas(ctx, df, table_name, chunk_size=chunk_size, quote_identifiers=True)
+                    inserted_rows = len(df)
+                    print(f"    Inserted {inserted_rows} rows into {table_name}")
+                    
+                    # Commit transaction
+                    cs.execute("COMMIT")
+                    print(f"  TRANSACTION COMMITTED: {table_name} updated successfully")
+                    return inserted_rows
+                    
+                except Exception as e:
+                    # Rollback on any error
+                    cs.execute("ROLLBACK")
+                    print(f"  TRANSACTION ROLLED BACK: {table_name} update failed")
+                    raise e
+                
+    except Exception as exc:
+        send_critical_alert(
+            f"Snowflake transactional DELETE+INSERT failed for table {table_name}",
+            context={"run_id": run_id, "table": table_name, "rows": len(df), "target_months": [str(m) for m in target_months], "error": str(exc)}
+        )
+        raise
+
+
+def write_to_snowflake_clean(df, table_name, run_id=None, chunk_size=100000):
+    """
+    Simple insert to clean table (non-transactional, assumes no conflict).
+    Used for incremental append where months are guaranteed new.
+    """
+    if df.empty:
+        return 0
+    
+    try:
+        with get_snowflake_conn() as ctx:
+            with ctx.cursor() as cs:
+                write_pandas(ctx, df, table_name, chunk_size=chunk_size, quote_identifiers=True)
+                print(f"  Snowflake CLEAN insert {table_name}: {len(df)} rows added")
+                return len(df)
+                
+    except Exception as exc:
+        send_critical_alert(
+            f"Snowflake CLEAN write failed for table {table_name}",
+            context={"run_id": run_id, "table": table_name, "rows": len(df), "error": str(exc)}
+        )
+        raise
+
+
+def get_processed_months_from_clean_table(table_name, months_to_check, run_id=None):
+    """
+    Check which months already exist in clean table.
+    Returns set of months that are already present.
+    """
+    if not months_to_check:
+        return set()
+    
+    try:
+        with get_snowflake_conn() as ctx:
+            with ctx.cursor() as cs:
+                # Build month list for IN clause
+                month_strs = [m.strftime("%Y-%m") for m in months_to_check]
+                month_conditions = [f"TO_VARCHAR(DATE_TRUNC('MONTH', \"date\"), 'YYYY-MM') = '{ms}'" for ms in month_strs]
+                where_clause = " OR ".join(month_conditions)
+                
+                query = f"""
+                    SELECT DISTINCT TO_VARCHAR(DATE_TRUNC('MONTH', "date"), 'YYYY-MM') as month
+                    FROM {table_name}
+                    WHERE {where_clause}
+                """
+                cs.execute(query)
+                existing_month_strs = [row[0] for row in cs.fetchall()]
+                
+                # Convert back to Period
+                existing_months = {pd.Period(ms, freq="M") for ms in existing_month_strs}
+                return existing_months
+                
+    except Exception as exc:
+        send_critical_alert(
+            f"Snowflake month check failed for {table_name}",
+            context={"run_id": run_id, "table": table_name, "error": str(exc)}
+        )
+        raise
+
+
+# ============================================================
+# POSTGRES HELPERS (TRANSACTIONAL + DETERMINISTIC)
+# ============================================================
+def transactional_delete_insert_postgres(df, table_name, target_months, retries=3):
+    """
+    TRANSACTIONAL delete + insert for Postgres serving table.
+    
+    Args:
+        df: DataFrame to insert (already stripped of metadata)
+        table_name: Postgres table name
+        target_months: List of Period objects to delete/replace
+        retries: Number of retry attempts
+    
+    Returns:
+        (success_flag, error_message)
+    
+    Transaction guarantees:
+        - BEGIN transaction
+        - DELETE rows for target_months
+        - INSERT new rows
+        - COMMIT on success
+        - ROLLBACK on failure
+    """
+    if df.empty:
+        return True, "Empty DataFrame - nothing to write"
+    
+    if not target_months:
+        # No months specified - simple append
+        return write_to_postgres_append(df, table_name, retries)
+    
+    BATCH_SIZE = 100_000
+    
+    for attempt in range(retries + 1):
+        try:
+            with get_postgre_conn() as pg_conn:
+                with pg_conn.cursor() as cur:
+                    # Begin transaction
+                    cur.execute("BEGIN")
+                    
+                    try:
+                        # Delete rows for target months
+                        month_conditions = []
+                        for period in target_months:
+                            start_date = period.start_time.strftime("%Y-%m-%d")
+                            end_date = period.end_time.strftime("%Y-%m-%d")
+                            month_conditions.append(f'(month >= \'{start_date}\' AND month <= \'{end_date}\')')
+                        
+                        delete_condition = " OR ".join(month_conditions)
+                        delete_sql = f'DELETE FROM {table_name} WHERE {delete_condition}'
+                        cur.execute(delete_sql)
+                        deleted_rows = cur.rowcount
+                        print(f"    Deleted {deleted_rows} rows from Postgres {table_name} for {len(target_months)} months")
+                        
+                        # Fetch schema order
+                        cur.execute(f"""
+                            SELECT column_name
+                            FROM information_schema.columns
+                            WHERE table_schema='public'
+                            AND table_name='{table_name}'
+                            ORDER BY ordinal_position
+                        """)
+                        
+                        cols = [r[0] for r in cur.fetchall() if r[0] != "id"]
+                        
+                        if not cols:
+                            raise RuntimeError(f"No columns found for {table_name}")
+                        
+                        # Validate schema
+                        missing = set(cols) - set(df.columns)
+                        if missing:
+                            raise ValueError(f"Missing columns for {table_name}: {missing}")
+                        
+                        # Enforce schema order
+                        df_pg = df[cols].copy()
+                        
+                        quoted_cols = [f'"{c}"' for c in cols]
+                        copy_sql = f"COPY public.{table_name} ({','.join(quoted_cols)}) FROM STDIN WITH CSV"
+                        
+                        # Batch COPY
+                        for start in range(0, len(df_pg), BATCH_SIZE):
+                            chunk = df_pg.iloc[start:start + BATCH_SIZE]
+                            buf = StringIO()
+                            chunk.to_csv(buf, index=False, header=False)
+                            buf.seek(0)
+                            
+                            with cur.copy(copy_sql) as copy:
+                                copy.write(buf.getvalue())
+                        
+                        # Commit transaction
+                        pg_conn.commit()
+                        print(f"  TRANSACTION COMMITTED: Postgres {table_name} updated with {len(df)} rows")
+                        return True, None
+                        
+                    except Exception as e:
+                        # Rollback on any error
+                        cur.execute("ROLLBACK")
+                        pg_conn.commit()
+                        print(f"  TRANSACTION ROLLED BACK: Postgres {table_name} update failed")
+                        raise e
+                        
+        except Exception as e:
+            if attempt < retries:
+                wait_time = 2 ** attempt
+                print(f"  Postgres retry {attempt + 1}/{retries} after {wait_time}s: {e}")
+                time.sleep(wait_time)
+            else:
+                print(f"  Postgres {table_name} failed after {retries} retries: {e}")
+                return False, str(e)
+    
+    return False, "Max retries exceeded"
+
+
+def write_to_postgres_append(df, table_name, retries=3):
+    """
+    Simple append to Postgres (non-transactional, assumes months are new).
+    Used for incremental mode where months are guaranteed new.
     """
     if df.empty:
         return True, "Empty DataFrame - nothing to write"
     
     BATCH_SIZE = 100_000
-    last_error = None
     
     for attempt in range(retries + 1):
         try:
@@ -225,18 +434,15 @@ def write_to_postgres_with_retry(df, table_name, retries=3):
                     if not cols:
                         raise RuntimeError(f"No columns found for {table_name}")
                     
-                    # Validate schema
                     missing = set(cols) - set(df.columns)
                     if missing:
-                        raise ValueError(f"[POSTGRES ERROR] Missing columns for {table_name}: {missing}")
+                        raise ValueError(f"Missing columns for {table_name}: {missing}")
                     
-                    # Enforce schema order
                     df_pg = df[cols].copy()
                     
                     quoted_cols = [f'"{c}"' for c in cols]
                     copy_sql = f"COPY public.{table_name} ({','.join(quoted_cols)}) FROM STDIN WITH CSV"
                     
-                    # Batch COPY
                     for start in range(0, len(df_pg), BATCH_SIZE):
                         chunk = df_pg.iloc[start:start + BATCH_SIZE]
                         buf = StringIO()
@@ -248,19 +454,19 @@ def write_to_postgres_with_retry(df, table_name, retries=3):
                     
                 pg_conn.commit()
             
-            print(f"[POSTGRES {table_name}] Uploaded {len(df)} rows successfully")
+            print(f"[POSTGRES {table_name}] Appended {len(df)} rows successfully")
             return True, None
             
         except Exception as e:
-            last_error = e
             if attempt < retries:
                 wait_time = 2 ** attempt
                 print(f"  Postgres retry {attempt + 1}/{retries} after {wait_time}s: {e}")
                 time.sleep(wait_time)
             else:
                 print(f"  Postgres {table_name} failed after {retries} retries: {e}")
+                return False, str(e)
     
-    return False, str(last_error)
+    return False, "Max retries exceeded"
 
 
 # ============================================================
@@ -382,7 +588,7 @@ def enforce_snowflake_types(df):
 
 
 def drop_metadata_for_serving(df):
-    """Remove metadata columns for serving layer."""
+    """Remove metadata columns for serving layer (Postgres)."""
     drop_cols = [
         "pipeline_name",
         "pipeline_run_id",
@@ -390,14 +596,16 @@ def drop_metadata_for_serving(df):
         "input_source",
         "transformation",
         "record_created_at",
+        "run_mode",
     ]
     return df.drop(columns=[c for c in drop_cols if c in df.columns])
 
 
-def add_pipeline_metadata(df, run_id):
+def add_pipeline_metadata(df, run_id, mode):
     """Add pipeline metadata to DataFrame."""
     df["pipeline_name"] = "loans_model_pipeline"
     df["pipeline_run_id"] = run_id
+    df["run_mode"] = mode
     df["data_source"] = "s3 + snowflake"
     df["input_source"] = "loan_enriched + macro"
     df["transformation"] = "loan_model_v1"
@@ -405,30 +613,121 @@ def add_pipeline_metadata(df, run_id):
     return df
 
 
+def remove_run_mode_from_clean(df):
+    """Remove run_mode column for clean table (history-only column)."""
+    if "run_mode" in df.columns:
+        return df.drop(columns=["run_mode"])
+    return df
+
+
 # ============================================================
-# MAIN PIPELINE (WITH CRITICAL + SUCCESS ALERTS)
+# WATERMARK HELPERS
 # ============================================================
-def run_loans_model_pipeline():
+def get_watermark_from_clean_table(table_name, run_id=None):
     """
-    Complete production-grade loans model pipeline with:
-    1. Retry on all external calls (S3, Snowflake, Postgres)
-    2. Idempotent Snowflake writes (MERGE, not append) - NO DUPLICATES
-    3. Safe model handling (WARNING, not HARD FAIL)
-    4. Slack alerts for CRITICAL failures AND SUCCESS completion
-    5. Run-level tracking with run_id
-    6. Fixed query bug (COALESCE for empty LOANS table)
+    Get watermark (latest processed month) from LOANS clean table.
+    Returns Period or None if table empty.
+    """
+    try:
+        with get_snowflake_conn() as ctx:
+            cur = ctx.cursor()
+            cur.execute(f'SELECT COALESCE(MAX("date"), \'1900-01-01\') FROM "{table_name}"')
+            last_date = cur.fetchone()[0]
+            
+            if last_date and last_date != '1900-01-01':
+                return pd.Period(last_date, freq="M")
+            return None
+            
+    except Exception as exc:
+        send_critical_alert(
+            f"Snowflake watermark query failed for {table_name}",
+            context={"run_id": run_id, "table": table_name, "error": str(exc)}
+        )
+        raise
+
+
+# ============================================================
+# MAIN PIPELINE (WITH DETERMINISTIC + TRANSACTIONAL WRITES)
+# ============================================================
+def run_loans_model_pipeline(
+    start_date_override=None,
+    replay=False,
+):
+    """
+    Complete production-grade loans model pipeline with deterministic replay/backfill.
+    
+    Args:
+        start_date_override: datetime or date string (YYYY-MM-DD) for backfill/replay start
+        replay: If True, force full recompute from start_date_override
+    
+    Returns:
+        str: Pipeline status
+    
+    Mode Determination:
+        - replay=True: Full deterministic recompute from start_date_override
+        - start_date_override provided: Backfill from start_date_override
+        - both False: Incremental append-only mode
+    
+    Clean Table (LOANS):
+        - Deterministic current-state table
+        - NO run_mode column
+        - NO duplicate replay states
+        - TRANSACTIONAL delete+insert for replay/backfill
+        - TRANSACTIONAL delete+insert for incremental (idempotent)
+    
+    History Table (LOANS_HISTORY):
+        - Append-only
+        - NEVER delete
+        - ALWAYS append
+        - Contains run_mode and full lineage
+    
+    Postgres Serving Layer:
+        - Deterministic current-state table
+        - NO metadata columns
+        - TRANSACTIONAL delete+insert for replay/backfill
+        - TRANSACTIONAL delete+insert for incremental (idempotent)
     """
     pipeline_start = time.time()
     run_id = datetime.utcnow().isoformat()
     np.random.seed(42)
     
-    snowflake_rows = 0
+    # ============================================================
+    # MODE DETERMINATION
+    # ============================================================
+    if replay:
+        if not start_date_override:
+            raise ValueError("replay=True requires start_date_override")
+        mode = "replay"
+        print(f"\n{'='*66}")
+        print(f"  LOANS MODEL PIPELINE - REPLAY MODE")
+        print(f"  run_id={run_id}")
+        print(f"  replay_start={start_date_override}")
+        print(f"{'='*66}\n")
+    elif start_date_override:
+        mode = "backfill"
+        print(f"\n{'='*66}")
+        print(f"  LOANS MODEL PIPELINE - BACKFILL MODE")
+        print(f"  run_id={run_id}")
+        print(f"  backfill_start={start_date_override}")
+        print(f"{'='*66}\n")
+    else:
+        mode = "incremental"
+        print(f"\n{'='*66}")
+        print(f"  LOANS MODEL PIPELINE - INCREMENTAL MODE")
+        print(f"  run_id={run_id}")
+        print(f"{'='*66}\n")
+    
+    # Convert start_date_override to period if provided
+    recompute_start_period = None
+    if start_date_override:
+        if isinstance(start_date_override, str):
+            start_date_override = pd.to_datetime(start_date_override)
+        recompute_start_period = pd.Period(start_date_override, freq="M")
+    
+    snowflake_clean_rows = 0
+    snowflake_history_rows = 0
     postgres_success = False
     macro_loaded = True
-    
-    print(f"\n{'='*66}")
-    print(f"  LOANS PIPELINE START - run_id={run_id}")
-    print(f"{'='*66}\n")
     
     try:
         # ============================================================
@@ -481,26 +780,33 @@ def run_loans_model_pipeline():
             print(f"  WARNING: Macro data processing failed: {e} (continuing without macro)")
         
         # ============================================================
-        # STEP 4: Filter by last processed date (CRITICAL)
+        # STEP 4: Determine months to process based on mode
         # ============================================================
-        print("[STEP 4] Filtering by last processed date...")
+        print("[STEP 4] Determining months to process...")
         
-        def get_last_loan_date():
-            with get_snowflake_conn() as ctx:
-                cur = ctx.cursor()
-                cur.execute(f'SELECT COALESCE(MAX("date"), \'1900-01-01\') FROM "{OUTPUT_TABLE}"')
-                return cur.fetchone()[0]
+        # Get all available months in the data
+        all_months = loans["date"].dt.to_period("M").sort_values().unique()
         
-        last_date = retry_with_backoff(get_last_loan_date, retries=2,
-                                        critical_name="Snowflake LOANS watermark query",
-                                        run_id=run_id)
-        last_month = pd.Period(last_date, freq="M") if last_date else None
+        if mode in ["replay", "backfill"]:
+            # For replay/backfill: process ALL months >= start_date_override
+            if recompute_start_period:
+                months_to_process = [m for m in all_months if m >= recompute_start_period]
+                print(f"  Replay/backfill mode: processing {len(months_to_process)} months >= {recompute_start_period}")
+            else:
+                months_to_process = list(all_months)
+                print(f"  Replay/backfill mode: processing all {len(months_to_process)} months")
+        else:
+            # Incremental mode: get watermark from LOANS clean table
+            watermark = get_watermark_from_clean_table(OUTPUT_TABLE, run_id=run_id)
+            if watermark:
+                months_to_process = [m for m in all_months if m > watermark]
+                print(f"  Incremental mode: processing {len(months_to_process)} months > {watermark}")
+            else:
+                months_to_process = list(all_months)
+                print(f"  Incremental mode: no watermark found - processing all {len(months_to_process)} months")
         
-        if last_month:
-            loans = loans[loans["date"].dt.to_period("M") > last_month]
-        
-        if loans.empty:
-            print("  No new rows to process")
+        if not months_to_process:
+            print("  No months to process")
             processing_time = round(time.time() - pipeline_start, 2)
             print(f"\n{'='*66}")
             print(f"  LOANS PIPELINE COMPLETE - No new data")
@@ -508,7 +814,10 @@ def run_loans_model_pipeline():
             print(f"{'='*66}\n")
             return "NO_NEW_DATA"
         
-        print(f"  Rows after date filtering: {len(loans)}")
+        # Filter loans to only months we need to process
+        months_set = set(months_to_process)
+        loans = loans[loans["date"].dt.to_period("M").isin(months_set)]
+        print(f"  Filtered to {len(loans)} rows for {len(months_to_process)} months")
         
         # ============================================================
         # STEP 5: Feature Engineering
@@ -623,41 +932,57 @@ def run_loans_model_pipeline():
         loans = loans.loc[:, ~loans.columns.duplicated()]
         
         # ============================================================
-        # STEP 11: Add pipeline metadata
+        # STEP 11: Add pipeline metadata (includes run_mode for history)
         # ============================================================
         print("[STEP 11] Adding pipeline metadata...")
-        loans = add_pipeline_metadata(loans, run_id)
-        snowflake_rows = len(loans)
+        loans_with_metadata = add_pipeline_metadata(loans, run_id, mode)
         
         # ============================================================
-        # STEP 12: Write to Snowflake (IDEMPOTENT - MERGE) - CRITICAL
+        # STEP 12: Write to Snowflake HISTORY (append-only, includes run_mode)
         # ============================================================
-        print("[STEP 12] Writing to Snowflake (idempotent MERGE)...")
+        print("[STEP 12] Writing to Snowflake HISTORY (append-only)...")
         
-        loans_sf = enforce_snowflake_types(loans)
+        loans_history = enforce_snowflake_types(loans_with_metadata)
         
-        if not loans_sf.empty:
-            def write_loans():
-                return write_to_snowflake_idempotent(
-                    loans_sf,
-                    OUTPUT_TABLE,
-                    key_columns=["loan_id", "date"],
-                    run_id=run_id,
-                    chunk_size=100000
-                )
-            
-            affected = retry_with_backoff(write_loans, retries=3,
-                                           critical_name="Snowflake MERGE write to LOANS table",
-                                           run_id=run_id)
-            print(f"  Snowflake MERGE LOANS: {affected} rows affected")
+        if not loans_history.empty:
+            history_rows = write_to_snowflake_history(
+                loans_history,
+                HISTORY_TABLE,
+                run_id=run_id,
+                chunk_size=100000
+            )
+            snowflake_history_rows = history_rows
+            print(f"  History table: {history_rows} rows appended")
         
         # ============================================================
-        # STEP 13: Write to Postgres (NO ALERTS - non-critical)
+        # STEP 13: Write to Snowflake CLEAN (TRANSACTIONAL delete+insert)
         # ============================================================
-        print("[STEP 13] Writing to Postgres...")
+        print("[STEP 13] Writing to Snowflake CLEAN (transactional)...")
         
-        # Prepare for Postgres
-        df_pg = drop_metadata_for_serving(loans.copy())
+        # Remove run_mode for clean table
+        loans_clean = remove_run_mode_from_clean(loans_with_metadata.copy())
+        loans_clean = enforce_snowflake_types(loans_clean)
+        
+        if not loans_clean.empty:
+            # For ALL modes (incremental, backfill, replay), use transactional delete+insert
+            # This ensures idempotency and prevents duplicate states
+            clean_rows = transactional_delete_insert_snowflake_clean(
+                loans_clean,
+                OUTPUT_TABLE,
+                months_to_process,  # Always replace exactly the months we're processing
+                run_id=run_id,
+                chunk_size=100000
+            )
+            snowflake_clean_rows = clean_rows
+            print(f"  Clean table: {clean_rows} rows written (transactional replace for {len(months_to_process)} months)")
+        
+        # ============================================================
+        # STEP 14: Write to Postgres (TRANSACTIONAL, serving layer only)
+        # ============================================================
+        print("[STEP 14] Writing to Postgres (transactional)...")
+        
+        # Prepare for Postgres (drop ALL metadata columns including run_mode)
+        df_pg = drop_metadata_for_serving(loans_with_metadata.copy())
         df_pg["month"] = pd.to_datetime(df_pg["date"]).dt.to_period("M").dt.to_timestamp().dt.date
         
         # Drop Snowflake-only column
@@ -672,14 +997,21 @@ def run_loans_model_pipeline():
             if c in df_pg.columns:
                 df_pg[c] = df_pg[c].fillna(0).astype(float).round().astype(int)
         
-        postgres_ok, postgres_error = write_to_postgres_with_retry(df_pg, "loan_data", retries=3)
+        # For ALL modes, use transactional delete+insert for Postgres
+        # This ensures Postgres serving layer has no duplicate states
+        postgres_ok, postgres_error = transactional_delete_insert_postgres(
+            df_pg, 
+            "loan_data", 
+            months_to_process,
+            retries=3
+        )
         postgres_success = postgres_ok
         
         if not postgres_ok:
             print(f"  WARNING: Postgres loan_data write failed: {postgres_error}")
         
         # ============================================================
-        # STEP 14: Success - Send COMPLETORY Slack Alert
+        # STEP 15: Success - Send COMPLETORY Slack Alert
         # ============================================================
         processing_time = round(time.time() - pipeline_start, 2)
         pg_rows = len(df_pg) if 'df_pg' in locals() else 0
@@ -688,35 +1020,52 @@ def run_loans_model_pipeline():
         if postgres_success:
             send_success_alert({
                 "run_id": run_id,
-                "snowflake_rows": snowflake_rows,
+                "mode": mode,
+                "snowflake_rows": snowflake_clean_rows,
+                "history_rows": snowflake_history_rows,
                 "postgres_status": "SUCCESS",
                 "postgres_rows": pg_rows,
                 "macro_loaded": macro_loaded,
                 "duration_seconds": processing_time
             })
         else:
-            print("SUCCESS (Snowflake) but Postgres failed -> skipping success alert")
+            # Still send success but note Postgres failure
+            print(f"  WARNING: Postgres failed but Snowflake succeeded - sending partial success alert")
+            send_success_alert({
+                "run_id": run_id,
+                "mode": mode,
+                "snowflake_rows": snowflake_clean_rows,
+                "history_rows": snowflake_history_rows,
+                "postgres_status": f"FAILED ({postgres_error})",
+                "postgres_rows": pg_rows,
+                "macro_loaded": macro_loaded,
+                "duration_seconds": processing_time
+            })
         
         print(f"\n{'='*66}")
         print(f"  LOANS PIPELINE SUCCESS - run_id={run_id}")
-        print(f"  Snowflake rows: {snowflake_rows}")
+        print(f"  Mode: {mode}")
+        print(f"  Snowflake clean rows: {snowflake_clean_rows}")
+        print(f"  Snowflake history rows: {snowflake_history_rows}")
         print(f"  Postgres: {'SUCCESS' if postgres_success else 'FAILED'} ({pg_rows} rows)")
         print(f"  Macro loaded: {macro_loaded}")
+        print(f"  Months processed: {len(months_to_process)}")
         print(f"  Duration: {processing_time}s")
         print(f"{'='*66}\n")
         
-        return f"SUCCESS_SNOWFLAKE_{snowflake_rows}_ROWS_PG_{pg_rows}_ROWS"
+        return f"SUCCESS_{mode}_CLEAN_{snowflake_clean_rows}_HISTORY_{snowflake_history_rows}_PG_{pg_rows}"
     
     except Exception as e:
         # Send CRITICAL alert for any unhandled exception
         send_critical_alert(
             f"Pipeline failed with unhandled exception",
-            context={"run_id": run_id, "error": str(e)}
+            context={"run_id": run_id, "mode": mode, "error": str(e)}
         )
         
         processing_time = round(time.time() - pipeline_start, 2)
         print(f"\n{'='*66}")
         print(f"  LOANS PIPELINE FAILED - run_id={run_id}")
+        print(f"  Mode: {mode}")
         print(f"  Error: {str(e)}")
         print(f"  Duration: {processing_time}s")
         print(f"{'='*66}\n")

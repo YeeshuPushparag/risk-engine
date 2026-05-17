@@ -13,7 +13,7 @@ Layer 1 — Raw       (immutable, append-only, partitioned by date)
 
 Layer 2 — Features  (versioned per run_id, partitioned by date)
     s3://<bucket>/<prefix>features/year=Y/month=MM/day=DD/run_id=<id>/data.parquet
-    s3://<bucket>/<prefix>features/latest.json   ← pointer to most recent run_id
+    s3://<bucket>/<prefix>features/latest.json   <- pointer to most recent run_id
 
 Layer 3 — Rolling   (mutable serving layer, last N calendar days)
     s3://<bucket>/<prefix>rolling/fx_exposure_30d.parquet
@@ -83,7 +83,7 @@ CONFIG: dict = {
     # Rolling serving layer
     "window_days":            30,
 
-    # Lineage  ← bump feature_version when engineering logic changes
+    # Lineage  <- bump feature_version when engineering logic changes
     "pipeline_name":          "fx_exposure_pipeline",
     "feature_version":        "v1",
     "transformation":         "fx_exposure_v1",
@@ -1021,6 +1021,7 @@ def add_metadata(
     start_date,
     replay_mode:    bool,
     is_partial_run: bool,
+    mode_label:     str,
 ) -> pd.DataFrame:
     """
     Stamp every output row with complete lineage and observability fields.
@@ -1057,6 +1058,7 @@ def add_metadata(
     # Mode flags
     df["replay_mode"]          = replay_mode
     df["partial_run"]          = is_partial_run
+    df["run_mode"]             = mode_label
 
     # record_id was carried forward from the raw stage — not re-stamped here.
 
@@ -1645,6 +1647,7 @@ def update_fx_pipeline(
             start_date        = start_date,
             replay_mode       = replay_from_raw,
             is_partial_run    = is_partial_run,
+            mode_label        = mode_label
         )
 
         # ── STAGE 10: Schema enforcement — features ──────────────────────
