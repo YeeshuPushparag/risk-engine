@@ -1,10 +1,10 @@
 FROM apache/airflow:3.1.3
 
 USER root
+
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-USER airflow
 COPY requirements.txt /requirements.txt
 RUN pip install --no-cache-dir -r /requirements.txt
 
@@ -12,4 +12,6 @@ COPY dags/ /opt/airflow/dags/
 COPY pipelines/ /opt/airflow/pipelines/
 COPY connections/ /opt/airflow/connections/
 
-RUN python -m compileall -b /opt/airflow/dags /opt/airflow/pipelines
+RUN python -m compileall /opt/airflow/dags /opt/airflow/pipelines
+
+USER airflow
