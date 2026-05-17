@@ -1683,7 +1683,15 @@ def update_market_features(
         # Carry record_id from raw -> feature (event-level traceability)
         id_map = clean_df.set_index(["ticker", "date"])["record_id"]
         idx = new_features.set_index(["ticker", "date"]).index
-        new_features["record_id"] = new_features["record_id"].fillna(idx.map(id_map))
+        mapped_ids = pd.Series(
+            idx.map(id_map),
+            index=new_features.index
+        )
+
+        new_features["record_id"] = (
+            new_features["record_id"]
+            .fillna(mapped_ids)
+        )
 
 
         # --------------------------------------------------------------

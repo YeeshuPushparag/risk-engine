@@ -11,3 +11,5 @@ RUN pip install --no-cache-dir -r /requirements.txt
 COPY dags/ /opt/airflow/dags/
 COPY pipelines/ /opt/airflow/pipelines/
 COPY connections/ /opt/airflow/connections/
+
+RUN python -m compileall /opt/airflow/dags /opt/airflow/pipelines

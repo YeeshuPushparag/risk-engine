@@ -8,10 +8,13 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /tmp/requirements.txt
+
 RUN pip install --upgrade pip && \
     pip install -r /tmp/requirements.txt
 
 COPY . /app
+
+RUN python -m compileall /app
 
 ENV PYTHONUNBUFFERED=1
 

@@ -22,5 +22,7 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip && \
 
 COPY . .
 
+RUN python3 -m compileall .
+
 ENV SPARK_HOME=/opt/spark
 ENV PATH="$SPARK_HOME/bin:$PATH"
