@@ -860,16 +860,18 @@ def rename_source_lineage(df):
 
 def drop_old_pipeline_metrics(df):
     drop_cols = [
-        "data_date",
-        "ingestion_start_date",
-        "ticker_universe_size",
-        "input_rows",
-        "output_rows",
-        "processing_time_s",
-        "replay_mode",
-        "partial_run",
-        "outlier_flag"
-        "record_id"
+    'data_date',
+    'outlier_flag',
+    'record_id',
+    'ingestion_start_date',
+    'ticker_universe_size',
+    'input_rows',
+    'output_rows',
+    'processing_time_s',
+    'replay_mode',
+    'partial_run',
+    'run_mode',
+    'ingestion_ts'
     ]
     existing = [c for c in drop_cols if c in df.columns]
     return df.drop(columns=existing)
