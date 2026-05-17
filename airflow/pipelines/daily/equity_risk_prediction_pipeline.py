@@ -674,7 +674,7 @@ def run_all_equity_predictions(df):
             continue
 
         # -------------------------------------------------
-        # CREATE MISSING COLS
+        # ENSURE INFERENCE FEATURE SCHEMA
         # -------------------------------------------------
 
         missing = [
@@ -868,6 +868,7 @@ def drop_old_pipeline_metrics(df):
         "processing_time_s",
         "replay_mode",
         "partial_run",
+        "outlier_flag"
     ]
     existing = [c for c in drop_cols if c in df.columns]
     return df.drop(columns=existing)
