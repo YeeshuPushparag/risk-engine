@@ -29,7 +29,7 @@ export default function ProjectPage() {
         <p className="max-w-3xl text-lg text-slate-400 font-medium leading-relaxed italic border-l-4 border-blue-600 pl-6 mb-10">
           A technical implementation of a multi-asset risk engine, designed to handle 
           high-concurrency data streams and batch-processed historical analytics. 
-          Built to reflect the architectural requirements of institutional portfolio monitoring.
+          Designed to simulate institutional-grade portfolio monitoring workflows.
         </p>
 
        {/* ACTION BUTTONS */}
@@ -95,7 +95,7 @@ export default function ProjectPage() {
             {/* PIPELINES */}
             <section className="space-y-8">
               <h2 className="text-xs font-black text-blue-500 uppercase tracking-[0.3em] mb-8 flex items-center gap-3">
-                <Layers className="w-4 h-4" /> 02. Engineering Workflows
+                <Layers className="w-4 h-4" /> 02. Data Pipelines
               </h2>
               <div className="space-y-4 font-mono">
                 <div className="flex items-start gap-4 p-6 bg-slate-900/20 border-l-2 border-slate-800">
@@ -117,7 +117,7 @@ export default function ProjectPage() {
             <section className="p-8 bg-blue-600/5 border border-blue-500/20 relative overflow-hidden">
               <ShieldAlert className="absolute -right-4 -bottom-4 w-24 h-24 text-blue-500/10" />
               <h2 className="text-xs font-black text-blue-500 uppercase tracking-[0.3em] mb-6 flex items-center gap-3">
-                <Activity className="w-4 h-4" /> 03. Scenario Analysis
+                <Activity className="w-4 h-4" /> 03. Stress Testing
               </h2>
               <p className="text-xs text-slate-400 mb-6 font-bold uppercase italic">Simulated Historical Shock Calibration:</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-[10px] font-black text-slate-500 uppercase">

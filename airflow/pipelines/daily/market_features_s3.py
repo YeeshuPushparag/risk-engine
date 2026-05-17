@@ -522,84 +522,171 @@ def fetch_raw_data(
     Timezone:
         All date values are UTC-aware after enforce_schema is called downstream.
     """
-    new_records:    list = []
+    new_records: list = []
     failed_tickers: list = []
 
-    total_batches = (len(tickers) + CONFIG["batch_size"] - 1) // CONFIG["batch_size"]
+    total_batches = (
+        len(tickers) + CONFIG["batch_size"] - 1
+    ) // CONFIG["batch_size"]
 
     for i in range(0, len(tickers), CONFIG["batch_size"]):
-        batch      = tickers[i : i + CONFIG["batch_size"]]
-        batch_num  = i // CONFIG["batch_size"] + 1
-        data       = None
+
+        batch = tickers[i : i + CONFIG["batch_size"]]
+        batch_num = i // CONFIG["batch_size"] + 1
+        data = None
+
+        # =========================================================
+        # DOWNLOAD WITH RETRIES
+        # =========================================================
 
         for attempt in range(1, CONFIG["max_retries"] + 1):
+
             try:
                 data = yf.download(
-                    tickers  = " ".join(batch),
-                    start    = str(start_date),
-                    end      = str(end_date + timedelta(days=1)),
-                    group_by = "ticker",
-                    threads  = True,
-                    progress = False,
+                    tickers=" ".join(batch),
+                    start=str(start_date),
+                    end=str(end_date + timedelta(days=1)),
+                    interval="1d",
+                    group_by="ticker",
+                    auto_adjust=False,
+                    threads=True,
+                    progress=False,
                 )
+
                 if data is None or data.empty:
                     raise ValueError("empty response from yfinance")
-                break  # success
+
+                break
 
             except Exception as exc:
+
                 print(
                     f"  [FETCH] batch {batch_num}/{total_batches} "
                     f"attempt {attempt}/{CONFIG['max_retries']} failed: {exc}"
                 )
+
                 if attempt < CONFIG["max_retries"]:
                     time.sleep(CONFIG["retry_backoff_s"] * attempt)
+
                 else:
-                    print(f"  [FETCH] batch {batch_num} exhausted retries -> DLQ")
+                    print(
+                        f"  [FETCH] batch {batch_num} exhausted retries -> DLQ"
+                    )
                     failed_tickers.extend(batch)
+
+        # =========================================================
+        # SKIP EMPTY RESPONSES
+        # =========================================================
 
         if data is None or data.empty:
             continue
 
-        # Get tickers that actually returned data
-        returned_tickers = set(data.columns.get_level_values(0))
+        # =========================================================
+        # HANDLE YFINANCE RESPONSE SAFELY
+        # =========================================================
 
-        # Identify missing tickers (FAILED ones)
-        missing = [t for t in batch if t not in returned_tickers]
+        try:
 
-        # Add to failed_tickers (DLQ)
+            if isinstance(data.columns, pd.MultiIndex):
+                returned_tickers = set(
+                    data.columns.get_level_values(0)
+                )
+            else:
+                # malformed / single ticker response
+                returned_tickers = set()
+
+        except Exception as exc:
+
+            print(f"  [FETCH][COLUMN ERROR] {exc}")
+
+            failed_tickers.extend(batch)
+            continue
+
+        # =========================================================
+        # DETECT MISSING TICKERS
+        # =========================================================
+
+        missing = [
+            t for t in batch
+            if t not in returned_tickers
+        ]
+
         if missing:
-            print(f"[FETCH][MISSING] {missing}")
+            print(f"  [FETCH][MISSING] {missing}")
             failed_tickers.extend(missing)
 
-        # Process only valid tickers
-        for t in returned_tickers:
-            sub = data[t].reset_index().rename(columns={
-                "Date":   "date",
-                "Open":   "open",
-                "High":   "high",
-                "Low":    "low",
-                "Close":  "close",
-                "Volume": "volume",
-            })
+        # =========================================================
+        # PROCESS VALID TICKERS
+        # =========================================================
 
-            sub = sub[[c for c in sub.columns if c in FEATURE_COLS]]
-            sub["ticker"]          = t
-            sub["record_id"]       = t + "_" + sub["date"].astype(str)
-            sub["ingestion_ts"]    = run_ts
-            sub["pipeline_run_id"] = run_id
+        for t in batch:
 
-            new_records.append(sub)
+            if t not in returned_tickers:
+                continue
+
+            try:
+
+                sub = data[t].reset_index().rename(columns={
+                    "Date": "date",
+                    "Open": "open",
+                    "High": "high",
+                    "Low": "low",
+                    "Close": "close",
+                    "Volume": "volume",
+                })
+
+                # defensive cleanup
+                if "Adj Close" in sub.columns:
+                    sub = sub.drop(columns=["Adj Close"])
+
+                # keep only expected columns
+                sub = sub[
+                    [c for c in sub.columns if c in FEATURE_COLS]
+                ]
+
+                # skip corrupted empty frames
+                if sub.empty:
+                    failed_tickers.append(t)
+                    continue
+
+                sub["ticker"] = t
+
+                sub["record_id"] = (
+                    t + "_" + sub["date"].astype(str)
+                )
+
+                sub["ingestion_ts"] = run_ts
+                sub["pipeline_run_id"] = run_id
+
+                new_records.append(sub)
+
+            except Exception as exc:
+
+                print(f"  [FETCH][PARSE ERROR] {t}: {exc}")
+
+                failed_tickers.append(t)
+
+    # =============================================================
+    # FINAL CONCAT
+    # =============================================================
 
     if not new_records:
         return pd.DataFrame(), failed_tickers
 
-    df         = pd.concat(new_records, ignore_index=True)
-    df["date"] = pd.to_datetime(df["date"], utc=True)
-    df         = df[df["date"].dt.dayofweek < 5]
-    df         = df[df["date"] >= to_utc_timestamp(start_date)]
+    df = pd.concat(new_records, ignore_index=True)
+
+    df["date"] = pd.to_datetime(
+        df["date"],
+        utc=True,
+    )
+
+    df = df[df["date"].dt.dayofweek < 5]
+
+    df = df[
+        df["date"] >= to_utc_timestamp(start_date)
+    ]
 
     return df, failed_tickers
-
 # =============================================================
 # STAGE 1B — read_raw_layer  (replay_from_raw mode)
 # =============================================================
