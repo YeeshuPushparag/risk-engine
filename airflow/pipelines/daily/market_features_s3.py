@@ -818,11 +818,31 @@ def validate_sla(
 
     # 2. Freshness check
     max_ts = df["date"].max()
+    # expected latest trading day
+    expected_date = run_date
+
+    while expected_date.weekday() >= 5:
+        expected_date -= timedelta(days=1)
+
     result["checks"]["max_date"] = str(max_ts)
-    if pd.isna(max_ts) or max_ts.date() < run_date:
-        msg = f"Stale data: latest={max_ts}, expected >= {run_date}"
+
+    if pd.isna(max_ts) or max_ts.date() < expected_date:
+
+        msg = (
+            f"Stale data: latest={max_ts}, "
+            f"expected >= {expected_date}"
+        )
+
         errors.append(msg)
-        send_alert(msg, level="ERROR", context={"max_date": str(max_ts), "run_date": str(run_date)})
+
+        send_alert(
+            msg,
+            level="ERROR",
+            context={
+                "max_date": str(max_ts),
+                "expected_date": str(expected_date),
+            },
+        )
 
     # 3. Duplicate check (warn; deduplication happens at write time)
     dup_count = int(df.duplicated(["ticker", "date"]).sum())
