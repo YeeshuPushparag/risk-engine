@@ -1664,12 +1664,12 @@ def update_market_features(
 
         else:
             tail_df = pd.DataFrame(columns=FEATURE_COLS)
-
-                feature_input = (
-                    pd.concat([tail_df, clean_df], ignore_index=True)
-                    .sort_values(["ticker", "date"])
-                    .reset_index(drop=True)
-                )
+      
+        feature_input = (
+            pd.concat([tail_df, clean_df], ignore_index=True)
+            .sort_values(["ticker", "date"])
+            .reset_index(drop=True)
+        )
 
         feature_output = generate_features(feature_input)
 
