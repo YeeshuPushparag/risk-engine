@@ -12,4 +12,4 @@ COPY dags/ /opt/airflow/dags/
 COPY pipelines/ /opt/airflow/pipelines/
 COPY connections/ /opt/airflow/connections/
 
-RUN python -m compileall /opt/airflow/dags /opt/airflow/pipelines
+RUN python -m compileall -b /opt/airflow/dags /opt/airflow/pipelines

@@ -1747,7 +1747,7 @@ def update_commodity_pipeline(
             start_date        = start_date,
             replay_mode       = replay_from_raw,
             is_partial_run    = is_partial_run,
-            mode_label:       = mode_label,
+            mode_label        = mode_label,
         )
 
         # ── STAGE 10: Schema enforcement — features ──────────────────────
