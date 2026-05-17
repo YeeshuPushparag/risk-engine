@@ -412,105 +412,432 @@ def risk_enrichment(df):
 # ML MODEL PREDICTIONS (UNCHANGED — SOFT FAIL)
 # =========================
 def run_all_equity_predictions(df):
-    """
-    Run all XGBoost equity prediction models loaded from S3.
 
-    Failure semantics: individual model failures set the output column to NaN
-    and continue. The pipeline does NOT fail due to model errors — risk metrics
-    computed in risk_enrichment are always available as fallback.
+ 
     """
+    Runs all equity prediction models.
+
+    Flow:
+    -----
+    1. Generate transient inference-only features
+    2. Load feature PKL + model from S3
+    3. Predict
+    4. Drop transient helper columns
+    5. Return:
+            original dataframe + prediction columns only
+    """
+
+    # =====================================================
+    # MODEL REGISTRY
+    # =====================================================
+
     model_map = {
-        "ret_1d":         ("models/equity_model_1d_xgb.json",                "models/equity_features_1d.pkl",               "pred_ret_1d"),
-        "ret_5d":         ("models/equity_model_5d_xgb.json",                "models/equity_features_5d.pkl",               "pred_ret_5d"),
-        "ret_21d":        ("models/equity_model_21d_xgb.json",               "models/equity_features_21d.pkl",              "pred_ret_21d"),
-        "vol_21d":        ("models/equity_model_vol21_xgb.json",             "models/equity_features_vol21.pkl",            "pred_vol_21d"),
-        "down_21d":       ("models/equity_model_down21_xgb.json",            "models/equity_features_down21.pkl",           "pred_downside_21d"),
-        "var_21d":        ("models/equity_model_var21_xgb.json",             "models/equity_features_var21.pkl",            "pred_var_21d"),
-        "factor_21d":     ("models/equity_model_factor21_xgb.json",          "models/equity_features_factor21.pkl",         "pred_factor_21d"),
-        "sector_rotation":("models/equity_model_sector_rotation_xgb.json",   "models/equity_features_sector_rotation.pkl",  "pred_sector_rotation"),
-        "macro_regime":   ("models/equity_model_macro_regime_xgb.json",      "models/equity_features_macro_regime.pkl",     "pred_macro_regime"),
-        "port_ret_1d":    ("models/equity_model_portfolio1d_xgb.json",       "models/equity_features_portfolio1d.pkl",      "pred_port_ret_1d"),
-        "port_ret_5d":    ("models/equity_model_portfolio5d_xgb.json",       "models/equity_features_portfolio5d.pkl",      "pred_port_ret_5d"),
-        "port_ret_21d":   ("models/equity_model_portfolio21d_xgb.json",      "models/equity_features_portfolio21d.pkl",     "pred_port_ret_21d"),
-        "port_var_1d":    ("models/equity_model_portfolio_var_1d_xgb.json",  "models/equity_features_portfolio_var_1d.pkl", "pred_port_var_1d"),
-        "port_var_5d":    ("models/equity_model_portfolio_var_5d_xgb.json",  "models/equity_features_portfolio_var_5d.pkl", "pred_port_var_5d"),
-        "port_var_21d":   ("models/equity_model_portfolio_var_21d_xgb.json", "models/equity_features_portfolio_var_21d.pkl","pred_port_var_21d"),
+        "ret_1d": (
+            "models/equity_model_1d_xgb.json",
+            "models/equity_features_1d.pkl",
+            "pred_ret_1d"
+        ),
+
+        "ret_5d": (
+            "models/equity_model_5d_xgb.json",
+            "models/equity_features_5d.pkl",
+            "pred_ret_5d"
+        ),
+
+        "ret_21d": (
+            "models/equity_model_21d_xgb.json",
+            "models/equity_features_21d.pkl",
+            "pred_ret_21d"
+        ),
+
+        "vol_21d": (
+            "models/equity_model_vol21_xgb.json",
+            "models/equity_features_vol21.pkl",
+            "pred_vol_21d"
+        ),
+
+        "down_21d": (
+            "models/equity_model_down21_xgb.json",
+            "models/equity_features_down21.pkl",
+            "pred_downside_21d"
+        ),
+
+        "var_21d": (
+            "models/equity_model_var21_xgb.json",
+            "models/equity_features_var21.pkl",
+            "pred_var_21d"
+        ),
+
+        "factor_21d": (
+            "models/equity_model_factor21_xgb.json",
+            "models/equity_features_factor21.pkl",
+            "pred_factor_21d"
+        ),
+
+        "sector_rotation": (
+            "models/equity_model_sector_rotation_xgb.json",
+            "models/equity_features_sector_rotation.pkl",
+            "pred_sector_rotation"
+        ),
+
+        "macro_regime": (
+            "models/equity_model_macro_regime_xgb.json",
+            "models/equity_features_macro_regime.pkl",
+            "pred_macro_regime"
+        ),
+
+        "port_ret_1d": (
+            "models/equity_model_portfolio1d_xgb.json",
+            "models/equity_features_portfolio1d.pkl",
+            "pred_port_ret_1d"
+        ),
+
+        "port_ret_5d": (
+            "models/equity_model_portfolio5d_xgb.json",
+            "models/equity_features_portfolio5d.pkl",
+            "pred_port_ret_5d"
+        ),
+
+        "port_ret_21d": (
+            "models/equity_model_portfolio21d_xgb.json",
+            "models/equity_features_portfolio21d.pkl",
+            "pred_port_ret_21d"
+        ),
+
+        "port_var_1d": (
+            "models/equity_model_portfolio_var_1d_xgb.json",
+            "models/equity_features_portfolio_var_1d.pkl",
+            "pred_port_var_1d"
+        ),
+
+        "port_var_5d": (
+            "models/equity_model_portfolio_var_5d_xgb.json",
+            "models/equity_features_portfolio_var_5d.pkl",
+            "pred_port_var_5d"
+        ),
+
+        "port_var_21d": (
+            "models/equity_model_portfolio_var_21d_xgb.json",
+            "models/equity_features_portfolio_var_21d.pkl",
+            "pred_port_var_21d"
+        ),
     }
 
-    df = df.replace([np.inf, -np.inf], np.nan)
+    # =====================================================
+    # SORT
+    # =====================================================
+
+    df = (
+        df
+        .sort_values(
+            ["asset_manager", "ticker", "date"]
+        )
+        .copy()
+    )
+
+    # =====================================================
+    # INFERENCE-TIME TRANSIENT FEATURES
+    # =====================================================
+
+    # -----------------------------------------------------
+    # PORTFOLIO LAG FEATURES
+    # -----------------------------------------------------
+
+    for N in [1, 5, 21]:
+
+        df[f"lag_ret_{N}d"] = (
+            df.groupby(
+                ["asset_manager", "ticker"]
+            )["close"]
+            .pct_change(N)
+        )
+
+        df[f"lag_port_ret_contrib_{N}d"] = (
+            df["portfolio_weight"] *
+            df[f"lag_ret_{N}d"]
+        )
+
+    # -----------------------------------------------------
+    # FACTOR FEATURES
+    # -----------------------------------------------------
+
+    df["mkt_fwd_21d"] = (
+        df.groupby("date")["daily_return"]
+        .transform("mean")
+    )
+
+    # -----------------------------------------------------
+    # SECTOR FEATURES
+    # MUST MATCH TRAINING LOGIC EXACTLY
+    # -----------------------------------------------------
+
+    df["sector_avg_return"] = (
+        df.groupby("sector")["daily_return"]
+        .transform("mean")
+    )
+
+    df["sector_mom20"] = (
+        df.groupby("sector")["sector_avg_return"]
+        .transform(
+            lambda s: s.pct_change(20)
+        )
+    )
+
+    df["sector_vol21"] = (
+        df.groupby("sector")["sector_avg_return"]
+        .transform(
+            lambda s: s.rolling(21).std()
+        )
+    )
+
+    df["sector_turnover"] = (
+        df.groupby("sector")["turnover_ratio"]
+        .transform("mean")
+    )
+
+    # -----------------------------------------------------
+    # MACRO TREND FEATURES
+    # -----------------------------------------------------
+
+    for col in [
+        "gdp",
+        "cpi",
+        "unrate",
+        "fedfunds"
+    ]:
+
+        if col in df.columns:
+
+            df[f"{col}_trend"] = (
+                df[col]
+                .diff(63)
+            )
+
+    # =====================================================
+    # CLEANUP
+    # =====================================================
+
+    df = df.replace(
+        [np.inf, -np.inf],
+        np.nan
+    )
+
     failed_models = []
 
-    for name, (model_s3_path, feat_path, out_col) in model_map.items():
+    # =====================================================
+    # MODEL LOOP
+    # =====================================================
+
+    for name, (
+        model_s3_path,
+        feat_path,
+        out_col
+    ) in model_map.items():
+
         print(f"\n[MODEL] Running {name}")
 
-        # Load feature list (retry, soft fail)
+        # -------------------------------------------------
+        # LOAD FEATURES
+        # -------------------------------------------------
+
         def load_features():
-            feat_obj = s3.get_object(Bucket=S3_BUCKET, Key=feat_path)
-            return joblib.load(BytesIO(feat_obj["Body"].read()))
+
+            obj = s3.get_object(
+                Bucket=S3_BUCKET,
+                Key=feat_path
+            )
+
+            return joblib.load(
+                BytesIO(
+                    obj["Body"].read()
+                )
+            )
 
         try:
-            features = retry_with_backoff(load_features, retries=2)
+
+            features = retry_with_backoff(
+                load_features,
+                retries=2
+            )
+
         except Exception as e:
-            print(f"[WARNING] Feature load failed for {name}: {e}")
+
+            print(
+                f"[WARNING] "
+                f"Feature load failed for {name}: {e}"
+            )
+
             df[out_col] = np.nan
+
             failed_models.append(name)
+
             continue
 
-        # Fill missing feature columns with NaN (log, don't fail)
-        missing = [f for f in features if f not in df.columns]
+        # -------------------------------------------------
+        # CREATE MISSING COLS
+        # -------------------------------------------------
+
+        missing = [
+            c for c in features
+            if c not in df.columns
+        ]
+
         if missing:
-            print(f"[WARNING] Model {name} missing features: {missing[:5]}... (using NaN)")
+
+            print(
+                f"[WARNING] "
+                f"{name} missing features: "
+                f"{missing[:5]}"
+            )
+
             for col in missing:
-                df[col] = np.nan
+                df[col] = 0
 
-        # Fill nulls in feature columns
-        null_cols = [c for c in features if c in df.columns and df[c].isna().any()]
-        if null_cols:
-            print(f"[WARNING] Model {name} has nulls in: {null_cols[:5]}... (filling with 0)")
-            for col in null_cols:
-                df[col] = df[col].fillna(0)
+        # -------------------------------------------------
+        # NULL HANDLING
+        # -------------------------------------------------
 
-        available_features = [f for f in features if f in df.columns]
-        X = df[available_features].copy().fillna(0)
+        for col in features:
 
-        # Load model (retry, soft fail)
+            if col in df.columns:
+
+                df[col] = (
+                    df[col]
+                    .replace(
+                        [np.inf, -np.inf],
+                        np.nan
+                    )
+                    .fillna(0)
+                )
+
+        X = df[features].copy()
+
+        # -------------------------------------------------
+        # LOAD MODEL
+        # -------------------------------------------------
+
         def load_model():
-            model_obj = s3.get_object(Bucket=S3_BUCKET, Key=model_s3_path)
+
+            obj = s3.get_object(
+                Bucket=S3_BUCKET,
+                Key=model_s3_path
+            )
+
             booster = xgb.Booster()
-            booster.load_model(bytearray(model_obj["Body"].read()))
+
+            booster.load_model(
+                bytearray(
+                    obj["Body"].read()
+                )
+            )
+
             return booster
 
         try:
-            booster = retry_with_backoff(load_model, retries=2)
+
+            booster = retry_with_backoff(
+                load_model,
+                retries=2
+            )
+
         except Exception as e:
-            print(f"[WARNING] Model load failed for {name}: {e}")
+
+            print(
+                f"[WARNING] "
+                f"Model load failed for {name}: {e}"
+            )
+
             df[out_col] = np.nan
+
             failed_models.append(name)
+
             continue
 
-        # Predict (soft fail)
+        # -------------------------------------------------
+        # PREDICT
+        # -------------------------------------------------
+
         try:
-            dtest   = xgb.DMatrix(X)
-            raw_pred = booster.predict(dtest)
+
+            dtest = xgb.DMatrix(X)
+
+            pred = booster.predict(dtest)
 
             if name == "macro_regime":
-                df[out_col] = raw_pred.argmax(axis=1)
+
+                df[out_col] = pred.argmax(axis=1)
+
             else:
-                df[out_col] = raw_pred
+
+                df[out_col] = pred
 
             print(f"[SUCCESS] {name} completed")
 
         except Exception as e:
-            print(f"[WARNING] Prediction failed for {name}: {e}")
+
+            print(
+                f"[WARNING] "
+                f"Prediction failed for {name}: {e}"
+            )
+
             df[out_col] = np.nan
+
             failed_models.append(name)
+
             continue
 
+    # =====================================================
+    # DROP TRANSIENT HELPER FEATURES
+    # =====================================================
+
+    helper_cols = [
+
+        # lag features
+        "lag_ret_1d",
+        "lag_ret_5d",
+        "lag_ret_21d",
+
+        "lag_port_ret_contrib_1d",
+        "lag_port_ret_contrib_5d",
+        "lag_port_ret_contrib_21d",
+
+        # factor
+        "mkt_fwd_21d",
+
+        # sector
+        "sector_avg_return",
+        "sector_mom20",
+        "sector_vol21",
+        "sector_turnover",
+
+        # macro trends
+        "gdp_trend",
+        "cpi_trend",
+        "unrate_trend",
+        "fedfunds_trend",
+    ]
+
+    df = df.drop(
+        columns=[
+            c for c in helper_cols
+            if c in df.columns
+        ],
+        errors="ignore"
+    )
+
+    # =====================================================
+    # FINAL WARNINGS
+    # =====================================================
+
     if failed_models:
-        print(f"\n[WARNING] {len(failed_models)} models failed (output columns set to NaN): {failed_models}")
+
+        print(
+            f"\n[WARNING] "
+            f"{len(failed_models)} models failed: "
+            f"{failed_models}"
+        )
 
     return df
-
 
 # =========================
 # METADATA HELPERS (UNCHANGED)
@@ -566,7 +893,7 @@ def drop_all_metadata_for_serving(df):
         "pipeline_name", "pipeline_run_id", "data_source", "input_source",
         "transformation", "record_created_at",
         # Legacy columns from first pipeline that may flow through
-        "mode_label", "run_mode",
+        "mode_label", "run_mode", "outlier_flag"
     ]
     existing = [c for c in drop_cols if c in df.columns]
     return df.drop(columns=existing)
