@@ -869,6 +869,7 @@ def drop_old_pipeline_metrics(df):
         "replay_mode",
         "partial_run",
         "outlier_flag"
+        "record_id"
     ]
     existing = [c for c in drop_cols if c in df.columns]
     return df.drop(columns=existing)
@@ -894,7 +895,7 @@ def drop_all_metadata_for_serving(df):
         "pipeline_name", "pipeline_run_id", "data_source", "input_source",
         "transformation", "record_created_at",
         # Legacy columns from first pipeline that may flow through
-        "mode_label", "run_mode", "outlier_flag"
+        "mode_label", "run_mode", "outlier_flag", "record_id"
     ]
     existing = [c for c in drop_cols if c in df.columns]
     return df.drop(columns=existing)
