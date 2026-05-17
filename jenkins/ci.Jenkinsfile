@@ -54,11 +54,17 @@ pipeline {
 
             echo "Changed files:\n${changed}"
 
-            env.BUILD_AIRFLOW  = changed =~ /(^|\\n)airflow\\//  ? 'true' : 'false'
-            env.BUILD_DJANGO   = changed =~ /(^|\\n)django\\//   ? 'true' : 'false'
-            env.BUILD_NEXTJS   = changed =~ /(^|\\n)nextjs\\//   ? 'true' : 'false'
-            env.BUILD_SPARK    = changed =~ /(^|\\n)spark\\//    ? 'true' : 'false'
-            env.BUILD_PRODUCER = changed =~ /(^|\\n)producer\\// ? 'true' : 'false'
+            env.BUILD_AIRFLOW  = ((changed =~ /(^|\n)airflow\//).find())  ? 'true' : 'false'
+            env.BUILD_DJANGO   = ((changed =~ /(^|\n)django\//).find())   ? 'true' : 'false'
+            env.BUILD_NEXTJS   = ((changed =~ /(^|\n)nextjs\//).find())   ? 'true' : 'false'
+            env.BUILD_SPARK    = ((changed =~ /(^|\n)spark\//).find())    ? 'true' : 'false'
+            env.BUILD_PRODUCER = ((changed =~ /(^|\n)producer\//).find()) ? 'true' : 'false'
+
+            echo "BUILD_AIRFLOW=${env.BUILD_AIRFLOW}"
+            echo "BUILD_DJANGO=${env.BUILD_DJANGO}"
+            echo "BUILD_NEXTJS=${env.BUILD_NEXTJS}"
+            echo "BUILD_SPARK=${env.BUILD_SPARK}"
+            echo "BUILD_PRODUCER=${env.BUILD_PRODUCER}"
 
             env.BUILD_IMAGES = (
               env.BUILD_AIRFLOW  == 'true' ||
