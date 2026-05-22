@@ -16,10 +16,10 @@ Snowflake COMMODITY_HISTORY  (append-only, audit trail)
     - Includes run_mode column for lineage tracing
     - Duplicates across runs are EXPECTED and intentional
 
-Snowflake COMMODITY          (clean, deterministic latest state)
+Snowflake COMMODITY
     - Replay / Backfill:  DELETE window -> INSERT fresh rows (transactional)
-    - Incremental:        INSERT only new rows (no MERGE — watermark prevents
-                          duplicates by filtering before write)
+    - Incremental:        MERGE latest-state rows using business key
+                          (asset_manager, ticker, commodity, date)
     - Must NEVER contain conflicting rows for same (ticker, commodity, date)
 
 Postgres commodity_data      (serving layer — NOT source of truth)
@@ -354,6 +354,9 @@ def drop_old_pipeline_metrics(df):
         "processing_time_s",
         "replay_mode",
         "partial_run",
+        "outlier_flag",
+        "record_id",
+        "run_mode",
     ]
     existing = [c for c in drop_cols if c in df.columns]
     return df.drop(columns=existing)
@@ -366,8 +369,7 @@ def drop_metadata_for_serving(df):
         "source_input_source", "source_transformation", "source_created_at",
         "source_feature_version", "source_schema_version", "source_schema_hash",
         "pipeline_name", "pipeline_run_id", "data_source", "input_source",
-        "transformation", "record_created_at",
-        "run_mode",
+        "transformation", "record_created_at", "data_quality_flag"
     ]
     return df.drop(columns=[c for c in drop_cols if c in df.columns])
 
@@ -434,150 +436,369 @@ def write_to_snowflake_history(df, run_mode, run_id=None, chunk_size=20_000):
 # =============================================================
 # SNOWFLAKE CLEAN TABLE — DELETE + INSERT (replay / backfill)
 # =============================================================
-def _snowflake_clean_delete_insert(df, start_date, end_date, run_id=None, chunk_size=20_000):
+def _snowflake_clean_delete_insert(
+    df,
+    start_date,
+    end_date,
+    run_id=None,
+    chunk_size=20_000,
+):
     """
-    Atomically replace a date window in the COMMODITY (clean) table.
+    Atomically replace a date window in the COMMODITY clean table.
 
-    Protocol:
-      1. Load new rows into a session-scoped temp staging table (outside
-         transaction — COPY INTO is not transactional in Snowflake).
-      2. Open a Snowflake transaction.
-      3. DELETE existing rows for the window [start_date, end_date].
-      4. INSERT all rows from the staging table.
-      5. COMMIT on success; ROLLBACK on any failure.
+    Architecture
+    ------------
+    COMMODITY_HISTORY:
+        append-only audit table
+        duplicates across runs are expected and allowed
 
-    This guarantees the COMMODITY table never holds conflicting rows for the
-    same (ticker, commodity, date) after a replay or backfill.
+    COMMODITY:
+        deterministic latest-state table
+        must NEVER contain conflicting rows for the same business key
 
-    Args:
-        df:         Fully processed DataFrame for the replay/backfill window.
-        start_date: Inclusive window start (pd.Timestamp or date-like).
-        end_date:   Inclusive window end (pd.Timestamp or date-like).
-        run_id:     Pipeline run identifier for alert context.
-        chunk_size: Rows per write_pandas chunk to the staging temp table.
+    Replay/backfill semantics
+    -------------------------
+    Replay and backfill recompute an entire historical window and replace
+    that window atomically inside the clean table.
 
-    Raises:
-        Exception propagated after ROLLBACK + CRITICAL alert.
+    Protocol
+    --------
+    1. Create a TEMP staging table.
+    2. Bulk load dataframe into staging via write_pandas().
+    3. BEGIN explicit Snowflake transaction.
+    4. DELETE existing rows for target replay/backfill window.
+    5. INSERT recomputed rows from staging table.
+    6. COMMIT transaction.
+    7. ROLLBACK automatically on any failure.
+
+    Guarantees
+    ----------
+    - No partial replay state.
+    - No conflicting clean-table rows.
+    - Deterministic replay/backfill behavior.
+    - Temp staging table disappears automatically after session close.
+
+    Important Notes
+    ---------------
+    write_pandas() itself is NOT transactional because Snowflake internally
+    uses staged COPY operations. Therefore staging must occur BEFORE opening
+    the explicit transaction.
+
+    Args
+    ----
+    df:
+        Fully processed dataframe ready for Snowflake clean-table write.
+
+    start_date:
+        Inclusive replay/backfill window start.
+
+    end_date:
+        Inclusive replay/backfill window end.
+
+    run_id:
+        Pipeline run identifier for observability and alerting.
+
+    chunk_size:
+        write_pandas batch size.
+
+    Raises
+    ------
+    Exception:
+        Re-raised after rollback and critical alert emission.
     """
-    start_str  = pd.Timestamp(start_date).strftime("%Y-%m-%d")
-    end_str    = pd.Timestamp(end_date).strftime("%Y-%m-%d")
-    temp_table = f"{SNOWFLAKE_CLEAN_TABLE}_STAGE_{int(time.time())}"
+
+    start_str = (
+        pd.Timestamp(start_date)
+        .strftime("%Y-%m-%d")
+    )
+
+    end_str = (
+        pd.Timestamp(end_date)
+        .strftime("%Y-%m-%d")
+    )
+
+    temp_table = (
+        f"{SNOWFLAKE_CLEAN_TABLE}_STAGE_"
+        f"{int(time.time())}"
+    )
 
     try:
+
         with get_snowflake_conn() as ctx:
+
             with ctx.cursor() as cs:
 
-                # Step 1 — staging table (auto-dropped when session closes)
+                # =====================================================
+                # STEP 1 — CREATE TEMP STAGING TABLE
+                # =====================================================
+
                 cs.execute(f"""
                     CREATE TEMPORARY TABLE {temp_table}
                     LIKE "{SNOWFLAKE_CLEAN_TABLE}"
                 """)
+
+                # =====================================================
+                # STEP 2 — LOAD DATAFRAME INTO STAGING TABLE
+                # =====================================================
+
                 write_pandas(
-                    ctx, df, temp_table,
+                    conn=ctx,
+                    df=df,
+                    table_name=temp_table,
                     chunk_size=chunk_size,
                     quote_identifiers=True,
+                    auto_create_table=False,
                 )
 
-                # Step 2 — open explicit transaction
-                cs.execute("BEGIN TRANSACTION")
+                # =====================================================
+                # STEP 3 — OPEN EXPLICIT TRANSACTION
+                # =====================================================
+
+                cs.execute("BEGIN")
+
                 try:
-                    # Step 3 — DELETE existing window rows
+
+                    # =================================================
+                    # STEP 4 — DELETE EXISTING WINDOW
+                    # =================================================
+
                     cs.execute(f"""
                         DELETE FROM "{SNOWFLAKE_CLEAN_TABLE}"
-                        WHERE "date" BETWEEN '{start_str}'::DATE AND '{end_str}'::DATE
+                        WHERE "date"
+                        BETWEEN '{start_str}'::DATE
+                            AND '{end_str}'::DATE
                     """)
-                    deleted = cs.rowcount if cs.rowcount is not None else 0
-                    print(
-                        f"  [CLEAN] Deleted {deleted:,} rows from {SNOWFLAKE_CLEAN_TABLE} "
-                        f"for window [{start_str}, {end_str}]"
+
+                    deleted_rows = (
+                        cs.rowcount
+                        if cs.rowcount is not None
+                        else 0
                     )
 
-                    # Step 4 — INSERT fresh rows from staging
+                    print(
+                        f"  [CLEAN] Deleted "
+                        f"{deleted_rows:,} rows from "
+                        f"{SNOWFLAKE_CLEAN_TABLE} "
+                        f"for window "
+                        f"[{start_str}, {end_str}]"
+                    )
+
+                    # =================================================
+                    # STEP 5 — INSERT RECOMPUTED WINDOW
+                    # =================================================
+
                     cs.execute(f"""
                         INSERT INTO "{SNOWFLAKE_CLEAN_TABLE}"
-                        SELECT * FROM {temp_table}
+                        SELECT *
+                        FROM {temp_table}
                     """)
-                    cs.execute("SELECT ROW_COUNT()")
-                    inserted = cs.fetchone()[0]
-                    print(
-                        f"  [CLEAN] Inserted {inserted:,} rows into {SNOWFLAKE_CLEAN_TABLE}"
+
+                    inserted_rows = (
+                        cs.rowcount
+                        if cs.rowcount is not None
+                        else len(df)
                     )
 
-                    # Step 5 — commit atomically
+                    print(
+                        f"  [CLEAN] Inserted "
+                        f"{inserted_rows:,} rows into "
+                        f"{SNOWFLAKE_CLEAN_TABLE}"
+                    )
+
+                    # =================================================
+                    # STEP 6 — COMMIT TRANSACTION
+                    # =================================================
+
                     cs.execute("COMMIT")
 
                 except Exception:
+
+                    # =============================================
+                    # STEP 7 — ROLLBACK ON FAILURE
+                    # =============================================
+
                     cs.execute("ROLLBACK")
+
                     raise
 
     except Exception as exc:
+
         send_critical_alert(
-            f"Snowflake CLEAN delete+insert failed — window [{start_str}, {end_str}] "
-            f"may be partially written. Immediate investigation required.",
+            (
+                "Snowflake CLEAN delete+insert failed "
+                f"for window [{start_str}, {end_str}]"
+            ),
             context={
                 "run_id": run_id,
-                "table":  SNOWFLAKE_CLEAN_TABLE,
-                "mode":   "delete_insert",
-                "start":  start_str,
-                "end":    end_str,
-                "rows":   len(df),
-                "error":  str(exc),
+                "table": SNOWFLAKE_CLEAN_TABLE,
+                "mode": "delete_insert",
+                "start": start_str,
+                "end": end_str,
+                "rows": len(df),
+                "error": str(exc),
             },
         )
+
         raise
 
 
 # =============================================================
-# SNOWFLAKE CLEAN TABLE — INSERT (incremental)
+# SNOWFLAKE CLEAN TABLE — MERGE (incremental)
 # =============================================================
-def _snowflake_clean_insert(df, run_id=None, chunk_size=20_000):
+def _snowflake_clean_merge(
+    df,
+    run_id=None,
+    chunk_size=20_000,
+):
     """
-    Insert new rows into the COMMODITY (clean) table for incremental runs.
+    Incremental UPSERT into COMMODITY clean table.
 
-    Used for incremental runs only. The watermark-based date filter applied
-    upstream guarantees these rows are all new — no MERGE is needed and no
-    duplicate (ticker, commodity, date) rows will be produced.
+    Business key:
+        (asset_manager, ticker, commodity, date)
 
-    Args:
-        df:         Fully processed DataFrame for the incremental window.
-        run_id:     Pipeline run identifier for alert context.
-        chunk_size: Rows per write_pandas chunk.
-
-    Raises:
-        Exception propagated after CRITICAL alert.
+    Guarantees:
+    - deterministic latest-state rows
+    - idempotent retries
+    - replay overlap safety
+    - no conflicting clean-table rows
     """
+
+    key_columns = [
+        "asset_manager",
+        "ticker",
+        "commodity",
+        "date",
+    ]
+
+    # =========================================================
+    # DUPLICATE VALIDATION
+    # =========================================================
+
+    dupes = (
+        df.groupby(key_columns)
+        .size()
+        .reset_index(name="cnt")
+    )
+
+    dup_rows = dupes[dupes["cnt"] > 1]
+
+    if not dup_rows.empty:
+
+        sample = dup_rows.head(10)
+
+        raise ValueError(
+            "Duplicate commodity business keys detected "
+            f"before MERGE. Sample:\n{sample}"
+        )
+
+    temp_table = (
+        f"{SNOWFLAKE_CLEAN_TABLE}_STAGE_"
+        f"{int(time.time())}"
+    )
+
     try:
+
         with get_snowflake_conn() as ctx:
-            success, nchunks, nrows, _ = write_pandas(
-                ctx,
-                df,
-                SNOWFLAKE_CLEAN_TABLE,
-                chunk_size=chunk_size,
-                quote_identifiers=True,
-            )
-            if not success:
-                raise RuntimeError(
-                    f"write_pandas returned success=False for {SNOWFLAKE_CLEAN_TABLE}"
+
+            with ctx.cursor() as cs:
+
+                # =====================================================
+                # CREATE TEMP STAGE TABLE
+                # =====================================================
+
+                cs.execute(f'''
+                    CREATE TEMPORARY TABLE {temp_table}
+                    LIKE "{SNOWFLAKE_CLEAN_TABLE}"
+                ''')
+
+                # =====================================================
+                # LOAD INTO STAGE TABLE
+                # =====================================================
+
+                success, nchunks, nrows, _ = write_pandas(
+                    conn=ctx,
+                    df=df,
+                    table_name=temp_table,
+                    chunk_size=chunk_size,
+                    quote_identifiers=True,
+                    auto_create_table=False,
                 )
-            print(
-                f"  [CLEAN] Inserted {nrows:,} rows into {SNOWFLAKE_CLEAN_TABLE} "
-                f"(incremental)"
-            )
-            return nrows
+
+                if not success:
+                    raise RuntimeError(
+                        "write_pandas failed for temp stage table"
+                    )
+
+                # =====================================================
+                # BUILD MERGE SQL
+                # =====================================================
+
+                all_columns = list(df.columns)
+
+                update_columns = [
+                    c for c in all_columns
+                    if c not in key_columns
+                ]
+
+                merge_on = " AND ".join([
+                    f't."{c}" = s."{c}"'
+                    for c in key_columns
+                ])
+
+                update_set = ", ".join([
+                    f't."{c}" = s."{c}"'
+                    for c in update_columns
+                ])
+
+                insert_columns = ", ".join([
+                    f'"{c}"'
+                    for c in all_columns
+                ])
+
+                insert_values = ", ".join([
+                    f's."{c}"'
+                    for c in all_columns
+                ])
+
+                merge_sql = f"""
+                    MERGE INTO "{SNOWFLAKE_CLEAN_TABLE}" t
+                    USING {temp_table} s
+                    ON {merge_on}
+
+                    WHEN MATCHED THEN
+                        UPDATE SET
+                            {update_set}
+
+                    WHEN NOT MATCHED THEN
+                        INSERT ({insert_columns})
+                        VALUES ({insert_values})
+                """
+
+                # =====================================================
+                # EXECUTE MERGE
+                # =====================================================
+
+                cs.execute(merge_sql)
+
+                print(
+                    f"  [CLEAN] MERGE completed into "
+                    f"{SNOWFLAKE_CLEAN_TABLE}"
+                )
 
     except Exception as exc:
+
         send_critical_alert(
-            f"Snowflake CLEAN insert failed",
+            "Snowflake CLEAN MERGE failed",
             context={
                 "run_id": run_id,
-                "table":  SNOWFLAKE_CLEAN_TABLE,
-                "mode":   "insert",
-                "rows":   len(df),
-                "error":  str(exc),
+                "table": SNOWFLAKE_CLEAN_TABLE,
+                "mode": "merge",
+                "rows": len(df),
+                "error": str(exc),
             },
         )
-        raise
 
+        raise
 
 # =============================================================
 # SNOWFLAKE CLEAN TABLE — UNIFIED WRITE DISPATCHER
@@ -606,17 +827,22 @@ def write_to_snowflake_clean(df, mode, start_date, end_date, run_id=None, chunk_
             _snowflake_clean_delete_insert(df, start_date, end_date, run_id, chunk_size)
 
     else:  # incremental
-        strategy_name = "Snowflake CLEAN INSERT (incremental)"
+
+        strategy_name = "Snowflake CLEAN MERGE (incremental)"
 
         def do_write():
-            _snowflake_clean_insert(df, run_id, chunk_size)
+            _snowflake_clean_merge(
+                df,
+                run_id,
+                chunk_size,
+            )
 
-    retry_with_backoff(
-        do_write,
-        retries=3,
-        critical_name=strategy_name,
-        run_id=run_id,
-    )
+        retry_with_backoff(
+            do_write,
+            retries=3,
+            critical_name=strategy_name,
+            run_id=run_id,
+        )
 
 
 # =============================================================
@@ -839,7 +1065,7 @@ def process_commodities(
     Snowflake writes (TWO TABLES):
     - COMMODITY_HISTORY (append-only):  always INSERT, includes run_mode column
     - COMMODITY (clean):                DELETE window + INSERT (replay/backfill)
-                                        INSERT only (incremental, watermark-safe)
+                                        incremental -> MERGE latest-state rows
 
     Postgres writes (serving layer):
     - Replay/backfill:  DELETE window -> INSERT -> trim to last 2 days
@@ -1227,7 +1453,7 @@ def process_commodities(
             "open", "high", "low", "close", "volume", "daily_return", "log_return",
             "vol_20d", "sensitivity", "hedge_ratio", "mtm_value", "exposure_amount",
             "commodity_pnl", "VaR_95", "VaR_99", "gdp", "unrate", "cpi", "fedfunds",
-            "pred_vol21",
+            "pred_vol21", "data_quality_flag"
             # Current pipeline lineage
             "pipeline_name", "pipeline_run_id", "data_source", "input_source",
             "transformation", "record_created_at",

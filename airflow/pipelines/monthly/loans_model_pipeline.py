@@ -186,6 +186,32 @@ def transactional_delete_insert_snowflake_clean(df, table_name, target_months, r
     """
     if df.empty:
         return 0
+
+    # =========================================================
+    # DUPLICATE BUSINESS KEY VALIDATION
+    # =========================================================
+
+    key_columns = [
+        "loan_id",
+        "date",
+    ]
+
+    dupes = (
+        df.groupby(key_columns)
+        .size()
+        .reset_index(name="cnt")
+    )
+
+    dup_rows = dupes[dupes["cnt"] > 1]
+
+    if not dup_rows.empty:
+
+        sample = dup_rows.head(10)
+
+        raise ValueError(
+            "Duplicate loan business keys detected "
+            f"before transactional replace. Sample:\n{sample}"
+        )
     
     if not target_months:
         # No months specified - simple insert
@@ -587,6 +613,21 @@ def enforce_snowflake_types(df):
     return df
 
 
+
+def drop_old_pipeline_metrics(df):
+    """Drop first-pipeline observability columns that don't belong in the output."""
+    drop_cols = [
+        "pipeline_name",
+        "pipeline_run_id",
+        "data_source",
+        "input_source",
+        "transformation",
+        "record_created_at",
+        "run_mode",
+    ]
+    existing = [c for c in drop_cols if c in df.columns]
+    return df.drop(columns=existing)
+
 def drop_metadata_for_serving(df):
     """Remove metadata columns for serving layer (Postgres)."""
     drop_cols = [
@@ -731,7 +772,7 @@ def run_loans_model_pipeline(
     
     try:
         # ============================================================
-        # STEP 1: Load loan enriched data from S3 (CRITICAL)
+        # STEP 1: Load loan enriched data from S3 (CRITICAL) and drop old metrics
         # ============================================================
         print("[STEP 1] Loading loan enriched data from S3...")
         
@@ -742,6 +783,7 @@ def run_loans_model_pipeline(
             retries=3
         )
         print(f"  Loaded {len(loans)} rows")
+        loans = drop_old_pipeline_metrics(loans)
         
         # ============================================================
         # STEP 2: Validate dates

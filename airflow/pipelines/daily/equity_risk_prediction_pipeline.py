@@ -896,8 +896,6 @@ def drop_all_metadata_for_serving(df):
         "source_feature_version", "source_schema_version", "source_schema_hash",
         "pipeline_name", "pipeline_run_id", "data_source", "input_source",
         "transformation", "record_created_at",
-        # Legacy columns from first pipeline that may flow through
-        "mode_label", "run_mode", "outlier_flag", "record_id"
     ]
     existing = [c for c in drop_cols if c in df.columns]
     return df.drop(columns=existing)
@@ -1025,8 +1023,9 @@ def _snowflake_clean_delete_insert(df, start_date, end_date, run_id=None, chunk_
                         INSERT INTO "{SNOWFLAKE_CLEAN_TABLE}"
                         SELECT * FROM {temp_table}
                     """)
-                    cs.execute("SELECT ROW_COUNT()")
-                    inserted = cs.fetchone()[0]
+                    
+                    inserted = cs.rowcount if cs.rowcount is not None else len(df)
+                    
                     print(
                         f"  [CLEAN] Inserted {inserted:,} rows into {SNOWFLAKE_CLEAN_TABLE}"
                     )
@@ -1060,14 +1059,19 @@ def _snowflake_clean_delete_insert(df, start_date, end_date, run_id=None, chunk_
 # =========================
 def _snowflake_clean_merge(df, run_id=None, chunk_size=20_000):
     """
-    Upsert rows into the EQUITY (clean) table using a Snowflake MERGE.
+    Upsert rows into the EQUITY clean table using a Snowflake MERGE.
 
-    Used for incremental runs only. For each (ticker, date) pair:
-    - If the row already exists: UPDATE all non-key columns.
-    - If the row is new:         INSERT.
+    Used for incremental runs only.
 
-    The MERGE statement is atomic in Snowflake — no partial state is
-    possible.
+    Business uniqueness:
+        asset_manager + ticker + date
+
+    For each unique business key:
+        - If the row already exists: UPDATE all non-key columns.
+        - If the row is new:         INSERT.
+
+    The MERGE operation is atomic in Snowflake, ensuring no partial state
+    is possible.
 
     Args:
         df:         Fully processed DataFrame for the incremental window.
@@ -1077,25 +1081,65 @@ def _snowflake_clean_merge(df, run_id=None, chunk_size=20_000):
     Raises:
         Exception propagated after CRITICAL alert.
     """
-    key_columns = ["ticker", "date"]
-    temp_table  = f"{SNOWFLAKE_CLEAN_TABLE}_STAGE_{int(time.time())}"
+
+    key_columns = [
+        "asset_manager",
+        "ticker",
+        "date",
+    ]
+
+    temp_table = (
+        f"{SNOWFLAKE_CLEAN_TABLE}_STAGE_"
+        f"{int(time.time())}"
+    )
+
+    dupes = (
+        df.groupby(["asset_manager", "ticker", "date"])
+        .size()
+        .reset_index(name="cnt")
+    )
+
+    dup_rows = dupes[dupes["cnt"] > 1]
+
+    if not dup_rows.empty:
+
+        raise ValueError(
+            "Duplicate business keys detected before MERGE: "
+            f"{len(dup_rows)} duplicate combinations"
+        )
 
     try:
+
         with get_snowflake_conn() as ctx:
+
             with ctx.cursor() as cs:
 
-                # Staging table
+                # =====================================================
+                # CREATE TEMP STAGING TABLE
+                # =====================================================
+
                 cs.execute(f"""
                     CREATE TEMPORARY TABLE {temp_table}
                     LIKE "{SNOWFLAKE_CLEAN_TABLE}"
                 """)
+
+                # =====================================================
+                # WRITE DATAFRAME TO STAGING
+                # =====================================================
+
                 write_pandas(
-                    ctx, df, temp_table,
+                    ctx,
+                    df,
+                    temp_table,
                     chunk_size=chunk_size,
                     quote_identifiers=True,
+                    auto_create_table=False,
                 )
 
-                # Fetch column list (excludes auto-generated ID)
+                # =====================================================
+                # FETCH COLUMN ORDER
+                # =====================================================
+
                 cs.execute(f"""
                     SELECT COLUMN_NAME
                     FROM INFORMATION_SCHEMA.COLUMNS
@@ -1103,46 +1147,82 @@ def _snowflake_clean_merge(df, run_id=None, chunk_size=20_000):
                       AND COLUMN_NAME != 'ID'
                     ORDER BY ORDINAL_POSITION
                 """)
-                columns = [row[0] for row in cs.fetchall()]
 
-                col_list        = ", ".join([f'"{c}"' for c in columns])
-                merge_condition = " AND ".join(
-                    [f'target."{col}" = source."{col}"' for col in key_columns]
-                )
-                update_set = ", ".join(
-                    [f'target."{col}" = source."{col}"' for col in columns]
-                )
-                insert_cols = ", ".join([f'source."{col}"' for col in columns])
+                columns = [
+                    row[0]
+                    for row in cs.fetchall()
+                ]
+
+                # =====================================================
+                # BUILD MERGE SQL
+                # =====================================================
+
+                merge_condition = " AND ".join([
+                    f'target."{col}" = source."{col}"'
+                    for col in key_columns
+                ])
+
+                update_set = ", ".join([
+                    f'target."{col}" = source."{col}"'
+                    for col in columns
+                ])
+
+                insert_columns = ", ".join([
+                    f'"{col}"'
+                    for col in columns
+                ])
+
+                insert_values = ", ".join([
+                    f'source."{col}"'
+                    for col in columns
+                ])
 
                 merge_sql = f"""
                     MERGE INTO "{SNOWFLAKE_CLEAN_TABLE}" AS target
                     USING {temp_table} AS source
+
                     ON {merge_condition}
+
                     WHEN MATCHED THEN
-                        UPDATE SET {update_set}
+                        UPDATE SET
+                            {update_set}
+
                     WHEN NOT MATCHED THEN
-                        INSERT ({col_list}) VALUES ({insert_cols})
+                        INSERT ({insert_columns})
+                        VALUES ({insert_values})
                 """
 
+                # =====================================================
+                # EXECUTE MERGE
+                # =====================================================
+
                 cs.execute(merge_sql)
-                cs.execute("SELECT ROW_COUNT()")
-                affected = cs.fetchone()[0]
+
+                affected_rows = (
+                    cs.rowcount
+                    if cs.rowcount is not None
+                    else len(df)
+                )
+
                 print(
-                    f"  [CLEAN] MERGE complete — {affected:,} rows affected in "
+                    f"  [CLEAN] MERGE complete — "
+                    f"{affected_rows:,} rows affected in "
                     f"{SNOWFLAKE_CLEAN_TABLE}"
                 )
 
     except Exception as exc:
+
         send_critical_alert(
-            f"Snowflake CLEAN MERGE failed",
+            "Snowflake CLEAN MERGE failed",
             context={
                 "run_id": run_id,
-                "table":  SNOWFLAKE_CLEAN_TABLE,
-                "mode":   "merge",
-                "rows":   len(df),
-                "error":  str(exc),
+                "table": SNOWFLAKE_CLEAN_TABLE,
+                "mode": "merge",
+                "rows": len(df),
+                "error": str(exc),
             },
         )
+
         raise
 
 
