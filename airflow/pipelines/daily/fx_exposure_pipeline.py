@@ -561,45 +561,56 @@ def fetch_fx_data(
             continue
 
         # =========================================================
-        # Extract close column safely from yfinance output
+        # Flatten yfinance MultiIndex columns immediately
         # =========================================================
 
         if isinstance(data.columns, pd.MultiIndex):
 
-            # yfinance multi-index format
-            # example:
-            # ('Close', 'USDEUR=X')
+            data.columns = [
+                "_".join(
+                    [str(x) for x in col if x]
+                ).strip()
+                for col in data.columns.values
+            ]
 
-            if ("Close", yahoo_symbol) not in data.columns:
-                failed_pairs.append(pair)
-                continue
+        # =========================================================
+        # Extract Close column
+        # =========================================================
 
-            sub = (
-                data[[("Close", yahoo_symbol)]]
-                .reset_index()
-                .rename(columns={
-                    ("Close", yahoo_symbol): "fx_rate",
-                    "Date": "date",
-                })
-            )
+        close_cols = [
+            c for c in data.columns
+            if "Close" in c
+        ]
 
-        else:
+        if not close_cols:
 
-            # single-index fallback
+            failed_pairs.append(pair)
+            continue
 
-            if "Close" not in data.columns:
-                failed_pairs.append(pair)
-                continue
+        target_col = None
 
-            sub = (
-                data[["Close"]]
-                .reset_index()
-                .rename(columns={
-                    "Close": "fx_rate",
-                    "Date": "date",
-                })
-            )
+        for col in close_cols:
 
+            if yahoo_symbol in col:
+
+                target_col = col
+                break
+
+        if target_col is None:
+
+            failed_pairs.append(pair)
+            continue
+
+        sub = (
+            data[[target_col]]
+            .copy()
+            .reset_index()
+        )
+
+        sub.columns = [
+            "date",
+            "fx_rate",
+        ]
         sub["fx_rate"]        = pd.to_numeric(sub["fx_rate"], errors="coerce")
         sub["currency_pair"]  = pair
         sub["record_id"]      = pair + "_" + sub["date"].astype(str)
