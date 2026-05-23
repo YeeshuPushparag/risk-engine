@@ -320,60 +320,127 @@ def get_processed_months_from_clean_table(table_name, months_to_check, run_id=No
         raise
 
 
+
 # ============================================================
-# POSTGRES HELPERS (TRANSACTIONAL + DETERMINISTIC)
+# SNOWFLAKE WAREHOUSE HELPERS (DETERMINISTIC + TRANSACTIONAL)
 # ============================================================
-def transactional_delete_insert_postgres(df, table_name, target_months, retries=3):
+def transactional_delete_insert_postgres(
+    df,
+    table_name,
+    target_months=None,
+    retries=3,
+):
     """
-    TRANSACTIONAL delete + insert for Postgres serving table.
-    
-    Args:
-        df: DataFrame to insert (already stripped of metadata)
-        table_name: Postgres table name
-        target_months: List of Period objects to delete/replace
-        retries: Number of retry attempts
-    
-    Returns:
-        (success_flag, error_message)
-    
-    Transaction guarantees:
-        - BEGIN transaction
-        - DELETE rows for target_months
-        - INSERT new rows
-        - COMMIT on success
-        - ROLLBACK on failure
+    Production-grade transactional Postgres serving-layer writer.
+
+    Architecture:
+    ------------------------------------------------------------
+    Postgres is NOT the system of record.
+
+    Snowflake CLEAN:
+        - full deterministic warehouse
+        - stores complete historical timeline
+
+    Snowflake HISTORY:
+        - immutable audit log
+        - append-only lineage/history store
+
+    Postgres:
+        - lightweight hot serving cache
+        - keeps ONLY latest 2 months
+        - optimized for dashboards/APIs/UI
+
+    Mode Behavior:
+    ------------------------------------------------------------
+
+    replay/backfill:
+        DELETE affected months
+        INSERT recomputed rows
+        TRIM older months
+
+    incremental:
+        INSERT only new rows
+        TRIM older months
+
+    Transaction Guarantees:
+    ------------------------------------------------------------
+    - BEGIN transaction
+    - optional DELETE for replay/backfill
+    - INSERT new rows
+    - TRIM table to latest 2 months
+    - COMMIT on success
+    - ROLLBACK on failure
     """
+
     if df.empty:
         return True, "Empty DataFrame - nothing to write"
-    
-    if not target_months:
-        # No months specified - simple append
-        return write_to_postgres_append(df, table_name, retries)
-    
+
     BATCH_SIZE = 100_000
-    
+
     for attempt in range(retries + 1):
+
         try:
+
             with get_postgre_conn() as pg_conn:
+
                 with pg_conn.cursor() as cur:
-                    # Begin transaction
+
+                    # =================================================
+                    # BEGIN TRANSACTION
+                    # =================================================
+
                     cur.execute("BEGIN")
-                    
+
                     try:
-                        # Delete rows for target months
-                        month_conditions = []
-                        for period in target_months:
-                            start_date = period.start_time.strftime("%Y-%m-%d")
-                            end_date = period.end_time.strftime("%Y-%m-%d")
-                            month_conditions.append(f'(month >= \'{start_date}\' AND month <= \'{end_date}\')')
-                        
-                        delete_condition = " OR ".join(month_conditions)
-                        delete_sql = f'DELETE FROM {table_name} WHERE {delete_condition}'
-                        cur.execute(delete_sql)
-                        deleted_rows = cur.rowcount
-                        print(f"    Deleted {deleted_rows} rows from Postgres {table_name} for {len(target_months)} months")
-                        
-                        # Fetch schema order
+
+                        # =================================================
+                        # REPLAY/BACKFILL:
+                        # DELETE TARGET MONTHS BEFORE RECOMPUTE
+                        # =================================================
+
+                        if target_months:
+
+                            month_conditions = []
+
+                            for period in target_months:
+
+                                start_date = (
+                                    period.start_time
+                                    .strftime("%Y-%m-%d")
+                                )
+
+                                end_date = (
+                                    period.end_time
+                                    .strftime("%Y-%m-%d")
+                                )
+
+                                month_conditions.append(
+                                    f"(month >= '{start_date}' "
+                                    f"AND month <= '{end_date}')"
+                                )
+
+                            delete_condition = (
+                                " OR ".join(month_conditions)
+                            )
+
+                            delete_sql = f"""
+                                DELETE FROM {table_name}
+                                WHERE {delete_condition}
+                            """
+
+                            cur.execute(delete_sql)
+
+                            deleted_rows = cur.rowcount
+
+                            print(
+                                f"    Deleted {deleted_rows} rows "
+                                f"from Postgres {table_name}"
+                            )
+
+                        # =================================================
+                        # FETCH POSTGRES SCHEMA ORDER
+                        # =================================================
+
                         cur.execute(f"""
                             SELECT column_name
                             FROM information_schema.columns
@@ -381,120 +448,183 @@ def transactional_delete_insert_postgres(df, table_name, target_months, retries=
                             AND table_name='{table_name}'
                             ORDER BY ordinal_position
                         """)
-                        
-                        cols = [r[0] for r in cur.fetchall() if r[0] != "id"]
-                        
+
+                        cols = [
+                            r[0]
+                            for r in cur.fetchall()
+                            if r[0] != "id"
+                        ]
+
                         if not cols:
-                            raise RuntimeError(f"No columns found for {table_name}")
-                        
-                        # Validate schema
-                        missing = set(cols) - set(df.columns)
+
+                            raise RuntimeError(
+                                f"No columns found for "
+                                f"{table_name}"
+                            )
+
+                        # =================================================
+                        # VALIDATE SCHEMA CONSISTENCY
+                        # =================================================
+
+                        missing = (
+                            set(cols) - set(df.columns)
+                        )
+
                         if missing:
-                            raise ValueError(f"Missing columns for {table_name}: {missing}")
-                        
-                        # Enforce schema order
+
+                            raise ValueError(
+                                f"Missing columns for "
+                                f"{table_name}: {missing}"
+                            )
+
+                        # =================================================
+                        # ENFORCE DATABASE COLUMN ORDER
+                        # =================================================
+
                         df_pg = df[cols].copy()
-                        
-                        quoted_cols = [f'"{c}"' for c in cols]
-                        copy_sql = f"COPY public.{table_name} ({','.join(quoted_cols)}) FROM STDIN WITH CSV"
-                        
-                        # Batch COPY
-                        for start in range(0, len(df_pg), BATCH_SIZE):
-                            chunk = df_pg.iloc[start:start + BATCH_SIZE]
+
+                        quoted_cols = [
+                            f'"{c}"'
+                            for c in cols
+                        ]
+
+                        copy_sql = (
+                            f"COPY public.{table_name} "
+                            f"({','.join(quoted_cols)}) "
+                            f"FROM STDIN WITH CSV"
+                        )
+
+                        # =================================================
+                        # HIGH-PERFORMANCE BATCH COPY
+                        # =================================================
+
+                        for start in range(
+                            0,
+                            len(df_pg),
+                            BATCH_SIZE,
+                        ):
+
+                            chunk = df_pg.iloc[
+                                start:start + BATCH_SIZE
+                            ]
+
                             buf = StringIO()
-                            chunk.to_csv(buf, index=False, header=False)
+
+                            chunk.to_csv(
+                                buf,
+                                index=False,
+                                header=False,
+                            )
+
                             buf.seek(0)
-                            
+
                             with cur.copy(copy_sql) as copy:
+
                                 copy.write(buf.getvalue())
-                        
-                        # Commit transaction
+
+                        print(
+                            f"    Inserted {len(df_pg)} rows "
+                            f"into Postgres {table_name}"
+                        )
+
+                        # =================================================
+                        # TRIM SERVING TABLE TO LATEST 2 MONTHS
+                        #
+                        # Postgres is intentionally maintained as a
+                        # lightweight serving cache rather than a
+                        # full historical warehouse.
+                        # =================================================
+
+                        cur.execute(f"""
+                            SELECT MAX(month)
+                            FROM {table_name}
+                        """)
+
+                        max_month = cur.fetchone()[0]
+
+                        if max_month:
+
+                            max_month = pd.Period(
+                                max_month,
+                                freq="M",
+                            )
+
+                            cutoff = (
+                                max_month - 1
+                            ).start_time.date()
+
+                            trim_sql = f"""
+                                DELETE FROM {table_name}
+                                WHERE month < '{cutoff}'
+                            """
+
+                            cur.execute(trim_sql)
+
+                            trimmed_rows = cur.rowcount
+
+                            print(
+                                f"    Trimmed "
+                                f"{trimmed_rows} old rows "
+                                f"from {table_name}"
+                            )
+
+                        # =================================================
+                        # COMMIT TRANSACTION
+                        # =================================================
+
                         pg_conn.commit()
-                        print(f"  TRANSACTION COMMITTED: Postgres {table_name} updated with {len(df)} rows")
+
+                        print(
+                            f"  TRANSACTION COMMITTED: "
+                            f"Postgres {table_name} updated "
+                            f"with {len(df)} rows"
+                        )
+
                         return True, None
-                        
+
                     except Exception as e:
-                        # Rollback on any error
+
+                        # =================================================
+                        # ROLLBACK ON FAILURE
+                        # =================================================
+
                         cur.execute("ROLLBACK")
+
                         pg_conn.commit()
-                        print(f"  TRANSACTION ROLLED BACK: Postgres {table_name} update failed")
+
+                        print(
+                            f"  TRANSACTION ROLLED BACK: "
+                            f"Postgres {table_name} "
+                            f"update failed"
+                        )
+
                         raise e
-                        
+
         except Exception as e:
+
             if attempt < retries:
+
                 wait_time = 2 ** attempt
-                print(f"  Postgres retry {attempt + 1}/{retries} after {wait_time}s: {e}")
+
+                print(
+                    f"  Postgres retry "
+                    f"{attempt + 1}/{retries} "
+                    f"after {wait_time}s: {e}"
+                )
+
                 time.sleep(wait_time)
+
             else:
-                print(f"  Postgres {table_name} failed after {retries} retries: {e}")
+
+                print(
+                    f"  Postgres {table_name} failed "
+                    f"after {retries} retries: {e}"
+                )
+
                 return False, str(e)
-    
+
     return False, "Max retries exceeded"
-
-
-def write_to_postgres_append(df, table_name, retries=3):
-    """
-    Simple append to Postgres (non-transactional, assumes months are new).
-    Used for incremental mode where months are guaranteed new.
-    """
-    if df.empty:
-        return True, "Empty DataFrame - nothing to write"
     
-    BATCH_SIZE = 100_000
-    
-    for attempt in range(retries + 1):
-        try:
-            with get_postgre_conn() as pg_conn:
-                with pg_conn.cursor() as cur:
-                    # Fetch schema order
-                    cur.execute(f"""
-                        SELECT column_name
-                        FROM information_schema.columns
-                        WHERE table_schema='public'
-                        AND table_name='{table_name}'
-                        ORDER BY ordinal_position
-                    """)
-                    
-                    cols = [r[0] for r in cur.fetchall() if r[0] != "id"]
-                    
-                    if not cols:
-                        raise RuntimeError(f"No columns found for {table_name}")
-                    
-                    missing = set(cols) - set(df.columns)
-                    if missing:
-                        raise ValueError(f"Missing columns for {table_name}: {missing}")
-                    
-                    df_pg = df[cols].copy()
-                    
-                    quoted_cols = [f'"{c}"' for c in cols]
-                    copy_sql = f"COPY public.{table_name} ({','.join(quoted_cols)}) FROM STDIN WITH CSV"
-                    
-                    for start in range(0, len(df_pg), BATCH_SIZE):
-                        chunk = df_pg.iloc[start:start + BATCH_SIZE]
-                        buf = StringIO()
-                        chunk.to_csv(buf, index=False, header=False)
-                        buf.seek(0)
-                        
-                        with cur.copy(copy_sql) as copy:
-                            copy.write(buf.getvalue())
-                    
-                pg_conn.commit()
-            
-            print(f"[POSTGRES {table_name}] Appended {len(df)} rows successfully")
-            return True, None
-            
-        except Exception as e:
-            if attempt < retries:
-                wait_time = 2 ** attempt
-                print(f"  Postgres retry {attempt + 1}/{retries} after {wait_time}s: {e}")
-                time.sleep(wait_time)
-            else:
-                print(f"  Postgres {table_name} failed after {retries} retries: {e}")
-                return False, str(e)
-    
-    return False, "Max retries exceeded"
-
-
 # ============================================================
 # S3 LOAD WITH RETRY (CRITICAL)
 # ============================================================
@@ -1041,11 +1171,19 @@ def run_loans_model_pipeline(
         
         # For ALL modes, use transactional delete+insert for Postgres
         # This ensures Postgres serving layer has no duplicate states
-        postgres_ok, postgres_error = transactional_delete_insert_postgres(
-            df_pg, 
-            "loan_data", 
-            months_to_process,
-            retries=3
+        postgres_target_months = (
+            months_to_process
+            if mode in ["replay", "backfill"]
+            else None
+        )
+
+        postgres_ok, postgres_error = (
+            transactional_delete_insert_postgres(
+                df_pg,
+                "loan_data",
+                postgres_target_months,
+                retries=3,
+            )
         )
         postgres_success = postgres_ok
         

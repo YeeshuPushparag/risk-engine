@@ -560,22 +560,46 @@ def fetch_fx_data(
         if data is None or data.empty:
             continue
 
-        # Extract close column — handle both single and multi-level columns
-        if isinstance(data.columns, pd.MultiIndex):
-            close_col = [c for c in data.columns if "Close" in c[0]]
-            if not close_col:
-                failed_pairs.append(pair)
-                continue
-            sub = data[close_col[0]].reset_index()
-        else:
-            close_col = [c for c in data.columns if "Close" in str(c)]
-            if not close_col:
-                failed_pairs.append(pair)
-                continue
-            sub = data[[close_col[0]]].reset_index()
-            sub.columns = ["Date", "Close"]
+        # =========================================================
+        # Extract close column safely from yfinance output
+        # =========================================================
 
-        sub = sub.rename(columns={"Date": "date", "Close": "fx_rate"})
+        if isinstance(data.columns, pd.MultiIndex):
+
+            # yfinance multi-index format
+            # example:
+            # ('Close', 'USDEUR=X')
+
+            if ("Close", yahoo_symbol) not in data.columns:
+                failed_pairs.append(pair)
+                continue
+
+            sub = (
+                data[[("Close", yahoo_symbol)]]
+                .reset_index()
+                .rename(columns={
+                    ("Close", yahoo_symbol): "fx_rate",
+                    "Date": "date",
+                })
+            )
+
+        else:
+
+            # single-index fallback
+
+            if "Close" not in data.columns:
+                failed_pairs.append(pair)
+                continue
+
+            sub = (
+                data[["Close"]]
+                .reset_index()
+                .rename(columns={
+                    "Close": "fx_rate",
+                    "Date": "date",
+                })
+            )
+
         sub["fx_rate"]        = pd.to_numeric(sub["fx_rate"], errors="coerce")
         sub["currency_pair"]  = pair
         sub["record_id"]      = pair + "_" + sub["date"].astype(str)
