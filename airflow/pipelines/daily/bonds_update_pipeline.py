@@ -1367,6 +1367,11 @@ def update_bonds_pipeline(
         daily["market_value"] = (
             daily["bond_price"] * daily["units_outstanding"]
         )
+        daily["outstanding_pct"] = np.where(
+            daily["units_issued"] > 0,
+            (daily["units_outstanding"] / daily["units_issued"]) * 100,
+            np.nan
+        )
         # Merge DGS10 enrichment into daily bond rows
         daily = daily.merge(dgs10_series, on="date", how="left")
 
