@@ -1222,7 +1222,7 @@ def update_fx_snowflake(
             )
 
             if last_date_sf is not None:
-                last_date_sf = pd.Timestamp(last_date_sf).normalize()
+                last_date_sf = pd.Timestamp(last_date_sf).normalize().tz_localize(None)
             else:
                 last_date_sf = pd.Timestamp("1970-01-01")
 
