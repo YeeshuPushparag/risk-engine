@@ -1314,11 +1314,9 @@ def update_fx_snowflake(
                 .reset_index(drop=True)
             )
 
-        else:  # incremental
-            last_d = last_date_sf
-
+        else:  # incremental     
             # Buffer: up to BUFFER_DAYS rows per ticker up to (including) watermark
-            buffer_rows = fx[fx["date"] <= last_d]
+            buffer_rows = fx[fx["date"] <= last_date_sf]
             buffer_rows = (
                 buffer_rows
                 .groupby("ticker", group_keys=False)
@@ -1327,7 +1325,7 @@ def update_fx_snowflake(
             )
 
             # New rows: strictly after the watermark
-            new_rows = fx[fx["date"] > last_d].copy()
+            new_rows = fx[fx["date"] > last_date_sf].copy()
 
             print(
                 f"  [INCREMENTAL] New rows: {len(new_rows):,} "
@@ -1336,7 +1334,7 @@ def update_fx_snowflake(
 
             if new_rows.empty:
                 print(
-                    f"  No new FX rows after watermark ({last_d}) — "
+                    f"  No new FX rows after watermark ({last_date_sf}) — "
                     "pipeline complete."
                 )
                 return "NO_NEW_ROWS"
@@ -1375,7 +1373,7 @@ def update_fx_snowflake(
                 (df_enriched["date"] <= end_d)
             ].copy()
         else:  # incremental
-            final_rows = df_enriched[df_enriched["date"] > last_d].copy()
+            final_rows = df_enriched[df_enriched["date"] > last_date_sf].copy()
 
         if final_rows.empty:
             print("  No new FX rows after enrichment + filter — pipeline complete.")
