@@ -1262,7 +1262,7 @@ def update_fx_snowflake(
 
         fx["date"] = pd.to_datetime(
             fx["date"]
-        ).dt.normalize()
+        ).dt.normalize().dt.tz_localize(None)
 
         print(f"  Loaded FX rows: {len(fx):,}")
 
