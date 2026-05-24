@@ -119,7 +119,7 @@ TICKER_NAMES: dict[str, str] = {
 # Canonical columns flowing between ingestion and feature stages
 RAW_COLS: list[str] = [
     "date", "open", "high", "low", "close", "volume",
-    "commodity_symbol", "record_id", "data_quality_flag",
+    "commodity_symbol", "record_id", "data_quality_flag", 
 ]
 
 # =============================================================
@@ -594,9 +594,17 @@ def fetch_commodity_data(
         dates_with_data = set(data["date"].dt.strftime("%Y-%m-%d"))
         
         # Mark missing dates for this ticker
-        missing_dates = []      
+        missing_dates = []
+
         for date_str in failed_by_date.keys():
+
             if date_str not in dates_with_data:
+
+                # DLQ / observability
+                if tkr not in failed_by_date[date_str]:
+                    failed_by_date[date_str].append(tkr)
+
+                # synthetic tracking
                 missing_dates.append(date_str)
 
         if missing_dates:
@@ -1070,12 +1078,14 @@ def generate_commodity_features(
                 .sort_values("date")
                 .tail(buffer_days)
             )
+            feature_input_cols = RAW_COLS + ["outlier_flag"]
+
             combined = pd.concat(
-                [prev_rows[RAW_COLS], sub_new[RAW_COLS]],
+                [prev_rows[feature_input_cols], sub_new[feature_input_cols]],
                 ignore_index=True,
             )
         else:
-            combined = sub_new[RAW_COLS].copy()
+            combined = sub_new[feature_input_cols].copy()
 
         combined = combined.sort_values("date").drop_duplicates(
             subset=["commodity_symbol", "date"], keep="last"
