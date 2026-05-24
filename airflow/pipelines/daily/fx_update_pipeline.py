@@ -1315,7 +1315,7 @@ def update_fx_snowflake(
             )
 
         else:  # incremental
-            last_d = last_date_sf.date()
+            last_d = last_date_sf
 
             # Buffer: up to BUFFER_DAYS rows per ticker up to (including) watermark
             buffer_rows = fx[fx["date"] <= last_d]
