@@ -1359,8 +1359,8 @@ def process_commodities(
         # ══════════════════════════════════════════════════════════════
         print("\n  [STEP 7] Merging macro data...")
 
-        seg["date"]  = pd.to_datetime(seg["date"])
-        macro["date"] = pd.to_datetime(macro["date"])
+        seg["date"]  = pd.to_datetime(seg["date"], utc=True)
+        macro["date"] = pd.to_datetime(macro["date"], utc=True)
 
         seg["mm_yy"]   = seg["date"].dt.strftime("%m-%y")
         macro["mm_yy"] = macro["date"].dt.strftime("%m-%y")

@@ -720,7 +720,8 @@ def build_synthetic_rows(
     history_n = CONFIG["synthetic_history_days"]
 
     # Convert date range into UTC timestamps
-    all_dates = pd.date_range(start=start_date, end=today, freq="B")
+    all_dates = pd.date_range(start=start_date, end=today, freq="B", tz='UTC')
+
 
     for tkr in tickers:
 
