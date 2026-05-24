@@ -49,7 +49,7 @@ resource "aws_eks_node_group" "platform_core" {
   node_role_arn   = aws_iam_role.eks_node_role.arn
   subnet_ids      = local.eks_subnet_ids
 
-  instance_types = ["t3.large"]
+  instance_types = ["t3.xlarge"]
 
   scaling_config {
     min_size     = 1
@@ -78,8 +78,8 @@ resource "aws_eks_node_group" "web" {
   instance_types = ["t3.medium"]
 
   scaling_config {
-    min_size     = 1
-    desired_size = 1
+    min_size     = 0
+    desired_size = 0
     max_size     = 1
   }
 

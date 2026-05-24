@@ -773,10 +773,21 @@ def _snowflake_clean_merge(
     - no conflicting clean-table rows
     """
 
-    key_columns = [
-        "trade_id",
-        "date",
-    ]
+    if table_name == SNOWFLAKE_MODEL_CLEAN_TABLE:
+
+        key_columns = [
+            "date",
+            "asset_class",
+            "ticker",
+            "counterparty",
+        ]
+
+    else:
+
+        key_columns = [
+            "trade_id",
+            "date",
+        ]
 
     # =========================================================
     # DUPLICATE VALIDATION
