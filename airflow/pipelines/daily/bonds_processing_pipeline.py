@@ -684,12 +684,18 @@ def validate_output(
         errors.append("Output DataFrame is empty — nothing to upload.")
 
     else:
-        # Freshness
+        # Freshness — validate against latest business day
         max_date = pd.to_datetime(df["date"]).dt.date.max()
-        if max_date < run_date:
+
+        expected_business_date = (
+            pd.bdate_range(end=pd.Timestamp(run_date), periods=1)[0]
+            .date()
+        )
+
+        if max_date < expected_business_date:
             errors.append(
                 f"Freshness check failed: latest date={max_date}, "
-                f"expected >= {run_date}"
+                f"expected >= {expected_business_date}"
             )
 
         # fill_method_flag integrity
