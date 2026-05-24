@@ -520,6 +520,8 @@ def fetch_commodity_data(
     """
     records: list = []
     failed_by_date: dict = {}
+    hard_failed_tickers: list = []
+    missing_dates_by_ticker: dict = {}
     
     # Initialize failed_by_date for all dates in range
     current_date = start_date
@@ -550,9 +552,7 @@ def fetch_commodity_data(
                     time.sleep(CONFIG["retry_backoff_s"] * attempt)
                 else:
                     print(f"  [FETCH] {tkr} exhausted retries -> DLQ")
-                    for date_str in failed_by_date.keys():
-                        if tkr not in failed_by_date[date_str]:
-                            failed_by_date[date_str].append(tkr)
+                    hard_failed_tickers.append(tkr)
 
         if data is None or data.empty:
             continue
@@ -594,10 +594,13 @@ def fetch_commodity_data(
         dates_with_data = set(data["date"].dt.strftime("%Y-%m-%d"))
         
         # Mark missing dates for this ticker
+        missing_dates = []      
         for date_str in failed_by_date.keys():
             if date_str not in dates_with_data:
-                if tkr not in failed_by_date[date_str]:
-                    failed_by_date[date_str].append(tkr)
+                missing_dates.append(date_str)
+
+        if missing_dates:
+            missing_dates_by_ticker[tkr] = missing_dates
 
         records.append(data)
 
@@ -611,7 +614,7 @@ def fetch_commodity_data(
     df = df.dropna(subset=["close"])
     df = df.sort_values(["commodity_symbol", "date"]).reset_index(drop=True)
 
-    return df, failed_by_date
+    return df, failed_by_date, hard_failed_tickers, missing_dates_by_ticker
 
 # =============================================================
 # STAGE 1B — read_raw_layer  (replay_from_raw mode)
@@ -1603,7 +1606,7 @@ def update_commodity_pipeline(
 
         else:
             print("\n[ STAGE 3 ] Fetch raw data from yfinance")
-            raw_df, failed_by_date = fetch_commodity_data(
+            raw_df, failed_by_date, hard_failed_tickers, missing_dates_by_ticker = fetch_commodity_data(
                 tickers    = active_tickers,
                 start_date = start_date,
                 end_date   = today,
@@ -1614,11 +1617,8 @@ def update_commodity_pipeline(
             # DLQ written before anything that could raise
             write_dlq(failed_by_date, run_id, bucket, prefix)
       
-            # Flatten for failure rate and metadata
-            all_failed = []
-            for failures in failed_by_date.values():
-                all_failed.extend(failures)
-            failed_tickers = list(set(all_failed))
+            failure_rate = len(hard_failed_tickers) / max(len(active_tickers), 1)
+            failed_tickers = hard_failed_tickers
 
             if failed_tickers:
                 print(f"  [WARNING] Failed tickers: {failed_tickers}")
@@ -1668,7 +1668,6 @@ def update_commodity_pipeline(
                 )
                 return None, "NO_NEW_DATA"
 
-            failure_rate = len(failed_tickers) / max(len(active_tickers), 1)
             if failure_rate > CONFIG["failure_threshold"]:
                 msg = (
                     f"Fetch failure rate {failure_rate:.1%} exceeds "
