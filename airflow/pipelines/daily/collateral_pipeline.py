@@ -887,9 +887,11 @@ def _snowflake_clean_merge(
                 # =====================================================
 
                 cs.execute(merge_sql)
+                affected_rows = cs.rowcount if cs.rowcount is not None else len(df)
 
                 print(
                     f"  [CLEAN] MERGE completed into "
+                    f"{affected_rows:,} rows affected in "
                     f"{table_name}"
                 )
 

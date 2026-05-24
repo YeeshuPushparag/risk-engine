@@ -91,7 +91,7 @@ from snowflake.connector.pandas_tools import write_pandas
 
 CONFIG: dict = {
     # S3 bucket
-    "s3_bucket": "pushparag-bond-bucket",
+    "s3_bucket": "yeeshu-bond-bucket",
 
     # S3 path prefixes (mirrors first pipeline CONFIG)
     "features_prefix": "historical-bonds/features/",
@@ -1134,9 +1134,12 @@ def _snowflake_clean_merge(
 
                 cs.execute(merge_sql)
 
+                affected_rows = cs.rowcount if cs.rowcount is not None else len(df)
+
                 print(
-                    f"  [CLEAN] MERGE completed into "
-                    f"{SNOWFLAKE_CLEAN_TABLE}."
+                    f"  [CLEAN] MERGE complete — "
+                    f"{affected_rows:,} rows affected in "
+                    f"{SNOWFLAKE_CLEAN_TABLE}"
                 )
 
                 return nrows

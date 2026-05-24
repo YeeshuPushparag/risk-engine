@@ -112,7 +112,7 @@ CONFIG: dict = {
     "window_days":          30,        # calendar days retained in rolling parquet
 
     # S3 bucket
-    "s3_bucket": "pushparag-bond-bucket",
+    "s3_bucket": "yeeshu-bond-bucket",
 
     # S3 reference file paths (at bucket root)
     "base_bond_key": "synthetic_bond.csv",
