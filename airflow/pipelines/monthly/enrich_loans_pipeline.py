@@ -164,17 +164,42 @@ def write_s3_parquet_atomic(df, key, run_id=None):
     atomic_write_parquet_to_s3(df, S3_BUCKET, key, run_id=run_id)
 
 
-# ============================================================
-# DATE HELPERS
-# ============================================================
 def fast_parse_dates(series):
-    """Parse dates safely with multiple formats."""
-    s = pd.to_datetime(series, errors="coerce", dayfirst=True)
-    mask = s.isna()
-    if mask.any():
-        s[mask] = pd.to_datetime(series[mask], format="%d-%m-%Y", errors="coerce")
-    return s
+    """
+    Safe production-grade datetime parser.
 
+    Handles:
+    - ISO dates
+    - parquet timestamps
+    - Snowflake timestamps
+    - epoch ns integers
+    """
+
+    # First attempt
+    s = pd.to_datetime(
+        series,
+        errors="coerce",
+        utc=True,
+    )
+
+    # Handle epoch nanoseconds explicitly
+    mask = s.isna()
+
+    if mask.any():
+
+        numeric_vals = pd.to_numeric(
+            series[mask],
+            errors="coerce",
+        )
+
+        s.loc[mask] = pd.to_datetime(
+            numeric_vals,
+            unit="ns",
+            errors="coerce",
+            utc=True,
+        )
+
+    return s.dt.tz_localize(None)
 
 # ============================================================
 # SNOWFLAKE LOAD WITH RETRY (SOFT FAIL - NO ALERTS PER TABLE)
@@ -222,8 +247,19 @@ def load_snowflake_table_chunked_with_retry(name, start_date_override, run_id=No
         # No critical alert for individual table failures - pipeline continues
         return retry_with_backoff(_load, retries=retries)
     except Exception as e:
-        print(f"  WARNING: Failed to load {name}: {e}")
-        return pd.DataFrame()  # Return empty DataFrame on failure - don't fail entire pipeline
+
+        send_critical_alert(
+            f"{name} Snowflake load failed",
+            context={
+                "run_id": run_id,
+                "table": name,
+                "error": str(e),
+            }
+        )
+
+        raise RuntimeError(
+            f"{name} load failed: {e}"
+        )
 
 
 # ============================================================
@@ -351,8 +387,7 @@ def run_enrich_loans_pipeline(
             start_date_override = pd.to_datetime(start_date_override)
         recompute_start_period = pd.Period(start_date_override, freq="M")
     
-    # Track failures for partial success reporting
-    failed_tables = []
+    # Track success reporting
     succeeded_tables = []
     
     try:
@@ -426,10 +461,7 @@ def run_enrich_loans_pipeline(
             if not df.empty:
                 succeeded_tables.append(name)
                 tables[name] = df
-            else:
-                failed_tables.append(name)
-                tables[name] = pd.DataFrame()
-                print(f"  WARNING: {name} returned no data or failed - continuing")
+ 
         
         # Check if we have any data to process
         if all(df.empty for df in tables.values()):
@@ -437,7 +469,6 @@ def run_enrich_loans_pipeline(
             return "NO_NEW_DATA"
         
         print(f"  Succeeded tables: {succeeded_tables}")
-        print(f"  Failed/empty tables: {failed_tables}")
         
         # ============================================================
         # STEP 5: Calculate months to process
@@ -617,7 +648,6 @@ def run_enrich_loans_pipeline(
         print(f"  Mode: {mode}")
         print(f"  Final rows: {len(final_df):,}")
         print(f"  Succeeded tables: {succeeded_tables}")
-        print(f"  Failed/empty tables: {failed_tables if failed_tables else 'None'}")
         print(f"  Duration: {total_time:.1f}s")
         print(f"{'='*66}\n")
         
@@ -636,7 +666,6 @@ def run_enrich_loans_pipeline(
         print(f"  Mode: {mode}")
         print(f"  Error: {str(e)}")
         print(f"  Succeeded tables: {succeeded_tables}")
-        print(f"  Failed tables: {failed_tables}")
         print(f"  Duration: {total_time:.1f}s")
         print(f"{'='*66}\n")
         

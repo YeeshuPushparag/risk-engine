@@ -1085,6 +1085,16 @@ def run_loans_model_pipeline(
         print("[STEP 9] Enhancing risk metrics...")
         loans = enhance_loan_risk_metrics(loans)
         
+        # Remove duplicate business keys created during joins
+        loans = (
+            loans
+            .sort_values("date")
+            .drop_duplicates(
+                subset=["loan_id", "date"],
+                keep="last",
+            )
+        )
+        
         # ============================================================
         # STEP 10: Strict schema projection
         # ============================================================
