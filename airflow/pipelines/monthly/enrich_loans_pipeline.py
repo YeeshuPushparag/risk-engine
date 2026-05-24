@@ -222,8 +222,8 @@ def load_snowflake_table_chunked_with_retry(name, start_date_override, run_id=No
         if start_date_override is not None:
             param_date = f"{start_date_override.year}-{start_date_override.month:02d}-01"
             where_clause = """
-                WHERE DATE_TRUNC('MONTH', TO_DATE("date", 'YYYY-MM-DD'))
-                      >= DATE_TRUNC('MONTH', TO_DATE(%s, 'YYYY-MM-DD'))
+                WHERE DATE_TRUNC('MONTH', CAST("date" AS DATE))
+                    >= DATE_TRUNC('MONTH', CAST(%s AS DATE))
             """
             params = (param_date,)
         
