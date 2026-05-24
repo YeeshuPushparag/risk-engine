@@ -1204,7 +1204,7 @@ def process_commodities(
                     rows = cs.fetchall()
                     cols = ["ticker", "date", "mtm_value", "asset_manager"]
                     df   = pd.DataFrame(rows, columns=cols)
-                    df["date"] = pd.to_datetime(df["date"])
+                    df["date"] = pd.to_datetime(df["date"], utc=True)
                     return df
 
         mtm = retry_with_backoff(
