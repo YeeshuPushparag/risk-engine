@@ -663,6 +663,9 @@ def fetch_raw_data(
                 if sub["close"].isna().all():
                     print(f"  [FETCH][EMPTY] {t} - no price data")
                     failed_tickers.append(t)
+                    for date_str in failed_by_date.keys():
+                        if t not in failed_by_date[date_str]:
+                            failed_by_date[date_str].append(t)
                     continue
              
                 # defensive cleanup
