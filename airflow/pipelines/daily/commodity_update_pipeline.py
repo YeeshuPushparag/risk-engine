@@ -40,7 +40,6 @@ Airflow integration notes
 - Recommended:  retries=2, retry_delay=timedelta(minutes=5)
 - Backfill:     pass {"start_date": "2024-01-01"} via Airflow conf
 - Raw replay:   pass {"replay_from_raw": true, "start_date": "..."} via conf
-- DLQ replay:   trigger separate DAG -> replay_failed_tickers(run_id=...)
   Wire an S3 sensor on the metadata key; trigger when failed_tickers > 0.
 - DLQ DAG must also set  max_active_runs=1.
 
@@ -175,7 +174,6 @@ FEATURE_SCHEMA: dict[str, str] = {
     "record_created_at": "datetime64[ns, UTC]",
     "data_date":         "object",
     "replay_mode":       "bool",
-    "partial_run":       "bool",
 }
 
 # Deterministic fingerprint of the raw schema — written to every output row
@@ -520,9 +518,17 @@ def fetch_commodity_data(
     Returns:
         (raw_df, failed_tickers)
     """
-    records:        list = []
-    failed_tickers: list = []
-
+    records: list = []
+    failed_by_date: dict = {}
+    
+    # Initialize failed_by_date for all dates in range
+    current_date = start_date
+    while current_date <= end_date:
+        if current_date.weekday() < 5:
+            date_str = current_date.strftime("%Y-%m-%d")
+            failed_by_date[date_str] = []
+        current_date += timedelta(days=1)
+    
     for tkr in tickers:
         data = None
 
@@ -539,20 +545,19 @@ def fetch_commodity_data(
                 break
 
             except Exception as exc:
-                print(
-                    f"  [FETCH] {tkr} attempt {attempt}/{CONFIG['max_retries']} "
-                    f"failed: {exc}"
-                )
+                print(f"  [FETCH] {tkr} attempt {attempt}/{CONFIG['max_retries']} failed: {exc}")
                 if attempt < CONFIG["max_retries"]:
                     time.sleep(CONFIG["retry_backoff_s"] * attempt)
                 else:
                     print(f"  [FETCH] {tkr} exhausted retries -> DLQ")
-                    failed_tickers.append(tkr)
+                    for date_str in failed_by_date.keys():
+                        if tkr not in failed_by_date[date_str]:
+                            failed_by_date[date_str].append(tkr)
 
         if data is None or data.empty:
             continue
 
-        # Normalise columns — yfinance may return multi-level or flat
+        # Normalise columns
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = [c[0] for c in data.columns]
 
@@ -569,31 +574,37 @@ def fetch_commodity_data(
         }
         data = data.rename(columns=rename_map)
 
-        # Keep only OHLCV + date; drop Adj Close if present
-        keep_cols = [c for c in ["date", "open", "high", "low", "close", "volume"]
-                     if c in data.columns]
+        keep_cols = [c for c in ["date", "open", "high", "low", "close", "volume"] if c in data.columns]
         data = data[keep_cols].copy()
 
-        data["commodity_symbol"]  = tkr
-        data["data_quality_flag"] = "REAL"         # <- source of truth flag
-        data["record_id"]         = tkr + "_" + data["date"].astype(str)
-        data["ingestion_ts"]      = run_ts
-        data["pipeline_run_id"]   = run_id
+        data["commodity_symbol"] = tkr
+        data["data_quality_flag"] = "REAL"
+        data["record_id"] = tkr + "_" + data["date"].astype(str)
+        data["ingestion_ts"] = run_ts
+        data["pipeline_run_id"] = run_id
+        
+        # Track which dates have data
+        dates_with_data = set(data["date"].dt.strftime("%Y-%m-%d"))
+        
+        # Mark missing dates for this ticker
+        for date_str in failed_by_date.keys():
+            if date_str not in dates_with_data:
+                if tkr not in failed_by_date[date_str]:
+                    failed_by_date[date_str].append(tkr)
 
         records.append(data)
 
     if not records:
-        return pd.DataFrame(), failed_tickers
+        return pd.DataFrame(), failed_by_date
 
-    df         = pd.concat(records, ignore_index=True)
+    df = pd.concat(records, ignore_index=True)
     df["date"] = pd.to_datetime(df["date"], utc=True)
-    df         = df[df["date"].dt.dayofweek < 5]              # weekdays only
-    df         = df[df["date"] >= to_utc_timestamp(start_date)]
-    df         = df.dropna(subset=["close"])
-    df         = df.sort_values(["commodity_symbol", "date"]).reset_index(drop=True)
+    df = df[df["date"].dt.dayofweek < 5]
+    df = df[df["date"] >= to_utc_timestamp(start_date)]
+    df = df.dropna(subset=["close"])
+    df = df.sort_values(["commodity_symbol", "date"]).reset_index(drop=True)
 
-    return df, failed_tickers
-
+    return df, failed_by_date
 
 # =============================================================
 # STAGE 1B — read_raw_layer  (replay_from_raw mode)
@@ -604,7 +615,6 @@ def read_raw_layer(
     prefix:           str,
     start_date:       date_type,
     end_date:         date_type,
-    tickers_override: list[str] = None,
 ) -> pd.DataFrame:
     """
     Read raw partitions (Layer 1) for every weekday in [start_date, end_date].
@@ -613,7 +623,6 @@ def read_raw_layer(
     Raw partitions contain both REAL and SYNTHETIC rows (data_quality_flag),
     so replay is fully self-contained and deterministic.
 
-    Missing partitions are warned but not fatal — partial replay is valid.
     """
     frames:  list      = []
     current: date_type = start_date
@@ -641,8 +650,6 @@ def read_raw_layer(
     combined         = pd.concat(frames, ignore_index=True)
     combined["date"] = pd.to_datetime(combined["date"], utc=True)
 
-    if tickers_override:
-        combined = combined[combined["commodity_symbol"].isin(set(tickers_override))]
 
     # Rebuild record_id if absent (partitions predating this field)
     if "record_id" not in combined.columns:
@@ -857,11 +864,9 @@ def validate_sla(
     df:               pd.DataFrame,
     expected_tickers: int,
     run_date:         date_type,
-    is_partial_run:   bool = False,
 ) -> dict:
     """
     SLA gate. Pipeline raises RuntimeError on FAIL.
-    is_partial_run=True relaxes the coverage check for DLQ replay.
     """
     result = {"status": "PASS", "checks": {}}
     errors = []
@@ -870,7 +875,7 @@ def validate_sla(
     actual   = df["commodity_symbol"].nunique()
     coverage = actual / expected_tickers if expected_tickers else 0
     result["checks"]["coverage"] = f"{actual}/{expected_tickers} ({coverage:.1%})"
-    if not is_partial_run and coverage < CONFIG["coverage_threshold"]:
+    if coverage < CONFIG["coverage_threshold"]:
         msg = f"Low ticker coverage: {coverage:.1%} < required {CONFIG['coverage_threshold']:.0%}"
         errors.append(msg)
         send_alert(msg, level="ERROR", context={"actual": actual, "expected": expected_tickers})
@@ -1116,7 +1121,6 @@ def add_metadata(
     processing_time_s: float,
     start_date,
     replay_mode:      bool,
-    is_partial_run:   bool,
     mode_label:       str,
 ) -> pd.DataFrame:
     """
@@ -1156,7 +1160,6 @@ def add_metadata(
 
     # Mode flags
     df["replay_mode"]    = replay_mode
-    df["partial_run"]    = is_partial_run
     df["run_mode"]       = mode_label
     # data_quality_flag and record_id are preserved from earlier stages —
     # not re-stamped here.
@@ -1337,7 +1340,7 @@ def write_rolling_layer(
 # =============================================================
 
 def write_dlq(
-    failed_tickers: list[str],
+    failed_by_date: dict,
     run_id:         str,
     bucket:         str,
     prefix:         str,
@@ -1347,21 +1350,27 @@ def write_dlq(
     before any processing that could raise — so they are always recoverable
     even if the pipeline crashes later.
     """
-    if not failed_tickers:
+    if not failed_by_date:
         return
 
-    key = f"{prefix}dlq/run_id={run_id}/failed_tickers.json"
-    write_json_to_s3(
-        {
-            "run_id":          run_id,
-            "failed_tickers":  failed_tickers,
-            "count":           len(failed_tickers),
-            "written_at":      utc_now().isoformat(),
-        },
-        bucket,
-        key,
-    )
-    print(f"  [DLQ] {len(failed_tickers)} ticker(s) -> s3://{bucket}/{key}")
+    for date_str, failed_tickers in failed_by_date.items():
+        if not failed_tickers:
+            continue
+
+        failed = sorted(set(failed_tickers))
+
+        key = f"{prefix}dlq/run_id={run_id}/date={date_str}/failed_tickers.json"
+
+        payload = {
+            "run_id": run_id,
+            "date": date_str,
+            "failed_tickers": failed,
+            "count": len(failed),
+            "written_at": utc_now().isoformat()
+        }
+
+        write_json_to_s3(payload, bucket, key)
+        print(f"  [DLQ] {len(failed)} ticker(s) for {date_str} -> s3://{bucket}/{key}")
 
 
 # =============================================================
@@ -1435,7 +1444,6 @@ def update_commodity_pipeline(
     start_date_override: str        = None,   # "YYYY-MM-DD" -> backfill mode
     replay_from_raw:     bool       = False,  # True -> skip yfinance, read Layer 1
     force_overwrite:     bool       = False,  # True -> overwrite existing partitions
-    tickers_override:    list[str]  = None,   # selective processing (DLQ replay)
 ) -> tuple[pd.DataFrame | None, str]:
     """
     Main pipeline entry point.
@@ -1455,9 +1463,7 @@ def update_commodity_pipeline(
         Deterministic and reproducible. data_quality_flag preserved from raw.
         Feature partitions are always versioned under the new run_id.
 
-    Selective / DLQ replay  (tickers_override set)
-        Processes only the specified tickers. Coverage SLA is relaxed.
-        Used by replay_failed_tickers() — do not call directly.
+ 
 
     Idempotency
     -----------
@@ -1469,7 +1475,6 @@ def update_commodity_pipeline(
     -------------------
         # Backfill conf:  {"start_date": "2024-06-01"}
         # Replay conf:    {"replay_from_raw": true, "start_date": "2024-06-01"}
-        # DLQ replay:     call replay_failed_tickers(run_id) in a separate DAG.
         #
         # DAG settings:
         #   max_active_runs = 1
@@ -1482,12 +1487,10 @@ def update_commodity_pipeline(
     run_id  = f"run_{run_ts.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     today   = today_utc()
 
-    is_partial_run      = tickers_override is not None
     effective_overwrite = force_overwrite or replay_from_raw
 
     mode_label = (
         "replay_from_raw" if replay_from_raw
-        else "dlq_replay"  if is_partial_run
         else "backfill"    if start_date_override
         else "incremental"
     )
@@ -1495,7 +1498,6 @@ def update_commodity_pipeline(
     print(f"\n{'=' * 66}")
     print(f"  COMMODITY PIPELINE START  run_id={run_id}")
     print(f"  mode={mode_label}   force_overwrite={effective_overwrite}")
-    print(f"  partial_run={is_partial_run}   replay_from_raw={replay_from_raw}")
     print(f"{'=' * 66}\n")
 
     rolling_key  = prefix + "rolling/commodities_30d.parquet"
@@ -1539,11 +1541,9 @@ def update_commodity_pipeline(
 
         # Resolve effective ticker universe
         raw_tickers = tickers if tickers is not None else DEFAULT_TICKERS
-        all_tickers = validate_ticker_contract(raw_tickers)
-        expected_tickers = len(all_tickers)
+        active_tickers = validate_ticker_contract(raw_tickers)
+        expected_tickers = len(active_tickers)
 
-        # Selective override for DLQ replay — only process failed tickers
-        active_tickers = tickers_override if is_partial_run else all_tickers
         print(
             f"  effective tickers : {len(active_tickers)} of {expected_tickers}  "
             f"({', '.join(active_tickers)})"
@@ -1574,7 +1574,7 @@ def update_commodity_pipeline(
         if replay_from_raw:
             print("\n[ STAGE 3 ] Read raw data from Layer 1 (replay mode)")
             raw_df = read_raw_layer(
-                bucket, prefix, start_date, today, tickers_override
+                bucket, prefix, start_date, today
             )
 
             if raw_df.empty:
@@ -1595,7 +1595,7 @@ def update_commodity_pipeline(
 
         else:
             print("\n[ STAGE 3 ] Fetch raw data from yfinance")
-            raw_df, failed_tickers = fetch_commodity_data(
+            raw_df, failed_by_date = fetch_commodity_data(
                 tickers    = active_tickers,
                 start_date = start_date,
                 end_date   = today,
@@ -1604,7 +1604,24 @@ def update_commodity_pipeline(
             )
 
             # DLQ written before anything that could raise
-            write_dlq(failed_tickers, run_id, bucket, prefix)
+            write_dlq(failed_by_date, run_id, bucket, prefix)
+      
+            # Flatten for failure rate and metadata
+            all_failed = []
+            for failures in failed_by_date.values():
+                all_failed.extend(failures)
+            failed_tickers = list(set(all_failed))
+
+            if failed_tickers:
+                print(f"  [WARNING] Failed tickers: {failed_tickers}")
+                send_alert(
+                    f"{len(failed_tickers)} tickers failed during fetch",
+                    level="WARNING",
+                    context={
+                        "run_id": run_id,
+                        "failed_count": len(failed_tickers)
+                    }
+                )
 
             # Build synthetic rows for tickers missing today's data
             print("  [STAGE 3b] Building synthetic rows for missing today's data...")
@@ -1700,7 +1717,6 @@ def update_commodity_pipeline(
             clean_df,
             expected_tickers = expected_tickers,
             run_date         = today,
-            is_partial_run   = is_partial_run,
         )
 
         if sla["status"] == "FAIL":
@@ -1768,7 +1784,6 @@ def update_commodity_pipeline(
             processing_time_s = processing_time_s,
             start_date        = start_date,
             replay_mode       = replay_from_raw,
-            is_partial_run    = is_partial_run,
             mode_label        = mode_label,
         )
 
@@ -1860,64 +1875,6 @@ def update_commodity_pipeline(
             release_s3_lock(bucket, prefix)
 
 
-# =============================================================
-# DLQ REPLAY  —  selective re-fetch of failed tickers only
-# =============================================================
-
-def replay_failed_tickers(
-    run_id: str,
-    bucket: str = "yeeshu-commodity-bucket",
-    prefix: str = "historical-commodity/",
-) -> tuple[pd.DataFrame | None, str]:
-    """
-    Selectively reprocess ONLY the failed tickers from a past run.
-
-    Reads the DLQ for the given run_id, extracts failed tickers, and
-    passes them as tickers_override to update_commodity_pipeline. This
-    processes ONLY the failed tickers — the rest of the dataset is untouched.
-
-    Usage:
-        replay_failed_tickers("run_20250418_143201_a3f9bc")
-
-    Airflow:
-        Wire an S3 sensor on the metadata key.
-        Trigger when run_summary["failed_tickers"] is non-empty.
-        Separate replay DAG with max_active_runs=1.
-    """
-    dlq_key  = f"{prefix}dlq/run_id={run_id}/failed_tickers.json"
-    meta_key = f"{prefix}metadata/run_id={run_id}/run_summary.json"
-
-    if not s3_key_exists(bucket, dlq_key):
-        print(f"[REPLAY-DLQ] No DLQ entry found for run_id={run_id}")
-        return None, "No DLQ entry found"
-
-    if not s3_key_exists(bucket, meta_key):
-        msg = f"[REPLAY-DLQ] Run summary not found for run_id={run_id}"
-        send_alert(msg, level="ERROR", context={"run_id": run_id})
-        return None, msg
-
-    dlq  = json.loads(get_s3().get_object(Bucket=bucket, Key=dlq_key)["Body"].read())
-    meta = json.loads(get_s3().get_object(Bucket=bucket, Key=meta_key)["Body"].read())
-
-    failed = dlq.get("failed_tickers", [])
-    if not failed:
-        print("[REPLAY-DLQ] DLQ is empty — nothing to replay.")
-        return None, "DLQ empty"
-
-    original_start = meta.get("start_date")
-    print(
-        f"[REPLAY-DLQ] Replaying {len(failed)} ticker(s) from run_id={run_id} "
-        f"using start_date={original_start}"
-    )
-
-    # KEY: tickers_override ensures ONLY failed tickers are re-fetched
-    return update_commodity_pipeline(
-        bucket               = bucket,
-        prefix               = prefix,
-        start_date_override  = original_start,
-        force_overwrite      = True,
-        tickers_override     = failed,
-    )
 
 
 # =============================================================

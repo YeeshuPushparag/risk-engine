@@ -30,7 +30,6 @@ Airflow integration notes
 - Recommended:  retries=2, retry_delay=timedelta(minutes=5)
 - Backfill:     pass {"start_date": "2024-01-01"} via Airflow conf
 - Raw replay:   pass {"replay_from_raw": true, "start_date": "..."} via conf
-- DLQ replay:   trigger separate DAG -> replay_failed_pairs(run_id=...)
   Wire an S3 sensor on the metadata key; trigger when failed_pairs > 0.
 - DLQ DAG must also set  max_active_runs=1.
 
@@ -526,9 +525,17 @@ def fetch_fx_data(
         fx_long_df has columns: date, currency_pair, fx_rate, record_id,
                                 ingestion_ts, pipeline_run_id
     """
-    records:      list = []
-    failed_pairs: list = []
-
+    records: list = []
+    failed_by_date: dict = {}
+    
+    # Initialize failed_by_date for all dates in range
+    current_date = start_date
+    while current_date <= end_date:
+        if current_date.weekday() < 5:
+            date_str = current_date.strftime("%Y-%m-%d")
+            failed_by_date[date_str] = []
+        current_date += timedelta(days=1)
+    
     for pair in pairs:
         yahoo_symbol = pair + "=X"
         data = None
@@ -547,92 +554,74 @@ def fetch_fx_data(
                 break
 
             except Exception as exc:
-                print(
-                    f"  [FETCH FX] {pair} attempt {attempt}/{CONFIG['max_retries']} "
-                    f"failed: {exc}"
-                )
+                print(f"  [FETCH FX] {pair} attempt {attempt}/{CONFIG['max_retries']} failed: {exc}")
                 if attempt < CONFIG["max_retries"]:
                     time.sleep(CONFIG["retry_backoff_s"] * attempt)
                 else:
                     print(f"  [FETCH FX] {pair} exhausted retries -> DLQ")
-                    failed_pairs.append(pair)
+                    # Mark this pair as failed for ALL dates
+                    for date_str in failed_by_date.keys():
+                        if pair not in failed_by_date[date_str]:
+                            failed_by_date[date_str].append(pair)
 
         if data is None or data.empty:
             continue
 
-        # =========================================================
-        # Flatten yfinance MultiIndex columns immediately
-        # =========================================================
-
+        # Flatten yfinance MultiIndex columns
         if isinstance(data.columns, pd.MultiIndex):
+            data.columns = ["_".join([str(x) for x in col if x]).strip() for col in data.columns.values]
 
-            data.columns = [
-                "_".join(
-                    [str(x) for x in col if x]
-                ).strip()
-                for col in data.columns.values
-            ]
-
-        # =========================================================
         # Extract Close column
-        # =========================================================
-
-        close_cols = [
-            c for c in data.columns
-            if "Close" in c
-        ]
-
+        close_cols = [c for c in data.columns if "Close" in c]
         if not close_cols:
-
-            failed_pairs.append(pair)
+            for date_str in failed_by_date.keys():
+                if pair not in failed_by_date[date_str]:
+                    failed_by_date[date_str].append(pair)
             continue
 
         target_col = None
-
         for col in close_cols:
-
             if yahoo_symbol in col:
-
                 target_col = col
                 break
 
         if target_col is None:
-
-            failed_pairs.append(pair)
+            for date_str in failed_by_date.keys():
+                if pair not in failed_by_date[date_str]:
+                    failed_by_date[date_str].append(pair)
             continue
 
-        sub = (
-            data[[target_col]]
-            .copy()
-            .reset_index()
-        )
-
-        sub.columns = [
-            "date",
-            "fx_rate",
-        ]
-        sub["fx_rate"]        = pd.to_numeric(sub["fx_rate"], errors="coerce")
-        sub["currency_pair"]  = pair
-        sub["record_id"]      = pair + "_" + sub["date"].astype(str)
-        sub["ingestion_ts"]   = run_ts
+        sub = data[[target_col]].copy().reset_index()
+        sub.columns = ["date", "fx_rate"]
+        sub["fx_rate"] = pd.to_numeric(sub["fx_rate"], errors="coerce")
+        sub["currency_pair"] = pair
+        sub["record_id"] = pair + "_" + sub["date"].astype(str)
+        sub["ingestion_ts"] = run_ts
         sub["pipeline_run_id"] = run_id
-        records.append(sub[["date", "currency_pair", "fx_rate", "record_id",
-                             "ingestion_ts", "pipeline_run_id"]])
+        
+        # Track which dates have data
+        dates_with_data = set(sub["date"].dt.strftime("%Y-%m-%d"))
+        
+        # Mark missing dates for this pair
+        for date_str in failed_by_date.keys():
+            if date_str not in dates_with_data:
+                if pair not in failed_by_date[date_str]:
+                    failed_by_date[date_str].append(pair)
+        
+        
+        records.append(sub[["date", "currency_pair", "fx_rate", "record_id", "ingestion_ts", "pipeline_run_id"]])
 
     if not records:
-        return pd.DataFrame(), failed_pairs
+        return pd.DataFrame(), failed_by_date
 
-    df         = pd.concat(records, ignore_index=True)
+    df = pd.concat(records, ignore_index=True)
     df["date"] = pd.to_datetime(df["date"], utc=True)
-    df         = df[df["date"].dt.dayofweek < 5]   # weekdays only
-    df         = df[df["date"] >= to_utc_timestamp(start_date)]
+    df = df[df["date"].dt.dayofweek < 5]
+    df = df[df["date"] >= to_utc_timestamp(start_date)]
     df.sort_values(["currency_pair", "date"], inplace=True)
-
-    # Forward-fill gaps within each pair (matching original pipeline logic)
     df["fx_rate"] = df.groupby("currency_pair")["fx_rate"].ffill()
 
-    return df, failed_pairs
-
+    return df, failed_by_date
 
 # =============================================================
 # STAGE 1 HELPER — fetch_interest_rates  (FRED, per-currency retry)
@@ -745,7 +734,6 @@ def read_raw_layer(
     prefix:     str,
     start_date: date_type,
     end_date:   date_type,
-    pairs_override: list[str] = None,
 ) -> pd.DataFrame:
     """
     Read raw partitions (Layer 1) for every weekday in [start_date, end_date].
@@ -754,7 +742,6 @@ def read_raw_layer(
     Both fx_rate and interest_diff were stored together at ingestion time,
     so replay is fully self-contained — no yfinance or FRED calls needed.
 
-    Missing partitions are warned but not fatal (partial replay is valid).
     """
     frames:  list      = []
     current: date_type = start_date
@@ -782,8 +769,6 @@ def read_raw_layer(
     combined         = pd.concat(frames, ignore_index=True)
     combined["date"] = pd.to_datetime(combined["date"], utc=True)
 
-    if pairs_override:
-        combined = combined[combined["currency_pair"].isin(set(pairs_override))]
 
     if "record_id" not in combined.columns:
         combined["record_id"] = (
@@ -846,11 +831,9 @@ def validate_sla(
     df:             pd.DataFrame,
     expected_pairs: int,
     run_date:       date_type,
-    is_partial_run: bool = False,
 ) -> dict:
     """
     SLA gate. Pipeline raises RuntimeError on FAIL.
-    is_partial_run=True relaxes the coverage check for DLQ / selective replay.
     """
     result = {"status": "PASS", "checks": {}}
     errors = []
@@ -859,7 +842,7 @@ def validate_sla(
     actual   = df["currency_pair"].nunique()
     coverage = actual / expected_pairs if expected_pairs else 0
     result["checks"]["coverage"] = f"{actual}/{expected_pairs} ({coverage:.1%})"
-    if not is_partial_run and coverage < CONFIG["coverage_threshold"]:
+    if coverage < CONFIG["coverage_threshold"]:
         msg = f"Low pair coverage: {coverage:.1%} < required {CONFIG['coverage_threshold']:.0%}"
         errors.append(msg)
         send_alert(msg, level="ERROR", context={"actual": actual, "expected": expected_pairs})
@@ -1076,7 +1059,6 @@ def add_metadata(
     processing_time_s: float,
     start_date,
     replay_mode:    bool,
-    is_partial_run: bool,
     mode_label:     str,
 ) -> pd.DataFrame:
     """
@@ -1113,7 +1095,6 @@ def add_metadata(
 
     # Mode flags
     df["replay_mode"]          = replay_mode
-    df["partial_run"]          = is_partial_run
     df["run_mode"]             = mode_label
 
     # record_id was carried forward from the raw stage — not re-stamped here.
@@ -1290,32 +1271,37 @@ def write_rolling_layer(
 # =============================================================
 
 def write_dlq(
-    failed_pairs: list[str],
-    run_id:       str,
-    bucket:       str,
-    prefix:       str,
+    failed_by_date: dict,
+    run_id:         str,
+    bucket:         str,
+    prefix:         str,
 ) -> None:
     """
     Persist failed currency pairs to the DLQ immediately after the fetch
     stage — before any processing that could raise — so they are always
     recoverable even if the pipeline crashes later.
     """
-    if not failed_pairs:
+    if not failed_by_date:
         return
 
-    key = f"{prefix}dlq/run_id={run_id}/failed_pairs.json"
-    write_json_to_s3(
-        {
-            "run_id":       run_id,
-            "failed_pairs": failed_pairs,
-            "count":        len(failed_pairs),
-            "written_at":   utc_now().isoformat(),
-        },
-        bucket,
-        key,
-    )
-    print(f"  [DLQ] {len(failed_pairs)} pair(s) -> s3://{bucket}/{key}")
+    for date_str, failed_pairs in failed_by_date.items():
+        if not failed_pairs:
+            continue
 
+        failed = sorted(set(failed_pairs))
+
+        key = f"{prefix}dlq/run_id={run_id}/date={date_str}/failed_pairs.json"
+
+        payload = {
+            "run_id": run_id,
+            "date": date_str,
+            "failed_pairs": failed,
+            "count": len(failed),
+            "written_at": utc_now().isoformat()
+        }
+
+        write_json_to_s3(payload, bucket, key)
+        print(f"  [DLQ] {len(failed)} pair(s) for {date_str} -> s3://{bucket}/{key}")
 
 # =============================================================
 # METADATA WRITE HELPER
@@ -1389,7 +1375,6 @@ def update_fx_pipeline(
     start_date_override: str       = None,   # "YYYY-MM-DD" -> backfill mode
     replay_from_raw:     bool      = False,  # True -> skip yfinance+FRED, read Layer 1
     force_overwrite:     bool      = False,  # True -> overwrite existing partitions
-    pairs_override:      list[str] = None,   # selective processing (DLQ replay)
 ) -> tuple[pd.DataFrame | None, str]:
     """
     Main pipeline entry point.
@@ -1408,15 +1393,12 @@ def update_fx_pipeline(
         Deterministic and reproducible. Feature partitions are always
         versioned under the new run_id.
 
-    Selective  (pairs_override set)
-        Processes only the specified currency pairs. Used by replay_failed_pairs().
-        Coverage SLA is relaxed (is_partial_run=True).
+
 
     Airflow integration
     -------------------
         # Backfill conf:  {"start_date": "2024-06-01"}
         # Replay conf:    {"replay_from_raw": true, "start_date": "2024-06-01"}
-        # DLQ replay:     call replay_failed_pairs(run_id) in a separate DAG.
         #
         # DAG settings:
         #   max_active_runs = 1
@@ -1429,12 +1411,10 @@ def update_fx_pipeline(
     run_id  = f"run_{run_ts.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     today   = today_utc()
 
-    is_partial_run      = pairs_override is not None
     effective_overwrite = force_overwrite or replay_from_raw
 
     mode_label = (
         "replay_from_raw" if replay_from_raw
-        else "dlq_replay"  if is_partial_run
         else "backfill"    if start_date_override
         else "incremental"
     )
@@ -1442,7 +1422,6 @@ def update_fx_pipeline(
     print(f"\n{'=' * 66}")
     print(f"  FX PIPELINE START  run_id={run_id}")
     print(f"  mode={mode_label}   force_overwrite={effective_overwrite}")
-    print(f"  partial_run={is_partial_run}   replay_from_raw={replay_from_raw}")
     print(f"{'=' * 66}\n")
 
     rolling_key  = prefix + "rolling/fx_exposure_30d.parquet"
@@ -1488,11 +1467,9 @@ def update_fx_pipeline(
         # Determine the full expected pair universe from the reference data
         ticker_ref["currency_pair"]         = ticker_ref["sector"].map(SECTOR_CURRENCY_MAP)
         ticker_ref["foreign_revenue_ratio"] = ticker_ref["currency_pair"].map(FOREIGN_RATIO)
-        all_pairs    = ticker_ref["currency_pair"].dropna().unique().tolist()
-        expected_pairs = len(all_pairs)
+        active_pairs    = ticker_ref["currency_pair"].dropna().unique().tolist()
+        expected_pairs = len(active_pairs)
 
-        # Apply selective override for DLQ / partial replay
-        active_pairs = pairs_override if is_partial_run else all_pairs
         print(f"  effective pairs: {len(active_pairs)} of {expected_pairs}")
 
         # ── STAGE 2: Determine date range ───────────────────────────────
@@ -1520,7 +1497,7 @@ def update_fx_pipeline(
         # ── STAGE 3: Fetch raw data ──────────────────────────────────────
         if replay_from_raw:
             print("\n[ STAGE 3 ] Read raw data from Layer 1 (replay mode)")
-            raw_df = read_raw_layer(bucket, prefix, start_date, today, pairs_override)
+            raw_df = read_raw_layer(bucket, prefix, start_date, today)
 
             if raw_df.empty:
                 msg = "Replay aborted — no raw partitions found for the requested range."
@@ -1542,7 +1519,7 @@ def update_fx_pipeline(
             print("\n[ STAGE 3 ] Fetch raw FX data (yfinance) + interest rates (FRED)")
 
             print("  [STAGE 3a] Fetching FX rates from yfinance...")
-            fx_df, failed_pairs = fetch_fx_data(
+            fx_df, failed_by_date = fetch_fx_data(
                 pairs      = active_pairs,
                 start_date = start_date,
                 end_date   = today,
@@ -1551,7 +1528,24 @@ def update_fx_pipeline(
             )
 
             # Write DLQ before anything that could raise
-            write_dlq(failed_pairs, run_id, bucket, prefix)
+            write_dlq(failed_by_date, run_id, bucket, prefix)
+            
+            # Also flatten for failure rate:
+            all_failed = []
+            for failures in failed_by_date.values():
+                all_failed.extend(failures)
+            failed_pairs = list(set(all_failed))
+
+            if failed_pairs:
+                print(f"  [WARNING] Failed pairs: {failed_pairs}")
+                send_alert(
+                    f"{len(failed_pairs)} pairs failed during fetch",
+                    level="WARNING",
+                    context={
+                        "run_id": run_id,
+                        "failed_count": len(failed_pairs)
+                    }
+                )
 
             if fx_df.empty:
                 msg = "No FX data fetched from yfinance."
@@ -1650,7 +1644,6 @@ def update_fx_pipeline(
             clean_raw_df,
             expected_pairs = expected_pairs,
             run_date       = today,
-            is_partial_run = is_partial_run,
         )
 
         if sla["status"] == "FAIL":
@@ -1702,7 +1695,6 @@ def update_fx_pipeline(
             processing_time_s = processing_time_s,
             start_date        = start_date,
             replay_mode       = replay_from_raw,
-            is_partial_run    = is_partial_run,
             mode_label        = mode_label
         )
 
@@ -1792,65 +1784,6 @@ def update_fx_pipeline(
         if lock_acquired:
             release_s3_lock(bucket, prefix)
 
-
-# =============================================================
-# DLQ REPLAY  —  selective re-fetch of failed currency pairs
-# =============================================================
-
-def replay_failed_pairs(
-    run_id: str,
-    bucket: str = "yeeshu-fx-bucket",
-    prefix: str = "historical-fx/",
-) -> tuple[pd.DataFrame | None, str]:
-    """
-    Selectively reprocess ONLY the failed currency pairs from a past run.
-
-    Reads the DLQ for the given run_id, extracts the failed pairs, and
-    passes them as pairs_override to update_fx_pipeline. This processes
-    ONLY the failed pairs — not the entire dataset.
-
-    Usage:
-        replay_failed_pairs("run_20250418_143201_a3f9bc")
-
-    Airflow:
-        Wire an S3 sensor on the metadata key.
-        Trigger this DAG when run_summary["failed_pairs"] is non-empty.
-        Separate replay DAG with max_active_runs=1.
-    """
-    dlq_key  = f"{prefix}dlq/run_id={run_id}/failed_pairs.json"
-    meta_key = f"{prefix}metadata/run_id={run_id}/run_summary.json"
-
-    if not s3_key_exists(bucket, dlq_key):
-        print(f"[REPLAY-DLQ] No DLQ entry found for run_id={run_id}")
-        return None, "No DLQ entry found"
-
-    if not s3_key_exists(bucket, meta_key):
-        msg = f"[REPLAY-DLQ] Run summary not found for run_id={run_id}"
-        send_alert(msg, level="ERROR", context={"run_id": run_id})
-        return None, msg
-
-    dlq  = json.loads(get_s3().get_object(Bucket=bucket, Key=dlq_key)["Body"].read())
-    meta = json.loads(get_s3().get_object(Bucket=bucket, Key=meta_key)["Body"].read())
-
-    failed = dlq.get("failed_pairs", [])
-    if not failed:
-        print("[REPLAY-DLQ] DLQ is empty — nothing to replay.")
-        return None, "DLQ empty"
-
-    original_start = meta.get("start_date")
-    print(
-        f"[REPLAY-DLQ] Replaying {len(failed)} pair(s) from run_id={run_id} "
-        f"using start_date={original_start}"
-    )
-
-    # KEY: pairs_override ensures ONLY failed pairs are re-fetched
-    return update_fx_pipeline(
-        bucket               = bucket,
-        prefix               = prefix,
-        start_date_override  = original_start,
-        force_overwrite      = True,
-        pairs_override       = failed,
-    )
 
 
 # =============================================================

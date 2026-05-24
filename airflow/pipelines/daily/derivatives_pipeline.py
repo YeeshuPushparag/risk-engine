@@ -797,7 +797,7 @@ def write_to_postgres(
             DELETE FROM derivative_data WHERE date BETWEEN start AND end
       2. INSERT new rows via COPY (most efficient Postgres bulk load).
       3. Trim to last 2 calendar days:
-            DELETE WHERE date < MAX(date) - INTERVAL '2 days'
+            DELETE WHERE date <= MAX(date) - INTERVAL '2 days'
 
     All three steps commit together. Any step failure -> implicit rollback.
 
@@ -877,7 +877,7 @@ def write_to_postgres(
                     # Step 4: trim to last 2 calendar days
                     pg_cur.execute(f"""
                         DELETE FROM public.{POSTGRES_TABLE}
-                        WHERE date < (
+                        WHERE date <= (
                             SELECT MAX(date) FROM public.{POSTGRES_TABLE}
                         ) - INTERVAL '2 days'
                     """)

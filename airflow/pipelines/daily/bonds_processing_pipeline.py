@@ -1236,7 +1236,7 @@ def write_to_postgres(
 
       3. Trim to last 2 calendar days:
             DELETE FROM bond_data
-            WHERE date < (SELECT MAX(date) FROM bond_data) - INTERVAL '2 days'
+            WHERE date <= (SELECT MAX(date) FROM bond_data) - INTERVAL '2 days'
          Postgres is a UI serving layer; it only needs recent data.
 
     All three steps commit together. If any step fails, the connection is
@@ -1334,7 +1334,7 @@ def write_to_postgres(
                     pg_cur.execute(
                         """
                         DELETE FROM public.bond_data
-                        WHERE date < (
+                        WHERE date <= (
                             SELECT MAX(date) FROM public.bond_data
                         ) - INTERVAL '2 days'
                         """

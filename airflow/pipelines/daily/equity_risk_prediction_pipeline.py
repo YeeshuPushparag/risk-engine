@@ -869,7 +869,6 @@ def drop_old_pipeline_metrics(df):
     'output_rows',
     'processing_time_s',
     'replay_mode',
-    'partial_run',
     'run_mode',
     'ingestion_ts'
     ]
@@ -1319,7 +1318,7 @@ def write_to_postgres(df, mode, start_date, end_date, retries=3):
 
       3. Trim to last 2 calendar days:
             DELETE FROM equity_data
-            WHERE date < (SELECT MAX(date) FROM equity_data) - INTERVAL '2 days'
+            WHERE date <= (SELECT MAX(date) FROM equity_data) - INTERVAL '2 days'
          Postgres is a UI serving layer; it only needs recent data.
 
     All three steps are committed together. If any step fails, the transaction
@@ -1435,7 +1434,7 @@ def write_to_postgres(df, mode, start_date, end_date, retries=3):
                     pg_cur.execute(
                         """
                         DELETE FROM public.equity_data
-                        WHERE date < (
+                        WHERE date <= (
                             SELECT MAX(date) FROM public.equity_data
                         ) - INTERVAL '2 days'
                         """

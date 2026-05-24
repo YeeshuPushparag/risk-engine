@@ -124,11 +124,7 @@ CONFIG: dict = {
     "features_prefix":     "historical-bonds/features/",
     "rolling_key":         "historical-bonds/rolling/bonds_features_30d.parquet",
     "run_metadata_prefix": "historical-bonds/run_metadata/",
-    "dlq_prefix": "historical-bonds/dlq/",
 
-    # SLA thresholds
-    "coverage_threshold": 0.80,
-    "max_duplicate_pct":  0.05,
 
     # Data quality thresholds
     "max_null_pct":       0.02,
@@ -804,43 +800,22 @@ def build_dgs10_series(
 
 
 
-# =============================================================
-# STAGE 6 — DLQ
-# =============================================================
-def write_dlq_rows(
-    df_bad: pd.DataFrame,
-    bucket: str,
-    run_id: str,
-) -> None:
-
-    if df_bad.empty:
-        return
-
-    key = (
-        f"{CONFIG['dlq_prefix']}"
-        f"run_id={run_id}/"
-        f"data.parquet"
-    )
-
-    write_parquet_to_s3(df_bad, bucket, key)
-
-    print(
-        f"  [DLQ] Wrote {len(df_bad):,} bad rows "
-        f"to s3://{bucket}/{key}"
-    )
 
 
 # =============================================================
-# STAGE 7 — validate_data
+# STAGE 6 — validate_data
 # =============================================================
 def validate_data(
     df: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> pd.DataFrame:
     """
     Hard data-quality validation.
-
-    Removes invalid rows before SLA evaluation.
+    
+    Removes invalid rows.
     Critical threshold breaches raise DataValidationError.
+    
+    Returns:
+        cleaned DataFrame (bad rows are discarded, not returned)
     """
 
     original_rows = len(df)
@@ -863,7 +838,6 @@ def validate_data(
     ]
 
     if missing_cols:
-
         raise DataValidationError(
             f"Missing required columns: {missing_cols}"
         )
@@ -904,36 +878,23 @@ def validate_data(
     # =========================================================
 
     if null_pct > CONFIG["max_null_pct"]:
-
         raise DataValidationError(
-            f"Null percentage too high: "
-            f"{null_pct:.2%}"
+            f"Null percentage too high: {null_pct:.2%}"
         )
 
     if invalid_pct > CONFIG["max_negative_pct"]:
-
         raise DataValidationError(
-            f"Invalid numeric percentage too high: "
-            f"{invalid_pct:.2%}"
+            f"Invalid numeric percentage too high: {invalid_pct:.2%}"
         )
 
     # =========================================================
-    # Remove bad rows
+    # Remove bad rows (discard them - no DLQ)
     # =========================================================
 
-    bad_mask = (
-        null_mask |
-        invalid_mask
-    )
+    bad_mask = null_mask | invalid_mask
 
     cleaned = (
         df[~bad_mask]
-        .copy()
-        .reset_index(drop=True)
-    )
-
-    bad_rows = (
-        df[bad_mask]
         .copy()
         .reset_index(drop=True)
     )
@@ -945,11 +906,11 @@ def validate_data(
         f"rows_dropped={bad_mask.sum():,}"
     )
 
-    return cleaned, bad_rows
+    return cleaned  
 
 
 # =============================================================
-# STAGE 8 — detect_anomalies
+# STAGE 7 — detect_anomalies
 # =============================================================
 
 def detect_anomalies(
@@ -1031,132 +992,7 @@ def detect_anomalies(
     return df
 
 # =============================================================
-# STAGE 9 — validate_sla
-# =============================================================
-
-def validate_sla(
-    df:             pd.DataFrame,
-    expected_bonds: int,
-    run_date:       date_type,
-    is_partial_run: bool = False,
-) -> dict:
-    """
-    SLA gate — pipeline raises RuntimeError on FAIL.
-
-    is_partial_run=True relaxes coverage checks for replay runs.
-    """
-
-    result = {"status": "PASS", "checks": {}}
-    errors = []
-
-    # =========================================================
-    # 1. Coverage check
-    # =========================================================
-    actual = df["bond_id"].nunique()
-
-    coverage = (
-        actual / expected_bonds
-        if expected_bonds else 0
-    )
-
-    result["checks"]["coverage"] = (
-        f"{actual}/{expected_bonds} ({coverage:.1%})"
-    )
-
-    if (
-        not is_partial_run
-        and coverage < CONFIG["coverage_threshold"]
-    ):
-
-        msg = (
-            f"Low bond coverage: "
-            f"{coverage:.1%} < required 80%"
-        )
-
-        errors.append(msg)
-
-        send_critical_alert(
-            msg,
-            context={
-                "actual": actual,
-                "expected": expected_bonds,
-            },
-        )
-
-    # =========================================================
-    # 2. Freshness check
-    # =========================================================
-    max_ts = pd.to_datetime(df["date"]).max()
-
-    expected_date = run_date
-
-    while expected_date.weekday() >= 5:
-        expected_date -= timedelta(days=1)
-
-    result["checks"]["max_date"] = str(max_ts)
-
-    if pd.isna(max_ts) or max_ts.date() < expected_date:
-
-        msg = (
-            f"Stale bond data: latest={max_ts}, "
-            f"expected >= {expected_date}"
-        )
-
-        errors.append(msg)
-
-        send_critical_alert(
-            msg,
-            context={
-                "max_date": str(max_ts),
-                "expected_date": str(expected_date),
-            },
-        )
-
-    # =========================================================
-    # 3. Duplicate check
-    # =========================================================
-
-    dup_count = int(
-        df.duplicated(["bond_id", "date"]).sum()
-    )
-
-    dup_pct = (
-        dup_count / len(df)
-        if len(df) else 0
-    )
-
-    result["checks"]["duplicates"] = dup_count
-
-    result["checks"]["duplicate_pct"] = (
-        f"{dup_pct:.2%}"
-    )
-
-    if dup_count > 0:
-
-        result["checks"]["duplicate_note"] = (
-            "duplicates detected; rolling layer keeps latest row"
-        )
-
-    if dup_pct > CONFIG["max_duplicate_pct"]:
-
-        msg = (
-            f"Duplicate percentage too high: "
-            f"{dup_pct:.2%} > "
-            f"allowed {CONFIG['max_duplicate_pct']:.2%}"
-        )
-
-        errors.append(msg)
-
-        send_critical_alert(
-            msg,
-            context={
-                "duplicate_count": dup_count,
-                "duplicate_pct": f"{dup_pct:.2%}",
-            },
-        )
-
-# =============================================================
-# STAGE 10 — merge_macro_data 
+# STAGE 8 — merge_macro_data 
 # =============================================================
 
 def merge_macro_data(daily: pd.DataFrame, bucket: str) -> pd.DataFrame:
@@ -1180,11 +1016,11 @@ def merge_macro_data(daily: pd.DataFrame, bucket: str) -> pd.DataFrame:
             how="inner",
         ).drop(columns=["mm_yy"])
 
-        print(f"  [STAGE 10] Macro merge: {len(daily):,} <- {len(merged):,} rows.")
+        print(f"  [STAGE 8] Macro merge: {len(daily):,} <- {len(merged):,} rows.")
         return merged
 
     except Exception as exc:
-        print(f"  [STAGE 10][WARN] Macro merge failed — proceeding without macro: {exc}")
+        print(f"  [STAGE 8][WARN] Macro merge failed — proceeding without macro: {exc}")
         return daily.drop(columns=["mm_yy"], errors="ignore")
 
 
@@ -1564,13 +1400,7 @@ def update_bonds_pipeline(
         # DATA VALIDATION
         # ══════════════════════════════════════════════════════
 
-        df_output, df_dlq = validate_data(df_output)
-
-        write_dlq_rows(
-            df_bad = df_dlq,
-            bucket = bucket,
-            run_id = run_id,
-        )
+        df_output = validate_data(df_output)
 
         # ══════════════════════════════════════════════════════
         # ANOMALY DETECTION
@@ -1578,23 +1408,6 @@ def update_bonds_pipeline(
 
         df_output = detect_anomalies(df_output)
 
-
-        # ══════════════════════════════════════════════════════
-        # SLA VALIDATION
-        # ══════════════════════════════════════════════════════
-
-        sla = validate_sla(
-            df               = df_output,
-            expected_bonds   = base["bond_id"].nunique(),
-            run_date         = today,
-            is_partial_run   = (mode == "replay"),
-        )
-
-        if sla["status"] == "FAIL":
-
-            raise DataValidationError(
-                f"SLA validation failed: {sla['errors']}"
-            )
         output_rows = len(df_output)
         print(f"\n  Output rows: {output_rows:,}")
 

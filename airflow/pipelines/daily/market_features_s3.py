@@ -28,7 +28,6 @@ Airflow integration notes
 - Recommended:  retries=2, retry_delay=timedelta(minutes=5)
 - Backfill:     pass {"start_date": "2024-01-01"} via Airflow conf
 - Raw replay:   pass {"replay_from_raw": true, "start_date": "..."} via conf
-- DLQ replay:   trigger separate DAG -> replay_failed_tickers(run_id=...)
   Wire an S3 sensor on the metadata key; trigger when failed_tickers > 0.
 - DLQ DAG must also set  max_active_runs=1.
 
@@ -508,12 +507,13 @@ def fetch_raw_data(
     end_date:   date_type,
     run_id:     str,
     run_ts:     datetime,
-) -> tuple[pd.DataFrame, list[str]]:
+) -> tuple[pd.DataFrame, dict]:  # CHANGED: returns dict instead of list
     """
     Download OHLCV data from yfinance in batches with retry + backoff.
 
     Returns:
-        (raw_df, failed_tickers)
+        (raw_df, failed_by_date)  # CHANGED: now returns dict per date
+        failed_by_date: dict {date_str: [list of failed tickers]}
 
     Idempotency:
         record_id = "<TICKER>_<YYYY-MM-DD>" is deterministic — replaying the
@@ -523,7 +523,16 @@ def fetch_raw_data(
         All date values are UTC-aware after enforce_schema is called downstream.
     """
     new_records: list = []
-    failed_tickers: list = []
+    failed_tickers: list = []  # KEPT for backward compatibility
+    failed_by_date: dict = {}  # ADDED: {date_str: [tickers]}
+
+    # ADDED: Initialize failed_by_date for all dates in range
+    current_date = start_date
+    while current_date <= end_date:
+        if current_date.weekday() < 5:  # weekdays only
+            date_str = current_date.strftime("%Y-%m-%d")
+            failed_by_date[date_str] = []
+        current_date += timedelta(days=1)
 
     total_batches = (
         len(tickers) + CONFIG["batch_size"] - 1
@@ -573,6 +582,11 @@ def fetch_raw_data(
                         f"  [FETCH] batch {batch_num} exhausted retries -> DLQ"
                     )
                     failed_tickers.extend(batch)
+                    # ADDED: Mark all tickers in batch as failed for all dates
+                    for t in batch:
+                        for date_str in failed_by_date.keys():
+                            if t not in failed_by_date[date_str]:
+                                failed_by_date[date_str].append(t)
 
         # =========================================================
         # SKIP EMPTY RESPONSES
@@ -600,6 +614,11 @@ def fetch_raw_data(
             print(f"  [FETCH][COLUMN ERROR] {exc}")
 
             failed_tickers.extend(batch)
+            # ADDED: Mark all tickers in batch as failed for all dates
+            for t in batch:
+                for date_str in failed_by_date.keys():
+                    if t not in failed_by_date[date_str]:
+                        failed_by_date[date_str].append(t)
             continue
 
         # =========================================================
@@ -614,6 +633,12 @@ def fetch_raw_data(
         if missing:
             print(f"  [FETCH][MISSING] {missing}")
             failed_tickers.extend(missing)
+            print(f"  [FETCH] Total failed so far: {len(set(failed_tickers))} unique tickers")
+            # ADDED: Mark missing tickers as failed for all dates
+            for t in missing:
+                for date_str in failed_by_date.keys():
+                    if t not in failed_by_date[date_str]:
+                        failed_by_date[date_str].append(t)
 
         # =========================================================
         # PROCESS VALID TICKERS
@@ -647,6 +672,10 @@ def fetch_raw_data(
                 # skip corrupted empty frames
                 if sub.empty:
                     failed_tickers.append(t)
+                    # ADDED: Mark ticker as failed for all dates
+                    for date_str in failed_by_date.keys():
+                        if t not in failed_by_date[date_str]:
+                            failed_by_date[date_str].append(t)
                     continue
 
                 sub["ticker"] = t
@@ -658,6 +687,15 @@ def fetch_raw_data(
                 sub["ingestion_ts"] = run_ts
                 sub["pipeline_run_id"] = run_id
 
+                # ADDED: Track which dates actually have data
+                dates_with_data = set(sub["date"].dt.strftime("%Y-%m-%d"))
+
+                # ADDED: Mark dates that are missing for this ticker
+                for date_str in failed_by_date.keys():
+                    if date_str not in dates_with_data:
+                        if t not in failed_by_date[date_str]:
+                            failed_by_date[date_str].append(t)
+
                 new_records.append(sub)
 
             except Exception as exc:
@@ -665,13 +703,18 @@ def fetch_raw_data(
                 print(f"  [FETCH][PARSE ERROR] {t}: {exc}")
 
                 failed_tickers.append(t)
+                # ADDED: Mark ticker as failed for all dates
+                for date_str in failed_by_date.keys():
+                    if t not in failed_by_date[date_str]:
+                        failed_by_date[date_str].append(t)
 
     # =============================================================
     # FINAL CONCAT
     # =============================================================
 
     if not new_records:
-        return pd.DataFrame(), failed_tickers
+        # CHANGED: return empty dict instead of empty list
+        return pd.DataFrame(), failed_by_date
 
     df = pd.concat(new_records, ignore_index=True)
 
@@ -686,7 +729,9 @@ def fetch_raw_data(
         df["date"] >= to_utc_timestamp(start_date)
     ]
 
-    return df, failed_tickers
+    # CHANGED: return dict instead of list
+    return df, failed_by_date
+
 # =============================================================
 # STAGE 1B — read_raw_layer  (replay_from_raw mode)
 # =============================================================
@@ -795,23 +840,19 @@ def validate_sla(
     df:               pd.DataFrame,
     expected_tickers: int,
     run_date:         date_type,
-    is_partial_run:   bool = False,
 ) -> dict:
     """
     SLA gate — pipeline raises RuntimeError on FAIL.
-
-    is_partial_run=True (used for tickers_override / DLQ replay) relaxes
-    the coverage check since processing a deliberate subset is not a failure.
     """
     result = {"status": "PASS", "checks": {}}
     errors = []
 
-    # 1. Coverage check (skipped for partial / DLQ replay runs)
+    # 1. Coverage check 
     actual   = df["ticker"].nunique()
     coverage = actual / expected_tickers if expected_tickers else 0
     result["checks"]["coverage"] = f"{actual}/{expected_tickers} ({coverage:.1%})"
 
-    if not is_partial_run and coverage < CONFIG["coverage_threshold"]:
+    if coverage < CONFIG["coverage_threshold"]:
         msg = f"Low coverage: {coverage:.1%} < required {CONFIG['coverage_threshold']:.0%}"
         errors.append(msg)
         send_alert(msg, level="ERROR", context={"actual": actual, "expected": expected_tickers})
@@ -1030,7 +1071,6 @@ def add_metadata(
     processing_time_s:    float,
     ingestion_start_date: date_type,
     replay_mode:          bool,
-    is_partial_run:       bool,
     mode_label:           str,
 ) -> pd.DataFrame:
     """
@@ -1068,7 +1108,6 @@ def add_metadata(
 
     # Mode flags
     df["replay_mode"]          = replay_mode
-    df["partial_run"]          = is_partial_run
     df["run_mode"]             = mode_label
     # record_id preserved from fetch / raw-read stage — NOT re-stamped here.
     # This is the link from feature row -> raw source event.
@@ -1315,7 +1354,7 @@ def write_metadata(
 # =============================================================
 
 def write_dlq(
-    failed_tickers: list[str],
+    failed_by_date: dict,
     run_id:         str,
     bucket:         str,
     prefix:         str,
@@ -1325,26 +1364,36 @@ def write_dlq(
     Written before any subsequent stage that could raise, so failed tickers
     are always recoverable even if the pipeline crashes later.
     """
-    if not failed_tickers:
+    if not failed_by_date:
         return
 
-    key = f"{prefix}dlq/run_id={run_id}/failed_tickers.json"
-    write_json_to_s3({
-        "run_id": run_id,
-        "failures": [
-            {
-                "ticker": t,
-                "reason": "missing_from_yfinance",
-                "stage": "fetch",
-                "detected_at": utc_now().isoformat()
-            }
-            for t in set(failed_tickers)
-        ],
-        "count": len(set(failed_tickers)),
-        "written_at": utc_now().isoformat()
-    })
-    print(f"  [DLQ] {len(failed_tickers)} ticker(s) -> s3://{bucket}/{key}")
+    for date_str, failed_tickers in failed_by_date.items():
+        if not failed_tickers:
+            continue
 
+        failed = sorted(set(failed_tickers))
+
+        key = f"{prefix}dlq/run_id={run_id}/date={date_str}/failed_tickers.json"
+
+        payload = {
+            "run_id": run_id,
+            "date": date_str,
+            "failures": [
+                {
+                    "ticker": t,
+                    "reason": "missing_from_yfinance",
+                    "stage": "fetch",
+                    "detected_at": utc_now().isoformat()
+                }
+                for t in failed
+            ],
+            "count": len(failed),
+            "written_at": utc_now().isoformat()
+        }
+
+        write_json_to_s3(payload, bucket, key)
+        print(f"  [DLQ] {len(failed)} ticker(s) for {date_str} -> s3://{bucket}/{key}")
+    
 # =============================================================
 # MAIN PIPELINE  —  update_market_features
 # =============================================================
@@ -1356,7 +1405,6 @@ def update_market_features(
     start_date_override: str        = None,   # "YYYY-MM-DD" -> backfill mode
     replay_from_raw:     bool       = False,  # True -> skip yfinance, read Layer 1
     force_overwrite:     bool       = False,  # True -> overwrite existing partitions
-    tickers_override:    list[str]  = None,   # selective ticker processing (DLQ replay)
 ) -> tuple[pd.DataFrame | None, str]:
     """
     Main pipeline entry point.
@@ -1374,9 +1422,6 @@ def update_market_features(
         Reads Layer 1 raw partitions — does NOT call yfinance.
         Deterministic and reproducible. Always force_overwrite for features.
 
-    Selective / DLQ replay  (tickers_override set)
-        Processes only the specified tickers. Coverage SLA is relaxed.
-        Used by replay_failed_tickers() — do not call directly in production.
 
     Idempotency
     -----------
@@ -1388,7 +1433,6 @@ def update_market_features(
     -------------------
         # Backfill conf:  {"start_date": "2024-06-01"}
         # Replay conf:    {"replay_from_raw": true, "start_date": "2024-06-01"}
-        # DLQ conf:       trigger replay_failed_tickers(run_id) separately.
         #
         # DAG settings:
         #   max_active_runs = 1        (S3 lock is extra safety, not primary)
@@ -1403,12 +1447,10 @@ def update_market_features(
     run_id  = f"run_{run_ts.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     today   = today_utc()
 
-    is_partial_run        = tickers_override is not None
     effective_overwrite   = force_overwrite or replay_from_raw
 
     mode_label = (
         "replay_from_raw" if replay_from_raw
-        else "dlq_replay"  if is_partial_run
         else "backfill"    if start_date_override
         else "incremental"
     )
@@ -1424,7 +1466,6 @@ def update_market_features(
         }
     )
     print(f"  mode={mode_label}   force_overwrite={effective_overwrite}")
-    print(f"  partial_run={is_partial_run}   replay_from_raw={replay_from_raw}")
     print(f"{'=' * 66}\n")
 
     # S3 path constants
@@ -1469,11 +1510,9 @@ def update_market_features(
         # --------------------------------------------------------------
         print("[ STAGE 1 ] Load and validate ticker universe")
         raw_tickers_df       = read_csv_from_s3(bucket, input_key)
-        all_tickers          = validate_ticker_input(raw_tickers_df)
-        ticker_universe_size = len(all_tickers)
+        tickers              = validate_ticker_input(raw_tickers_df)
+        ticker_universe_size = len(tickers)
 
-        # Apply selective override (DLQ replay processes only failed tickers)
-        tickers = tickers_override if is_partial_run else all_tickers
         print(f"  effective tickers: {len(tickers):,} of {ticker_universe_size:,}")
 
         # --------------------------------------------------------------
@@ -1521,13 +1560,10 @@ def update_market_features(
                 )
                 return None, msg
 
-            # Filter to effective tickers if selective mode
-            if is_partial_run:
-                raw_df = raw_df[raw_df["ticker"].isin(set(tickers))]
 
         else:
             print("\n[ STAGE 3 ] Fetch raw data from yfinance")
-            raw_df, failed_tickers = fetch_raw_data(
+            raw_df, failed_by_date = fetch_raw_data(
                 tickers    = tickers,
                 start_date = start_date,
                 end_date   = today,
@@ -1536,14 +1572,10 @@ def update_market_features(
             )
 
             # DLQ — written before anything that could raise
-            write_dlq(failed_tickers, run_id, bucket, prefix)
+            write_dlq(failed_by_date, run_id, bucket, prefix)
             
-            # ============================
-            # DLQ ALERT + CLEANUP (ADD THIS)
-            # ============================
-
             # Remove duplicates (production safety)
-            failed_tickers = list(set(failed_tickers))
+            failed_tickers = list(set(sum(failed_by_date.values(), [])))
 
             # Alert if any failures happened
             if failed_tickers:
@@ -1626,7 +1658,6 @@ def update_market_features(
             clean_df,
             expected_tickers = ticker_universe_size,
             run_date         = today,
-            is_partial_run   = is_partial_run,
         )
 
         if sla["status"] == "FAIL":
@@ -1697,13 +1728,13 @@ def update_market_features(
         # --------------------------------------------------------------
         # STAGE 8 — Anomaly detection (vs rolling baseline)
         # --------------------------------------------------------------
-        print("\n[ STAGE 9 ] Anomaly detection")
+        print("\n[ STAGE 8 ] Anomaly detection")
         anomalies = detect_anomalies(new_features, old_rolling_df)
 
         # --------------------------------------------------------------
         # STAGE 9 — Attach lineage metadata
         # --------------------------------------------------------------
-        print("\n[ STAGE 10 ] Attach lineage metadata")
+        print("\n[ STAGE 9 ] Attach lineage metadata")
         new_features = add_metadata(
             df                   = new_features,
             run_id               = run_id,
@@ -1715,13 +1746,12 @@ def update_market_features(
             processing_time_s    = processing_time_s,
             ingestion_start_date = start_date,
             replay_mode          = replay_from_raw,
-            is_partial_run       = is_partial_run,
             mode_label           = mode_label,
         )
         # --------------------------------------------------------------
-        # STAGE 9 — Schema enforcement on feature output (inter-stage)
+        # STAGE 10 — Schema enforcement on feature output (inter-stage)
         # --------------------------------------------------------------
-        print("\n[ STAGE 8 ] Schema enforcement — feature layer")
+        print("\n[ STAGE 10 ] Schema enforcement — feature layer")
         try:
             new_features = enforce_schema(new_features, FEATURE_SCHEMA, label="features")
         except SchemaError:
@@ -1814,68 +1844,6 @@ def update_market_features(
         if lock_acquired:
             release_s3_lock(bucket, prefix)
 
-# =============================================================
-# replay_failed_tickers  —  selective DLQ replay
-# =============================================================
-
-def replay_failed_tickers(
-    run_id: str,
-    bucket: str = "yeeshu-equity-bucket",
-    prefix: str = "historical-equity/",
-) -> tuple[pd.DataFrame | None, str]:
-    """
-    Selectively reprocess ONLY the failed tickers from a past run.
-
-    This is a true selective replay — it does NOT recompute the entire
-    dataset. It reads the DLQ for the given run_id, extracts the failed
-    tickers, and passes them as tickers_override to update_market_features.
-
-    The original run's start_date is used so the same date window is covered.
-    force_overwrite=True replaces any partial feature partitions that were
-    written during the failed run.
-
-    Usage:
-        replay_failed_tickers("run_20250418_143201_a3f9bc")
-
-    Airflow:
-        Wire a sensor DAG on the metadata file.
-        Trigger this function when run_summary["failed_tickers"] is non-empty.
-        Separate DLQ replay DAG with max_active_runs=1.
-    """
-    dlq_key  = f"{prefix}dlq/run_id={run_id}/failed_tickers.json"
-    meta_key = f"{prefix}metadata/run_id={run_id}/run_summary.json"
-
-    if not s3_key_exists(bucket, dlq_key):
-        print(f"[REPLAY-DLQ] No DLQ entry found for run_id={run_id}")
-        return None, "No DLQ entry found"
-
-    if not s3_key_exists(bucket, meta_key):
-        msg = f"[REPLAY-DLQ] Run summary not found for run_id={run_id} — cannot determine start_date"
-        send_alert(msg, level="ERROR", context={"run_id": run_id})
-        return None, msg
-
-    dlq  = json.loads(get_s3().get_object(Bucket=bucket, Key=dlq_key)["Body"].read())
-    meta = json.loads(get_s3().get_object(Bucket=bucket, Key=meta_key)["Body"].read())
-
-    failed = dlq.get("failed_tickers", [])
-    if not failed:
-        print("[REPLAY-DLQ] DLQ is empty — nothing to replay.")
-        return None, "DLQ empty"
-
-    original_start = meta.get("start_date")
-    print(
-        f"[REPLAY-DLQ] Replaying {len(failed)} ticker(s) from run_id={run_id} "
-        f"using start_date={original_start}"
-    )
-
-    # KEY: tickers_override ensures ONLY failed tickers are processed
-    return update_market_features(
-        bucket               = bucket,
-        prefix               = prefix,
-        start_date_override  = original_start,
-        force_overwrite      = True,
-        tickers_override     = failed,   # <- selective, not full pipeline
-    )
 
 # =============================================================
 # replay_features_from_raw  —  deterministic raw replay

@@ -1047,7 +1047,7 @@ def _write_single_postgres_table(
                     # Step 4: trim to last 2 calendar days
                     pg_cur.execute(f"""
                         DELETE FROM public.{table_name}
-                        WHERE date < (
+                        WHERE date <= (
                             SELECT MAX(date) FROM public.{table_name}
                         ) - INTERVAL '2 days'
                     """)

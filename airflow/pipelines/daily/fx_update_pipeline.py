@@ -422,7 +422,6 @@ def drop_old_pipeline_metrics(df):
         "output_rows",
         "processing_time_s",
         "replay_mode",
-        "partial_run",
         "run_mode",
         "record_id",
         "outlier_flag"
@@ -953,7 +952,7 @@ def write_to_postgres(df, mode, start_date, end_date, retries=3):
 
       3. Trim to last 2 calendar days:
             DELETE FROM fx_data
-            WHERE date < (SELECT MAX(date) FROM fx_data) - INTERVAL '2 days'
+            WHERE date <= (SELECT MAX(date) FROM fx_data) - INTERVAL '2 days'
          Postgres is a UI serving layer; it only needs recent data.
 
     All three steps commit together. If any step fails, the connection is
@@ -1065,7 +1064,7 @@ def write_to_postgres(df, mode, start_date, end_date, retries=3):
                     pg_cur.execute(
                         """
                         DELETE FROM public.fx_data
-                        WHERE date < (
+                        WHERE date <= (
                             SELECT MAX(date) FROM public.fx_data
                         ) - INTERVAL '2 days'
                         """
