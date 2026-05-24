@@ -583,6 +583,13 @@ def fetch_commodity_data(
         data["ingestion_ts"] = run_ts
         data["pipeline_run_id"] = run_id
         
+        if data["close"].isna().all():
+            print(f"  [FETCH][EMPTY] {tkr} - no price data")
+            for date_str in failed_by_date.keys():
+                if tkr not in failed_by_date[date_str]:
+                    failed_by_date[date_str].append(tkr)
+            continue
+
         # Track which dates have data
         dates_with_data = set(data["date"].dt.strftime("%Y-%m-%d"))
         

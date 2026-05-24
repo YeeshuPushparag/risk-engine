@@ -594,6 +594,14 @@ def fetch_fx_data(
         sub = data[[target_col]].copy().reset_index()
         sub.columns = ["date", "fx_rate"]
         sub["fx_rate"] = pd.to_numeric(sub["fx_rate"], errors="coerce")
+      
+        if sub["fx_rate"].isna().all():
+            print(f"  [FETCH FX][EMPTY] {pair} - no FX rate data")
+            for date_str in failed_by_date.keys():
+                if pair not in failed_by_date[date_str]:
+                    failed_by_date[date_str].append(pair)
+            continue
+
         sub["currency_pair"] = pair
         sub["record_id"] = pair + "_" + sub["date"].astype(str)
         sub["ingestion_ts"] = run_ts

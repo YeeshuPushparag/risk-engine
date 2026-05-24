@@ -659,7 +659,12 @@ def fetch_raw_data(
                     "Close": "close",
                     "Volume": "volume",
                 })
-
+             
+                if sub["close"].isna().all():
+                    print(f"  [FETCH][EMPTY] {t} - no price data")
+                    failed_tickers.append(t)
+                    continue
+             
                 # defensive cleanup
                 if "Adj Close" in sub.columns:
                     sub = sub.drop(columns=["Adj Close"])
