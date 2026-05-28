@@ -67,11 +67,7 @@ def get_airflow_metadata(context):
         "max_tries": context["ti"].max_tries,
         "logical_date": str(context["logical_date"]),
         "execution_date": str(context["logical_date"]),
-        "triggered_by": (
-            "manual"
-            if context["dag_run"].external_trigger
-            else "scheduled"
-        ),
+        "triggered_by": "manual" if context["dag_run"].run_type == "manual" else "scheduled",
     }
 
 
