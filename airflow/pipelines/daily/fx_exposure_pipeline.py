@@ -1481,6 +1481,7 @@ def update_fx_pipeline(
     run_ts  = utc_now()
     run_id  = f"run_{run_ts.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     end_date = get_market_end_date()
+    today = today_utc()
 
     effective_overwrite = force_overwrite or replay_from_raw
 
