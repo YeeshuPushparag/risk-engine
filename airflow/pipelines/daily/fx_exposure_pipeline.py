@@ -1714,7 +1714,7 @@ def update_fx_pipeline(
         sla = validate_sla(
             clean_raw_df,
             expected_pairs = expected_pairs,
-            run_date       = today,
+            run_date       = end_date,
         )
 
         if sla["status"] == "FAIL":

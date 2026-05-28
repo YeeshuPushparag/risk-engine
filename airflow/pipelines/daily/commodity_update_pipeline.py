@@ -1804,7 +1804,7 @@ def update_commodity_pipeline(
         sla = validate_sla(
             clean_df,
             expected_tickers = expected_tickers,
-            run_date         = today,
+            run_date         = end_date,
         )
 
         if sla["status"] == "FAIL":

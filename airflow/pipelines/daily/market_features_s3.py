@@ -1742,7 +1742,7 @@ def update_market_features(
         sla                  = validate_sla(
             clean_df,
             expected_tickers = ticker_universe_size,
-            run_date         = today,
+            run_date         = end_date,
         )
 
         if sla["status"] == "FAIL":
