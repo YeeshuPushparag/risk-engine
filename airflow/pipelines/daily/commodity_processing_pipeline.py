@@ -75,7 +75,7 @@ BASE_PREFIX    = "historical-commodity/"
 ROLLING_PREFIX = BASE_PREFIX + "rolling/"
 MODEL_PREFIX   = "models/"
 
-INPUT_COMMOD = ROLLING_PREFIX + "commodities_30d.parquet"
+INPUT_COMMOD = ROLLING_PREFIX + "commodities_70d.parquet"
 SYM          = BASE_PREFIX + "unique_tickers_sector.csv"
 MACRO        = BASE_PREFIX + "macro_data.csv"
 
@@ -444,6 +444,7 @@ def write_to_snowflake_history(df, run_mode, run_id=None, chunk_size=20_000):
                 SNOWFLAKE_HISTORY_TABLE,
                 chunk_size=chunk_size,
                 quote_identifiers=True,
+                use_logical_type=True,
             )
             if not success:
                 raise RuntimeError(
@@ -587,6 +588,7 @@ def _snowflake_clean_delete_insert(
                     chunk_size=chunk_size,
                     quote_identifiers=True,
                     auto_create_table=False,
+                    use_logical_type=True,
                 )
 
                 # =====================================================
@@ -761,6 +763,7 @@ def _snowflake_clean_merge(
                     chunk_size=chunk_size,
                     quote_identifiers=True,
                     auto_create_table=False,
+                    use_logical_type=True,
                 )
 
                 if not success:
@@ -1407,7 +1410,7 @@ def process_commodities(
         # Apply lineage column transformations from first pipeline
         commod_base = rename_source_lineage(commod_base)
         commod_base = drop_old_pipeline_metrics(commod_base)
-        commod_base["date"] = pd.to_datetime(commod_base["date"])
+        commod_base["date"] = pd.to_datetime(commod_base["date"], utc=True)
 
         # ── Date filtering — driven by mode and window, never by data flags ──
         if mode in ("replay", "backfill"):

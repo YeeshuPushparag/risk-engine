@@ -516,6 +516,7 @@ def write_to_snowflake_history(df, run_mode, run_id=None, chunk_size=20_000):
                 SNOWFLAKE_HISTORY_TABLE,
                 chunk_size=chunk_size,
                 quote_identifiers=True,
+                use_logical_type=True,
             )
             if not success:
                 raise RuntimeError(
@@ -658,6 +659,7 @@ def _snowflake_clean_delete_insert(
                     chunk_size=chunk_size,
                     quote_identifiers=True,
                     auto_create_table=False,
+                    use_logical_type=True,
                 )
 
                 # =====================================================
@@ -843,6 +845,7 @@ def _snowflake_clean_merge(df, run_id=None, chunk_size=20_000):
                     chunk_size=chunk_size,
                     quote_identifiers=True,
                     auto_create_table=False,
+                    use_logical_type=True,
                 )
 
                 # =====================================================
@@ -1402,14 +1405,14 @@ def update_fx_snowflake(
 
             fx = load_parquet_from_s3_with_retry(
                 S3_BUCKET,
-                "historical-fx/rolling/fx_exposure_30d.parquet",
+                "historical-fx/rolling/fx_exposure_40d.parquet",
                 run_id=run_id,
                 retries=3,
             )
 
         fx["date"] = pd.to_datetime(
             fx["date"]
-        ).dt.normalize().dt.tz_localize(None)
+        ).dt.normalize().dt.tz_localize('UTC')
 
         print(f"  Loaded FX rows: {len(fx):,}")
 

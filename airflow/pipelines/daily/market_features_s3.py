@@ -53,6 +53,7 @@ from io import BytesIO
 import os
 import requests
 import pendulum
+import pandas_market_calendars as mcal
 
 
 # =============================================================
@@ -272,6 +273,47 @@ def to_utc_timestamp(value) -> pd.Timestamp:
 def today_utc() -> date_type:
     """Today's date in UTC."""
     return utc_now().date()
+
+
+NYSE_CALENDAR = mcal.get_calendar("NYSE")
+
+
+def is_market_holiday(check_date: date_type) -> bool:
+    """
+    Returns True if the given date is NOT a valid NYSE trading day.
+    Covers:
+    - weekends
+    - national holidays
+    - exchange holidays
+    """
+
+
+    schedule = NYSE_CALENDAR.schedule(
+        start_date=check_date,
+        end_date=check_date
+    )
+
+    return schedule.empty
+
+
+
+def get_valid_market_days(
+    start_date: date_type,
+    end_date: date_type,
+) -> set:
+    """
+    Return valid NYSE trading days as a set of date objects.
+    """
+
+    return set(
+        pd.to_datetime(
+            NYSE_CALENDAR.valid_days(
+                start_date=start_date,
+                end_date=end_date,
+            )
+        ).date
+    )
+
 
 # =============================================================
 # S3 HELPERS — basic I/O
@@ -565,8 +607,13 @@ def fetch_raw_data(
 
     # ADDED: Initialize failed_by_date for all dates in range
     current_date = start_date
+
+    valid_days = get_valid_market_days(start_date, end_date)
+
+
     while current_date <= end_date:
-        if current_date.weekday() < 5:  # weekdays only
+
+        if current_date in valid_days:
             date_str = current_date.strftime("%Y-%m-%d")
             failed_by_date[date_str] = []
         current_date += timedelta(days=1)
@@ -768,7 +815,11 @@ def fetch_raw_data(
         utc=True,
     )
 
-    df = df[df["date"].dt.dayofweek < 5]
+
+    df = df[
+        df["date"].dt.date.isin(valid_days)
+    ]
+
 
     df = df[
         df["date"] >= to_utc_timestamp(start_date)
@@ -800,22 +851,38 @@ def read_raw_layer(
     frames:  list      = []
     current: date_type = start_date
 
+    valid_days = get_valid_market_days(start_date, end_date)
+
+
     while current <= end_date:
-        if current.weekday() < 5:   # weekdays only
+
+        if current in valid_days:
+
             y, m, d = current.year, current.month, current.day
-            key     = f"{prefix}raw/year={y}/month={m:02d}/day={d:02d}/data.parquet"
+
+            key = (
+                f"{prefix}raw/"
+                f"year={y}/month={m:02d}/day={d:02d}/data.parquet"
+            )
 
             if s3_key_exists(bucket, key):
                 part = read_parquet_from_s3(bucket, key)
                 frames.append(part)
+
             else:
                 print(f"  [RAW READ][WARN] partition missing — skipping: {key}")
+
                 send_alert(
                     f"Raw partition missing during replay: {key}",
                     level="WARNING",
-                    context={"key": key, "date": str(current)},
+                    context={
+                        "key": key,
+                        "date": str(current)
+                    },
                 )
+
         current += timedelta(days=1)
+
 
     if not frames:
         return pd.DataFrame()
@@ -905,10 +972,12 @@ def validate_sla(
     # 2. Freshness check
     max_ts = df["date"].max()
     # expected latest trading day
-    expected_date = run_date
 
-    while expected_date.weekday() >= 5:
-        expected_date -= timedelta(days=1)
+    valid_days = get_valid_market_days(start_date, end_date)
+
+    expected_date = max(valid_days) if valid_days else run_date
+
+
 
     result["checks"]["max_date"] = str(max_ts)
 
@@ -1532,6 +1601,46 @@ def update_market_features(
     today   = today_utc()
     end_date = get_market_end_date()
 
+    # S3 path constants
+    input_key    = prefix + input_filename
+    input_source = f"s3://{bucket}/{input_key}"
+    rolling_key  = prefix + "rolling/market_features_30d.parquet"
+    meta_key     = f"{prefix}metadata/run_id={run_id}/run_summary.json"
+
+    # ==========================================================
+    # SKIP IF MARKET HOLIDAY
+    # ==========================================================
+
+    if is_market_holiday(end_date):
+
+        msg = f"NYSE closed on {end_date} (holiday/weekend). Skipping pipeline."
+
+        print(f"  [MARKET CLOSED] {msg}")
+
+        send_alert(
+            msg,
+            level="INFO",
+            context={
+                "run_id": run_id,
+                "date": str(end_date)
+            }
+        )
+
+        write_json_to_s3(
+            {
+                "run_id": run_id,
+                "status": "SKIPPED",
+                "reason": "market_holiday",
+                "date": str(end_date)
+            },
+            bucket,
+            meta_key,
+        )
+
+        return None, msg
+
+
+
     effective_overwrite   = force_overwrite or replay_from_raw
 
     mode_label = (
@@ -1552,12 +1661,6 @@ def update_market_features(
     )
     print(f"  mode={mode_label}   force_overwrite={effective_overwrite}")
     print(f"{'=' * 66}\n")
-
-    # S3 path constants
-    input_key    = prefix + input_filename
-    input_source = f"s3://{bucket}/{input_key}"
-    rolling_key  = prefix + "rolling/market_features_30d.parquet"
-    meta_key     = f"{prefix}metadata/run_id={run_id}/run_summary.json"
 
     # Mutable run-level accumulators (updated as stages complete)
     failed_tickers:     list[str] = []

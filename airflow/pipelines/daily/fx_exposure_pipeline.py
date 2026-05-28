@@ -16,7 +16,7 @@ Layer 2 — Features  (versioned per run_id, partitioned by date)
     s3://<bucket>/<prefix>features/latest.json   <- pointer to most recent run_id
 
 Layer 3 — Rolling   (mutable serving layer, last N calendar days)
-    s3://<bucket>/<prefix>rolling/fx_exposure_30d.parquet
+    s3://<bucket>/<prefix>rolling/fx_exposure_40d.parquet
 
 Support files
 -------------
@@ -55,6 +55,7 @@ from datetime import datetime, timedelta, timezone, date as date_type
 from io import BytesIO
 import requests
 import pendulum
+import pandas_market_calendars as mcal
 
 # =============================================================
 # CONFIG  —  single source of truth.  No magic numbers in code.
@@ -81,7 +82,7 @@ CONFIG: dict = {
     "coverage_drop_ratio":    0.8,     # current pairs / historical pairs < 80%
 
     # Rolling serving layer
-    "window_days":            30,
+    "window_days":            40,
 
     # Lineage  <- bump feature_version when engineering logic changes
     "pipeline_name":          "fx_exposure_pipeline",
@@ -246,6 +247,43 @@ def send_alert(
 # =============================================================
 # MARKET DATE HELPERS
 # =============================================================
+NYSE_CALENDAR = mcal.get_calendar("NYSE")
+
+def is_market_holiday(check_date: date_type) -> bool:
+    """
+    Returns True if the given date is NOT a valid NYSE trading day.
+    Covers:
+    - weekends
+    - national holidays
+    - exchange holidays
+    """
+
+
+    schedule = NYSE_CALENDAR.schedule(
+        start_date=check_date,
+        end_date=check_date
+    )
+
+    return schedule.empty
+
+
+
+
+def get_valid_market_days(
+    start_date: date_type,
+    end_date: date_type,
+) -> set[date_type]:
+
+    return set(
+        pd.to_datetime(
+            NYSE_CALENDAR.valid_days(
+                start_date=start_date,
+                end_date=end_date
+            )
+        ).date
+    )
+
+
 
 def get_market_end_date() -> date_type:
     """
@@ -559,8 +597,14 @@ def fetch_fx_data(
     
     # Initialize failed_by_date for all dates in range
     current_date = start_date
+
+    valid_days = get_valid_market_days(start_date, end_date)
+
+
     while current_date <= end_date:
-        if current_date.weekday() < 5:
+
+        if current_date in valid_days:
+
             date_str = current_date.strftime("%Y-%m-%d")
             failed_by_date[date_str] = []
         current_date += timedelta(days=1)
@@ -653,7 +697,9 @@ def fetch_fx_data(
 
     df = pd.concat(records, ignore_index=True)
     df["date"] = pd.to_datetime(df["date"], utc=True)
-    df = df[df["date"].dt.dayofweek < 5]
+    df = df[
+        df["date"].dt.date.isin(valid_days)
+    ]
     df = df[df["date"] >= to_utc_timestamp(start_date)]
     df.sort_values(["currency_pair", "date"], inplace=True)
     df["fx_rate"] = df.groupby("currency_pair")["fx_rate"].ffill()
@@ -742,7 +788,12 @@ def fetch_interest_rates(
     rates_df["USDUSD"] = 0.0
 
     rates_df["date"] = pd.to_datetime(rates_df["date"], utc=True)
-    rates_df = rates_df[rates_df["date"].dt.dayofweek < 5]
+    valid_days = get_valid_market_days(start_date, end_date)
+
+    rates_df = rates_df[
+        rates_df["date"].dt.date.isin(valid_days)
+    ]
+
 
     # Filter to the requested date range
     rates_df = rates_df[
@@ -783,8 +834,11 @@ def read_raw_layer(
     frames:  list      = []
     current: date_type = start_date
 
+    valid_days = get_valid_market_days(start_date, end_date)
+
     while current <= end_date:
-        if current.weekday() < 5:
+
+        if current in valid_days:
             y, m, d = current.year, current.month, current.day
             key     = f"{prefix}raw/year={y}/month={m:02d}/day={d:02d}/data.parquet"
 
@@ -888,10 +942,13 @@ def validate_sla(
     max_ts = df["date"].max()
 
     # expected latest business day
-    expected_date = run_date
+    valid_days = get_valid_market_days(
+        run_date - timedelta(days=10),
+        run_date
+    )
 
-    while expected_date.weekday() >= 5:
-        expected_date -= timedelta(days=1)
+    expected_date = max(valid_days)
+
 
     result["checks"]["max_date"] = str(max_ts)
 
@@ -1483,6 +1540,44 @@ def update_fx_pipeline(
     end_date = get_market_end_date()
     today = today_utc()
 
+    rolling_key  = prefix + "rolling/fx_exposure_40d.parquet"
+    meta_key     = f"{prefix}metadata/run_id={run_id}/run_summary.json"
+    input_source = f"s3://{bucket}/{input_key}"
+
+
+    # ==========================================================
+    # SKIP IF MARKET HOLIDAY
+    # ==========================================================
+
+    if is_market_holiday(end_date):
+
+        msg = f"NYSE closed on {end_date} (holiday/weekend). Skipping pipeline."
+
+        print(f"  [MARKET CLOSED] {msg}")
+
+        send_alert(
+            msg,
+            level="INFO",
+            context={
+                "run_id": run_id,
+                "date": str(end_date)
+            }
+        )
+
+        write_json_to_s3(
+            {
+                "run_id": run_id,
+                "status": "SKIPPED",
+                "reason": "market_holiday",
+                "date": str(end_date)
+            },
+            bucket,
+            meta_key,
+        )
+
+        return None, msg
+
+
     effective_overwrite = force_overwrite or replay_from_raw
 
     mode_label = (
@@ -1496,9 +1591,7 @@ def update_fx_pipeline(
     print(f"  mode={mode_label}   force_overwrite={effective_overwrite}")
     print(f"{'=' * 66}\n")
 
-    rolling_key  = prefix + "rolling/fx_exposure_30d.parquet"
-    meta_key     = f"{prefix}metadata/run_id={run_id}/run_summary.json"
-    input_source = f"s3://{bucket}/{input_key}"
+
 
     # Mutable accumulators — updated as stages complete
     failed_pairs:       list  = []
@@ -1552,7 +1645,7 @@ def update_fx_pipeline(
             start_date = pd.to_datetime(start_date_override, utc=True).date()
             print(f"  override -> start_date={start_date}")
         elif last_date is not None:
-            if last_date >= today:
+            if last_date >= end_date:
                 print("  [SKIP] Rolling file already up to date.")
                 write_json_to_s3(
                     {"run_id": run_id, "status": "SKIPPED",

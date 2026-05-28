@@ -297,48 +297,6 @@ def run_collateral_pipeline(**context):
     ) or "OK"
 
 
-# ============================================================
-# LOANS PIPELINES
-# ============================================================
-
-def run_loans_enrichment_pipeline(**context):
-
-    from pipelines.daily.enrich_loans_pipeline import (
-        run_enrich_loans_pipeline,
-    )
-
-    config = get_dag_config(
-        context,
-        replay_key="replay",
-    )
-
-    airflow_metadata = get_airflow_metadata(context)
-
-    return run_enrich_loans_pipeline(
-        start_date_override=config["start_date_override"],
-        replay=config["replay"],
-        airflow_metadata=airflow_metadata,
-    ) or "OK"
-
-
-def run_loans_model_pipeline(**context):
-
-    from pipelines.daily.loans_model_pipeline import (
-        run_loans_model_pipeline,
-    )
-
-    config = get_dag_config(
-        context,
-        replay_key="replay",
-    )
-
-    airflow_metadata = get_airflow_metadata(context)
-
-    return run_loans_model_pipeline(
-        start_date_override=config["start_date_override"],
-        replay=config["replay"],
-        airflow_metadata=airflow_metadata,
-    ) or "OK"
 
 
 # ============================================================
@@ -444,19 +402,7 @@ with DAG(
         python_callable=run_collateral_pipeline,
     )
 
-    # ========================================================
-    # LOANS
-    # ========================================================
 
-    loans_enrichment = PythonOperator(
-        task_id="loans_enrichment_pipeline",
-        python_callable=run_loans_enrichment_pipeline,
-    )
-
-    loans_model = PythonOperator(
-        task_id="loans_model_pipeline",
-        python_callable=run_loans_model_pipeline,
-    )
 
     # ========================================================
     # PIPELINE FLOW
@@ -473,6 +419,4 @@ with DAG(
         >> bonds_processing
         >> derivatives_processing
         >> collateral_processing
-        >> loans_enrichment
-        >> loans_model
     )

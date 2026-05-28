@@ -94,6 +94,7 @@ from datetime import datetime, timedelta, timezone, date as date_type
 from io import BytesIO
 from fredapi import Fred
 import pendulum
+import pandas_market_calendars as mcal
 
 # =============================================================
 # CONFIG  —  single source of truth.  No magic numbers in code.
@@ -234,6 +235,38 @@ def send_critical_alert(message: str, context: dict = None) -> None:
 # =============================================================
 # MARKET DATE HELPERS
 # =============================================================
+
+
+NYSE_CALENDAR = mcal.get_calendar("NYSE")
+
+
+def get_valid_market_days(start_date, end_date):
+
+    return set(
+        pd.to_datetime(
+            NYSE_CALENDAR.valid_days(
+                start_date=start_date,
+                end_date=end_date,
+            )
+        ).date
+    )
+
+def is_market_holiday(check_date: date_type) -> bool:
+    """
+    Returns True if the given date is NOT a valid NYSE trading day.
+    Covers:
+    - weekends
+    - national holidays
+    - exchange holidays
+    """
+
+
+    schedule = NYSE_CALENDAR.schedule(
+        start_date=check_date,
+        end_date=check_date
+    )
+
+    return schedule.empty
 
 def get_market_end_date() -> date_type:
     """
@@ -703,9 +736,16 @@ def fetch_dgs10_from_fred(
         current = pd.Timestamp(start_date)
         end = pd.Timestamp(end_date)
         
+        # Get valid market days in the range
+        valid_days = get_valid_market_days(
+            pd.Timestamp(start_date).date(),
+            pd.Timestamp(end_date).date()
+        )
+        
         while current <= end:
-            if current.weekday() < 5:
-                key = _raw_fred_key(current.date(), run_id)
+            current_date = current.date()
+            if current_date in valid_days:
+                key = _raw_fred_key(current_date, run_id)
                 if s3_key_exists(bucket, key):
                     frames.append(read_parquet_from_s3(bucket, key))
             current += timedelta(days=1)
@@ -755,18 +795,18 @@ def fetch_dgs10_from_fred(
 
             written_dates = 0
 
+            valid_market_days = get_valid_market_days(start_date, end_date)
+            
             for date_val, group in df.groupby("date_only"):
-
-                # Skip weekends completely
-                if pd.Timestamp(date_val).weekday() >= 5:
+                if date_val not in valid_market_days:
                     continue
 
                 raw_key = _raw_fred_key(date_val, run_id)
 
                 write_parquet_to_s3(
-                    group.drop(columns=["date_only"]),
-                    bucket,
-                    raw_key
+                        group.drop(columns=["date_only"]),
+                        bucket,
+                        raw_key
                 )
 
                 written_dates += 1
@@ -1337,6 +1377,25 @@ def update_bonds_pipeline(
         raise BondPipelineError("Replay mode requires start_date_override.")
 
     end_date = get_market_end_date()
+
+
+    if is_market_holiday(end_date):
+        run_id = f"skipped_{run_ts.strftime('%Y%m%d_%H%M%S')}"
+        msg = f"NYSE closed on {end_date} (holiday/weekend). Skipping pipeline."
+        print(f"  [MARKET CLOSED] {msg}")
+        
+        send_critical_alert(
+            msg,
+            context={"run_id": run_id, "date": str(end_date)}
+        )
+        
+        _save_run_metadata(
+            bucket=bucket, run_id=run_id, mode="skipped",
+            start_date=end_date, end_date=end_date, nrows=0,
+            run_ts=run_ts, airflow_metadata=airflow_metadata,
+            status="SKIPPED", error="market_holiday"
+        )
+        return "SKIPPED_MARKET_HOLIDAY"
 
     print(f"\n{'=' * 66}")
     print(f"  BOND UPDATE PIPELINE (FIRST) START")

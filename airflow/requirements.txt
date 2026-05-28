@@ -12,3 +12,4 @@ pendulum==3.1.0
 psycopg==3.3.2
 python-dateutil==2.9.0.post0
 snowflake-connector-python[pandas]
+pandas-market-calendars==4.4.1

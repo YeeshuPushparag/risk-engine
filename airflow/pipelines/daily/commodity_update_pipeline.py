@@ -17,7 +17,7 @@ Layer 2 — Features  (versioned per run_id, partitioned by date)
     s3://<bucket>/<prefix>features/latest.json   <- pointer to most recent run_id
 
 Layer 3 — Rolling   (mutable serving layer, last N calendar days)
-    s3://<bucket>/<prefix>rolling/commodities_30d.parquet
+    s3://<bucket>/<prefix>rolling/commodities_70d.parquet
 
 Support files
 -------------
@@ -64,6 +64,7 @@ from io import BytesIO
 import requests
 import os
 import pendulum
+import pandas_market_calendars as mcal
 
 # =============================================================
 # CONFIG  —  single source of truth.  No magic numbers in code.
@@ -92,7 +93,7 @@ CONFIG: dict = {
     "coverage_drop_ratio":     0.8,     # current tickers / historical < 80%
 
     # Rolling serving layer
-    "window_days":             30,
+    "window_days":             70,
 
     # Lineage  <- bump feature_version when engineering logic changes
     "pipeline_name":           "commodity_update_pipeline",
@@ -248,6 +249,37 @@ def send_alert(
 # =============================================================
 # MARKET DATE HELPERS
 # =============================================================
+
+NYSE_CALENDAR = mcal.get_calendar("NYSE")
+
+
+def get_valid_market_days(start_date, end_date):
+
+    return set(
+        pd.to_datetime(
+            NYSE_CALENDAR.valid_days(
+                start_date=start_date,
+                end_date=end_date,
+            )
+        ).date
+    )
+
+def is_market_holiday(check_date: date_type) -> bool:
+    """
+    Returns True if the given date is NOT a valid NYSE trading day.
+    Covers:
+    - weekends
+    - national holidays
+    - exchange holidays
+    """
+
+
+    schedule = NYSE_CALENDAR.schedule(
+        start_date=check_date,
+        end_date=check_date
+    )
+
+    return schedule.empty
 
 def get_market_end_date() -> date_type:
     """
@@ -562,8 +594,9 @@ def fetch_commodity_data(
     
     # Initialize failed_by_date for all dates in range
     current_date = start_date
+    valid_days = get_valid_market_days(start_date, end_date)
     while current_date <= end_date:
-        if current_date.weekday() < 5:
+        if current_date in valid_days:
             date_str = current_date.strftime("%Y-%m-%d")
             failed_by_date[date_str] = []
         current_date += timedelta(days=1)
@@ -681,9 +714,9 @@ def read_raw_layer(
     """
     frames:  list      = []
     current: date_type = start_date
-
+    valid_days = get_valid_market_days(start_date, end_date)
     while current <= end_date:
-        if current.weekday() < 5:
+        if current in valid_days:
             y, m, d = current.year, current.month, current.day
             key     = f"{prefix}raw/year={y}/month={m:02d}/day={d:02d}/data.parquet"
 
@@ -767,8 +800,8 @@ def build_synthetic_rows(
     synth_records: list = []
     history_n = CONFIG["synthetic_history_days"]
 
-    # Convert date range into UTC timestamps
-    all_dates = pd.date_range(start=start_date, end=end_date, freq="B", tz='UTC')
+    valid_days = get_valid_market_days(start_date, end_date)
+    all_dates = sorted(valid_days)
 
 
     for tkr in tickers:
@@ -920,6 +953,8 @@ def validate_sla(
     df:               pd.DataFrame,
     expected_tickers: int,
     run_date:         date_type,
+    start_date:       date_type,
+    end_date:         date_type,
 ) -> dict:
     """
     SLA gate. Pipeline raises RuntimeError on FAIL.
@@ -941,10 +976,9 @@ def validate_sla(
     max_ts = df["date"].max()
 
     # expected latest business day
-    expected_date = run_date
 
-    while expected_date.weekday() >= 5:
-        expected_date -= timedelta(days=1)
+    valid_days = get_valid_market_days(start_date, end_date)
+    expected_date = max(valid_days) if valid_days else run_date
 
     result["checks"]["max_date"] = str(max_ts)
 
@@ -1579,6 +1613,40 @@ def update_commodity_pipeline(
     today   = today_utc()
     end_date = get_market_end_date()
 
+
+    rolling_key  = prefix + "rolling/commodities_70d.parquet"
+    meta_key     = f"{prefix}metadata/run_id={run_id}/run_summary.json"
+    input_source = "yfinance"
+
+    # Skip if market closed
+    if is_market_holiday(end_date):
+
+        msg = f"NYSE closed on {end_date} (holiday/weekend). Skipping pipeline."
+
+        print(f"  [MARKET CLOSED] {msg}")
+
+        send_alert(
+            msg,
+            level="INFO",
+            context={
+                "run_id": run_id,
+                "date": str(end_date)
+            }
+        )
+
+        write_json_to_s3(
+            {
+                "run_id": run_id,
+                "status": "SKIPPED",
+                "reason": "market_holiday",
+                "date": str(end_date)
+            },
+            bucket,
+            meta_key,
+        )
+
+        return None, msg
+
     effective_overwrite = force_overwrite or replay_from_raw
 
     mode_label = (
@@ -1592,9 +1660,7 @@ def update_commodity_pipeline(
     print(f"  mode={mode_label}   force_overwrite={effective_overwrite}")
     print(f"{'=' * 66}\n")
 
-    rolling_key  = prefix + "rolling/commodities_30d.parquet"
-    meta_key     = f"{prefix}metadata/run_id={run_id}/run_summary.json"
-    input_source = "yfinance"
+
 
     # Mutable run-level accumulators
     failed_tickers:     list  = []
@@ -1805,6 +1871,8 @@ def update_commodity_pipeline(
             clean_df,
             expected_tickers = expected_tickers,
             run_date         = end_date,
+            start_date       = start_date,
+            end_date         = end_date,
         )
 
         if sla["status"] == "FAIL":
