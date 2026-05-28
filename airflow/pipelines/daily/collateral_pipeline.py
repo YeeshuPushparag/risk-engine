@@ -22,9 +22,11 @@ Snowflake COLLATERAL          (clean, deterministic latest state)
     - Must NEVER contain conflicting rows for same (trade_id, date)
 
 Postgres collateral_data      (serving layer — NOT source of truth)
-    - Replay / Backfill:  DELETE window -> INSERT
-    - Incremental:        INSERT
-    - Always trim to last 2 calendar days after write
+    - Rules:
+        * 1 unique date:  Append + trim to last 2 days
+        * 2 unique dates: Replace entire table (no trim needed)
+        * >2 unique dates: Trim to latest 2 days in memory, then replace
+    - Never writes data just to delete it later
 
 Failure semantics
 -----------------
@@ -66,6 +68,7 @@ Signature matches derivatives_pipeline.py exactly.
 import os
 import time
 import hashlib
+import json
 from io import BytesIO, StringIO
 import numpy as np
 import pandas as pd
@@ -80,8 +83,8 @@ from snowflake.connector.pandas_tools import write_pandas
 # ============================================================
 # CONSTANTS
 # ============================================================
-MACRO_BUCKET = "yeeshu-equity-bucket"
-MACRO_KEY    = "historical-equity/macro_data.csv"
+COLLATERAL_BUCKET = "yeeshu-collateral-bucket"
+MACRO_KEY    = "macro_data.csv"
 
 s3 = boto3.client("s3")
 
@@ -191,7 +194,7 @@ def send_success_alert(context: dict = None):
             duration     = context.get("duration_seconds", 0)
             text = (
                 f"*[SUCCESS]* collateral_pipeline\n"
-                f"✅ Pipeline ran successfully\n"
+                f" Pipeline ran successfully\n"
                 f"run_id: {run_id}\n"
                 f"detail rows: {detail_rows:,}\n"
                 f"duration: {duration}s"
@@ -200,6 +203,46 @@ def send_success_alert(context: dict = None):
         except Exception as e:
             print(f"[ALERT ERROR] Slack notification failed: {e}")
 
+# ============================================================
+# RUN SUMMARY WRITER
+# ============================================================
+def write_run_summary(summary: dict) -> None:
+    """
+    Write pipeline run summary to S3 for observability and audit.
+
+    Args:
+        summary: Dictionary containing run metadata including:
+            - pipeline_run_id
+            - pipeline_name
+            - status (SUCCESS/FAILED)
+            - mode
+            - start_date
+            - end_date
+            - rows_processed
+            - processing_time_s
+            - tables_written (list)
+            - error (if failed)
+    """
+    key = (
+        f"metadata/"
+        f"pipeline_run_id={summary['pipeline_run_id']}/"
+        f"run_summary.json"
+    )
+
+    try:
+        s3.put_object(
+            Bucket=COLLATERAL_BUCKET,  # Using existing bucket, or create dedicated bucket
+            Key=key,
+            Body=json.dumps(
+                summary,
+                default=str,
+                indent=2,
+            ),
+        )
+        print(f"  [RUN SUMMARY] Wrote {key}")
+    except Exception as e:
+        # Don't fail the pipeline if summary write fails, but log the error
+        print(f"  [RUN SUMMARY][WARN] Failed to write summary to S3: {e}")
 
 # ============================================================
 # RETRY WITH EXPONENTIAL BACKOFF
@@ -405,7 +448,7 @@ def load_source_table(table: str, where_clause: str, run_id: str) -> pd.DataFram
 def load_macro_data() -> pd.DataFrame:
     """Load macro CSV from S3. Pipeline continues without it on failure."""
     def _load():
-        obj = s3.get_object(Bucket=MACRO_BUCKET, Key=MACRO_KEY)
+        obj = s3.get_object(Bucket=COLLATERAL_BUCKET, Key=MACRO_KEY)
         df  = pd.read_csv(BytesIO(obj["Body"].read()))
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         return df[df["date"].notna()]
@@ -971,166 +1014,264 @@ def write_to_snowflake_clean(
 # ============================================================
 # POSTGRES — SERVING LAYER (consistency-first: RAISES on failure)
 # ============================================================
-def _write_single_postgres_table(
-    df:         pd.DataFrame,
+
+def write_single_postgres_table(
+    df: pd.DataFrame,
     table_name: str,
-    mode:       str,
-    start_str:  str,
-    end_str:    str,
-    retries:    int = 3,
+    retries: int = 3
 ) -> None:
     """
     Write a DataFrame to a single Postgres table.
 
-    Steps (inside a single transaction per attempt):
-      1. Replay / Backfill only: DELETE date window.
-      2. INSERT new rows via COPY FROM STDIN.
-      3. Trim to last 2 calendar days.
-
-    All steps commit together. Any failure -> implicit rollback.
-    RAISES on final failure.
+    Rules:
+    - If incoming DF has >2 unique dates:
+        -> trim in memory to latest 2 dates
+    - If final DF has 2 unique dates:
+        -> FULL REPLACE (DELETE + INSERT)
+        -> NO trim needed
+    - If final DF has 1 unique date:
+        -> INCREMENTAL APPEND
+        -> then trim table to latest 2 dates
     """
+
     if df.empty:
-        print(f"  [POSTGRES] Empty DataFrame for {table_name} — nothing to write.")
+        print(
+            f"  [POSTGRES] Empty DataFrame for "
+            f"{table_name} — nothing to write."
+        )
         return
 
+    # ─────────────────────────────────────────────
+    # Prepare serving-layer DataFrame
+    # ─────────────────────────────────────────────
     df_pg = drop_metadata_for_serving(df.copy())
 
-    # Cast boolean column
+    # Cast boolean column if present
     if "margin_call_flag" in df_pg.columns:
-        df_pg["margin_call_flag"] = df_pg["margin_call_flag"].astype(bool)
+        df_pg["margin_call_flag"] = (
+            df_pg["margin_call_flag"].astype(bool)
+        )
+
+    # ─────────────────────────────────────────────
+    # Step 1: Trim in memory if >2 unique dates
+    # ─────────────────────────────────────────────
+    unique_dates = sorted(df_pg["date"].unique())
+
+    if len(unique_dates) > 2:
+
+        latest_2_dates = unique_dates[-2:]
+
+        df_pg = df_pg[
+            df_pg["date"].isin(latest_2_dates)
+        ].copy()
+
+        print(
+            f"  [POSTGRES] {table_name}: "
+            f"trimmed incoming DF to latest 2 dates: "
+            f"{latest_2_dates}"
+        )
+
+    # Recalculate after trimming
+    unique_dates = sorted(df_pg["date"].unique())
+    unique_date_count = len(unique_dates)
+
+    print(
+        f"  [POSTGRES] {table_name}: "
+        f"final incoming DF has "
+        f"{unique_date_count} unique date(s)"
+    )
 
     last_error = None
 
     for attempt in range(retries + 1):
+
         try:
+
             df_attempt = df_pg.copy()
 
             with get_postgre_conn() as pg_conn:
+
                 with pg_conn.cursor() as pg_cur:
 
-                    # Step 1: delete stale window (replay / backfill only)
-                    if mode in ("replay", "backfill"):
-                        pg_cur.execute(
-                            f"DELETE FROM public.{table_name} "
-                            f"WHERE date BETWEEN %s::DATE AND %s::DATE",
-                            (start_str, end_str),
-                        )
-                        deleted = pg_cur.rowcount if pg_cur.rowcount is not None else 0
-                        print(
-                            f"  [POSTGRES] Deleted {deleted:,} rows from {table_name} "
-                            f"for window [{start_str}, {end_str}]."
-                        )
-
-                    # Step 2: validate live schema
+                    # ─────────────────────────────────────────────
+                    # Step 2: Validate live schema
+                    # ─────────────────────────────────────────────
                     pg_cur.execute(f"""
                         SELECT column_name
-                        FROM   information_schema.columns
-                        WHERE  table_schema = 'public'
-                          AND  table_name   = '{table_name}'
-                        ORDER  BY ordinal_position
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = '{table_name}'
+                        ORDER BY ordinal_position
                     """)
+
                     pg_cols = [
-                        r[0] for r in pg_cur.fetchall()
+                        r[0]
+                        for r in pg_cur.fetchall()
                         if r[0].lower() != "id"
                     ]
+
                     if not pg_cols:
+
                         raise RuntimeError(
-                            f"Schema query returned 0 columns for public.{table_name}"
+                            f"Schema query returned 0 columns "
+                            f"for public.{table_name}"
                         )
-                    missing = set(pg_cols) - set(df_attempt.columns)
+
+                    missing = (
+                        set(pg_cols)
+                        - set(df_attempt.columns)
+                    )
+
                     if missing:
+
                         raise ValueError(
-                            f"DataFrame missing Postgres columns for {table_name}: {missing}"
+                            f"DataFrame missing Postgres columns "
+                            f"for {table_name}: {missing}"
                         )
 
-                    df_ordered = df_attempt[pg_cols].copy()
+                    # Exact column order
+                    df_ordered = df_attempt[
+                        pg_cols
+                    ].copy()
 
-                    # Step 3: bulk INSERT via COPY
+                    # ─────────────────────────────────────────────
+                    # Step 3: Write strategy
+                    # ─────────────────────────────────────────────
+                    if unique_date_count == 2:
+
+                        # FULL REPLACE
+                        pg_cur.execute(
+                            f"DELETE FROM public.{table_name}"
+                        )
+
+                        print(
+                            f"  [POSTGRES] {table_name}: "
+                            f"deleted all existing rows "
+                            f"(2-day refresh)"
+                        )
+
+                    elif unique_date_count == 1:
+
+                        # INCREMENTAL APPEND
+                        print(
+                            f"  [POSTGRES] {table_name}: "
+                            f"incremental append mode "
+                            f"(1-day load)"
+                        )
+
+                    else:
+
+                        raise ValueError(
+                            f"Unexpected unique_date_count="
+                            f"{unique_date_count}"
+                        )
+
+                    # ─────────────────────────────────────────────
+                    # Step 4: Bulk INSERT via COPY
+                    # ─────────────────────────────────────────────
                     copy_sql = (
                         f"COPY public.{table_name} "
-                        f"({', '.join(pg_cols)}) FROM STDIN WITH CSV"
+                        f"({', '.join(pg_cols)}) "
+                        f"FROM STDIN WITH CSV"
                     )
+
                     buf = StringIO()
-                    df_ordered.to_csv(buf, index=False, header=False)
+
+                    df_ordered.to_csv(
+                        buf,
+                        index=False,
+                        header=False
+                    )
+
                     buf.seek(0)
+
                     with pg_cur.copy(copy_sql) as copy:
                         copy.write(buf.getvalue())
 
-                    # Step 4: trim to last 2 calendar days
-                    pg_cur.execute(f"""
-                        DELETE FROM public.{table_name}
-                        WHERE date <= (
-                            SELECT MAX(date) FROM public.{table_name}
-                        ) - INTERVAL '2 days'
-                    """)
-                    trimmed = pg_cur.rowcount if pg_cur.rowcount is not None else 0
+                    # ─────────────────────────────────────────────
+                    # Step 5: Trim ONLY for incremental loads
+                    # ─────────────────────────────────────────────
+                    if unique_date_count == 1:
 
+                        pg_cur.execute(f"""
+                            DELETE FROM public.{table_name}
+                            WHERE date < (
+                                SELECT MAX(date)
+                                FROM public.{table_name}
+                            ) - INTERVAL '1 day'
+                        """)
+
+                        trimmed = (
+                            pg_cur.rowcount
+                            if pg_cur.rowcount is not None
+                            else 0
+                        )
+
+                        print(
+                            f"  [POSTGRES] {table_name}: "
+                            f"trimmed {trimmed:,} old rows"
+                        )
+
+                    else:
+
+                        print(
+                            f"  [POSTGRES] {table_name}: "
+                            f"no trim needed "
+                            f"(exactly 2 dates loaded)"
+                        )
+
+                # Commit transaction
                 pg_conn.commit()
 
             print(
-                f"  [POSTGRES] {table_name}: inserted {len(df_ordered):,} rows, "
-                f"trimmed {trimmed:,} rows (keeping last 2 days)."
+                f"  [POSTGRES] {table_name}: inserted "
+                f"{len(df_ordered):,} rows from "
+                f"{unique_date_count} unique date(s)"
             )
-            return  # success — exit retry loop
+
+            return
 
         except Exception as e:
+
             last_error = e
+
             if attempt < retries:
+
                 wait_time = 2 ** attempt
+
                 print(
-                    f"  [POSTGRES] {table_name} retry {attempt + 1}/{retries} "
+                    f"  [POSTGRES] {table_name} retry "
+                    f"{attempt + 1}/{retries} "
                     f"after {wait_time}s: {e}"
                 )
+
                 time.sleep(wait_time)
+
             else:
+
                 print(
-                    f"  [POSTGRES] {table_name} all {retries} retries exhausted: {e}"
+                    f"  [POSTGRES] {table_name} "
+                    f"all {retries} retries exhausted: {e}"
                 )
 
-    # All retries exhausted -> raise to fail the pipeline
+    # ─────────────────────────────────────────────
+    # Final failure
+    # ─────────────────────────────────────────────
     send_critical_alert(
-        f"Postgres write to {table_name} failed after {retries} retries",
-        context={"error": str(last_error), "rows": len(df_pg)},
+        f"Postgres write to {table_name} "
+        f"failed after {retries} retries",
+        context={
+            "error": str(last_error),
+            "rows": len(df_pg),
+        },
     )
+
     raise RuntimeError(
-        f"Postgres write to public.{table_name} failed after {retries} retries: "
+        f"Postgres write to public.{table_name} "
+        f"failed after {retries} retries: "
         f"{last_error}"
     )
 
-
-def write_to_postgres(
-    df_detail:  pd.DataFrame,
-    df_model:   pd.DataFrame,
-    mode:       str,
-    start_date,
-    end_date,
-    retries:    int = 3,
-) -> None:
-    """
-    Write both the detail and model DataFrames to their respective Postgres
-    serving tables. Both writes must succeed — any failure raises.
-
-    Args:
-        df_detail:  Detail-level collateral DataFrame.
-        df_model:   Aggregated model-level DataFrame.
-        mode:       "incremental" | "backfill" | "replay".
-        start_date: Window start (used for DELETE in replay/backfill).
-        end_date:   Window end (used for DELETE in replay/backfill).
-        retries:    Maximum retry attempts per table.
-
-    Raises:
-        RuntimeError: When all retry attempts are exhausted for either table.
-    """
-    start_str = pd.Timestamp(start_date).strftime("%Y-%m-%d")
-    end_str   = pd.Timestamp(end_date).strftime("%Y-%m-%d")
-
-    _write_single_postgres_table(
-        df_detail, POSTGRES_DETAIL_TABLE, mode, start_str, end_str, retries
-    )
-    _write_single_postgres_table(
-        df_model, POSTGRES_MODEL_TABLE, mode, start_str, end_str, retries
-    )
 
 
 # ============================================================
@@ -1139,6 +1280,7 @@ def write_to_postgres(
 def run_collateral_pipeline(
     start_date_override: str  = None,
     replay:              bool = False,
+    airflow_metadata:    dict = None,
 ) -> str:
     """
     Production-grade collateral pipeline.
@@ -1169,8 +1311,11 @@ def run_collateral_pipeline(
                           (trade_id, date)
 
     Postgres writes (serving layer — TWO TABLES):
-    - Replay/backfill:  DELETE window -> INSERT -> trim to last 2 days
-    - Incremental:      INSERT -> trim to last 2 days
+    - Rules:
+        * 1 unique date:  Append + trim to last 2 days
+        * 2 unique dates: Replace entire table (no trim needed)
+        * >2 unique dates: Trim to latest 2 days in memory, then replace
+    - Never writes data just to delete it later
 
     Failure contract:
     - Pipeline fails if EITHER Snowflake write OR Postgres write fails.
@@ -1422,21 +1567,15 @@ def run_collateral_pipeline(
 
         # ══════════════════════════════════════════════════════════════
         # STEP 9 — Write to Postgres serving layer (both tables)
-        # replay/backfill -> DELETE window + INSERT + trim to last 2 days
-        # incremental     -> INSERT + trim to last 2 days
+        # Rules based on unique dates in DataFrame:
+        #   - 1 date:  Append + trim to last 2 days
+        #   - 2 dates: Replace entire table (no trim needed)
+        #   - >2 dates: Trim to latest 2 days in memory, then replace
         # Failure here -> pipeline FAILS (consistency-first).
         # ══════════════════════════════════════════════════════════════
-        print(
-            f"\n  [STEP 9] Writing to Postgres serving layer "
-            f"(mode='{mode}')..."
-        )
-        write_to_postgres(
-            df_detail=df_detail,
-            df_model=df_model,
-            mode=mode,
-            start_date=start_date,
-            end_date=end_date,
-        )
+        print(f"\n  [STEP 9] Writing to Postgres serving layer...")
+        write_single_postgres_table(df_detail, POSTGRES_DETAIL_TABLE)
+        write_single_postgres_table(df_model, POSTGRES_MODEL_TABLE)
 
         # ══════════════════════════════════════════════════════════════
         # STEP 10 — Pipeline success
@@ -1462,10 +1601,33 @@ def run_collateral_pipeline(
         print(f"  Postgres         : OK")
         print(f"{'=' * 66}\n")
 
+        # Write run summary to S3
+        run_summary = {
+            "pipeline_run_id": run_id,
+            "pipeline_name": "collateral_pipeline",
+            "status": "SUCCESS",
+            "mode": mode,
+            "start_date": start_str,
+            "end_date": end_str,
+            "rows_processed": snowflake_detail_rows,
+            "processing_time_s": processing_time,
+            "tables_written": [
+                SNOWFLAKE_HISTORY_TABLE,
+                SNOWFLAKE_CLEAN_TABLE,
+                SNOWFLAKE_MODEL_HISTORY_TABLE,
+                SNOWFLAKE_MODEL_CLEAN_TABLE,
+                POSTGRES_DETAIL_TABLE,
+                POSTGRES_MODEL_TABLE,
+            ],
+            "airflow": airflow_metadata,
+        }
+        write_run_summary(run_summary)
+
         return f"SUCCESS_{snowflake_detail_rows}"
 
     except Exception as e:
         processing_time = round(time.time() - pipeline_start, 2)
+        
         send_critical_alert(
             "Collateral pipeline failed with unhandled exception",
             context={
@@ -1475,6 +1637,7 @@ def run_collateral_pipeline(
                 "error":    str(e),
             },
         )
+        
         print(f"\n{'=' * 66}")
         print(f"  COLLATERAL PIPELINE FAILED")
         print(f"  run_id   : {run_id}")
@@ -1482,4 +1645,21 @@ def run_collateral_pipeline(
         print(f"  error    : {e}")
         print(f"  duration : {processing_time}s")
         print(f"{'=' * 66}\n")
+
+        # Write failure summary to S3
+        run_summary = {
+            "pipeline_run_id": run_id,
+            "pipeline_name": "collateral_pipeline",
+            "status": "FAILED",
+            "mode": mode,
+            "processing_time_s": processing_time,
+            "error": str(e),
+            "airflow": airflow_metadata,
+        }
+        try:
+            write_run_summary(run_summary)
+        except Exception:
+            pass  # Don't mask the original exception
+
+        # Re-raise so Airflow marks the task as FAILED
         raise

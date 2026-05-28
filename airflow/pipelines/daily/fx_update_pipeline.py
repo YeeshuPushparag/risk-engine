@@ -20,9 +20,11 @@ Snowflake FX          (clean, deterministic latest state)
     - Must NEVER contain conflicting rows for same (ticker, date)
 
 Postgres fx_data      (serving layer — NOT source of truth)
-    - Replay / Backfill:  DELETE window -> INSERT
-    - Incremental:        INSERT
-    - Always trim to last 2 calendar days after write
+    - Rules:
+        * 1 unique date:  Append + trim to last 2 days
+        * 2 unique dates: Replace entire table (no trim needed)
+        * >2 unique dates: Trim to latest 2 days in memory, then replace
+    - Never writes data just to delete it later
 
 Failure semantics
 -----------------
@@ -62,6 +64,7 @@ import joblib
 import xgboost as xgb
 import boto3
 import requests
+import json
 from io import BytesIO, StringIO
 from datetime import datetime, timedelta
 from connections.postgre_conn import get_postgre_conn
@@ -130,6 +133,46 @@ def send_critical_alert(message: str, context: dict = None):
             requests.post(webhook, json={"text": text}, timeout=3)
         except Exception as e:
             print(f"[ALERT ERROR] Slack notification failed: {e}")
+
+
+# =============================================================
+# RUN SUMMARY WRITER
+# =============================================================
+def write_run_summary(summary):
+    """
+    Write pipeline run summary to S3 for observability and audit.
+
+    Args:
+        summary: Dictionary containing run metadata including:
+            - pipeline_run_id
+            - pipeline_name
+            - status (SUCCESS/FAILED)
+            - mode
+            - start_date
+            - end_date
+            - rows_processed
+            - processing_time_s
+            - tables_written (list)
+            - error (if failed)
+    """
+    key = (
+        f"historical-fx/fx-risk/metadata/"
+        f"pipeline_run_id={summary['pipeline_run_id']}/"
+        f"run_summary.json"
+    )
+
+    s3.put_object(
+        Bucket=S3_BUCKET,
+        Key=key,
+        Body=json.dumps(
+            summary,
+            default=str,
+            indent=2,
+        ),
+    )
+
+    print(f"  [RUN SUMMARY] Wrote {key}")
+
 
 def get_latest_feature_keys(start_date, end_date):
     """
@@ -939,58 +982,73 @@ def write_to_snowflake_clean(df, mode, start_date, end_date, run_id=None, chunk_
 _PG_INTEGER_COLS = ["volume", "position_size", "exposure_amount"]
 
 
-def write_to_postgres(df, mode, start_date, end_date, retries=3):
+def write_to_postgres(df, retries=3):
     """
     Write enriched FX rows to the Postgres serving layer.
 
-    Steps (executed inside a single transaction per attempt):
-      1. Replay / Backfill only:
-            DELETE FROM fx_data WHERE date BETWEEN start_date AND end_date
-         Purges stale rows before inserting the recomputed window.
-
-      2. INSERT new rows via COPY (single-batch — FX dataset is small).
-
-      3. Trim to last 2 calendar days:
-            DELETE FROM fx_data
-            WHERE date <= (SELECT MAX(date) FROM fx_data) - INTERVAL '2 days'
-         Postgres is a UI serving layer; it only needs recent data.
-
-    All three steps commit together. If any step fails, the connection is
-    closed without commit (psycopg implicit rollback).
-
-    RAISES on final failure — pipeline does NOT continue if Postgres fails.
-    This enforces the consistency-first contract: Snowflake AND Postgres
-    must both succeed for the run to be considered successful.
-
-    Args:
-        df:         Fully processed DataFrame (with enrichment + predictions).
-        mode:       "incremental" | "backfill" | "replay".
-        start_date: Window start (used for DELETE in replay/backfill).
-        end_date:   Window end (used for DELETE in replay/backfill).
-        retries:    Maximum retry attempts after first failure.
-
-    Raises:
-        RuntimeError: When all retry attempts are exhausted.
+    Rules:
+    - If incoming DF has >2 unique dates:
+        -> trim in memory to latest 2 dates
+    - If final DF has 2 unique dates:
+        -> FULL REPLACE (DELETE + INSERT)
+        -> NO trim needed
+    - If final DF has 1 unique date:
+        -> INCREMENTAL APPEND
+        -> then trim table to latest 2 dates
     """
+
     if df.empty:
         print("  [POSTGRES] Empty DataFrame — nothing to write.")
         return
 
-    start_str = pd.Timestamp(start_date).strftime("%Y-%m-%d")
-    end_str   = pd.Timestamp(end_date).strftime("%Y-%m-%d")
-
-    # Strip all metadata/lineage columns before serving-layer write
+    # ─────────────────────────────────────────────
+    # Prepare serving-layer DataFrame
+    # ─────────────────────────────────────────────
     df_pg = drop_metadata_for_serving(df.copy())
+
+    # ─────────────────────────────────────────────
+    # Step 1: Trim in memory if >2 unique dates
+    # ─────────────────────────────────────────────
+    unique_dates = sorted(df_pg["date"].unique())
+
+    if len(unique_dates) > 2:
+
+        latest_2_dates = unique_dates[-2:]
+
+        df_pg = df_pg[
+            df_pg["date"].isin(latest_2_dates)
+        ].copy()
+
+        print(
+            f"  [POSTGRES] Trimmed incoming DF "
+            f"to latest 2 dates: {latest_2_dates}"
+        )
+
+    # Recalculate after trimming
+    unique_dates = sorted(df_pg["date"].unique())
+    unique_date_count = len(unique_dates)
+
+    print(
+        f"  [POSTGRES] Final incoming DF has "
+        f"{unique_date_count} unique date(s)"
+    )
 
     last_error = None
 
     for attempt in range(retries + 1):
+
         try:
-            # Cast integer columns (copied fresh each attempt to avoid
-            # accumulating casts across retries)
+
+            # Fresh copy per retry
             df_attempt = df_pg.copy()
+
+            # ─────────────────────────────────────────────
+            # Cast integer columns
+            # ─────────────────────────────────────────────
             for col in _PG_INTEGER_COLS:
+
                 if col in df_attempt.columns:
+
                     df_attempt[col] = (
                         df_attempt[col]
                         .fillna(0)
@@ -1000,107 +1058,192 @@ def write_to_postgres(df, mode, start_date, end_date, retries=3):
                     )
 
             with get_postgre_conn() as pg_conn:
+
                 with pg_conn.cursor() as pg_cur:
 
-                    # ── Step 1: delete stale window (replay / backfill only) ──
-                    if mode in ("replay", "backfill"):
-                        pg_cur.execute(
-                            """
-                            DELETE FROM public.fx_data
-                            WHERE date BETWEEN %s::DATE AND %s::DATE
-                            """,
-                            (start_str, end_str),
-                        )
-                        deleted = pg_cur.rowcount if pg_cur.rowcount is not None else 0
-                        print(
-                            f"  [POSTGRES] Deleted {deleted:,} rows for "
-                            f"window [{start_str}, {end_str}]"
-                        )
-
-                    # ── Step 2: validate live schema ──
+                    # ─────────────────────────────────────────────
+                    # Step 2: Validate live schema
+                    # ─────────────────────────────────────────────
                     pg_cur.execute(
                         """
                         SELECT column_name
-                        FROM   information_schema.columns
-                        WHERE  table_schema = 'public'
-                          AND  table_name   = 'fx_data'
-                        ORDER  BY ordinal_position
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'fx_data'
+                        ORDER BY ordinal_position
                         """
                     )
+
                     pg_cols_order = [
-                        row[0] for row in pg_cur.fetchall()
+                        row[0]
+                        for row in pg_cur.fetchall()
                         if row[0].lower() != "id"
                     ]
 
                     if not pg_cols_order:
+
                         raise RuntimeError(
-                            "Schema query returned 0 columns for public.fx_data"
+                            "Schema query returned 0 columns "
+                            "for public.fx_data"
                         )
 
-                    missing = set(pg_cols_order) - set(df_attempt.columns)
+                    missing = (
+                        set(pg_cols_order)
+                        - set(df_attempt.columns)
+                    )
+
                     if missing:
+
                         raise ValueError(
-                            f"DataFrame is missing Postgres columns: {missing}"
+                            f"DataFrame missing PG columns: "
+                            f"{missing}"
                         )
 
-                    # Enforce exact Postgres column order for COPY
-                    df_ordered = df_attempt[pg_cols_order].copy()
+                    # Exact column order
+                    df_ordered = df_attempt[
+                        pg_cols_order
+                    ].copy()
 
-                    # ── Step 3: bulk INSERT via COPY ──
-                    columns_quoted = [f'"{col}"' for col in pg_cols_order]
+                    # ─────────────────────────────────────────────
+                    # Step 3: Write strategy
+                    # ─────────────────────────────────────────────
+                    if unique_date_count == 2:
+
+                        # FULL REPLACE
+                        pg_cur.execute(
+                            "DELETE FROM public.fx_data"
+                        )
+
+                        print(
+                            "  [POSTGRES] Deleted all existing rows "
+                            "(2-day refresh)"
+                        )
+
+                    elif unique_date_count == 1:
+
+                        # INCREMENTAL APPEND
+                        print(
+                            "  [POSTGRES] Incremental append mode "
+                            "(1-day load)"
+                        )
+
+                    else:
+
+                        raise ValueError(
+                            f"Unexpected unique_date_count="
+                            f"{unique_date_count}"
+                        )
+
+                    # ─────────────────────────────────────────────
+                    # Step 4: Bulk INSERT via COPY
+                    # ─────────────────────────────────────────────
+                    columns_quoted = [
+                        f'"{col}"'
+                        for col in pg_cols_order
+                    ]
+
                     copy_sql = (
-                        f"COPY public.fx_data ({', '.join(columns_quoted)}) "
+                        f"COPY public.fx_data "
+                        f"({', '.join(columns_quoted)}) "
                         f"FROM STDIN WITH CSV"
                     )
 
                     buf = StringIO()
-                    df_ordered.to_csv(buf, index=False, header=False)
+
+                    df_ordered.to_csv(
+                        buf,
+                        index=False,
+                        header=False
+                    )
+
                     buf.seek(0)
 
                     with pg_cur.copy(copy_sql) as copy:
                         copy.write(buf.getvalue())
 
-                    # ── Step 4: trim to last 2 calendar days ──
-                    pg_cur.execute(
-                        """
-                        DELETE FROM public.fx_data
-                        WHERE date <= (
-                            SELECT MAX(date) FROM public.fx_data
-                        ) - INTERVAL '2 days'
-                        """
-                    )
-                    trimmed = pg_cur.rowcount if pg_cur.rowcount is not None else 0
+                    # ─────────────────────────────────────────────
+                    # Step 5: Trim ONLY for incremental loads
+                    # ─────────────────────────────────────────────
+                    if unique_date_count == 1:
 
-                # Commit the entire transaction (delete + insert + trim)
+                        pg_cur.execute(
+                            """
+                            DELETE FROM public.fx_data
+                            WHERE date < (
+                                SELECT MAX(date)
+                                FROM public.fx_data
+                            ) - INTERVAL '1 day'
+                            """
+                        )
+
+                        trimmed = (
+                            pg_cur.rowcount
+                            if pg_cur.rowcount is not None
+                            else 0
+                        )
+
+                        print(
+                            f"  [POSTGRES] Trimmed "
+                            f"{trimmed:,} old rows"
+                        )
+
+                    else:
+
+                        print(
+                            "  [POSTGRES] No trim needed "
+                            "(exactly 2 dates loaded)"
+                        )
+
+                # Commit transaction
                 pg_conn.commit()
 
             print(
-                f"  [POSTGRES] Success — inserted {len(df_ordered):,} rows, "
-                f"trimmed {trimmed:,} rows (keeping last 2 days)"
+                f"  [POSTGRES] Success — inserted "
+                f"{len(df_ordered):,} rows from "
+                f"{unique_date_count} unique date(s)"
             )
-            return  # success — exit retry loop
+
+            return
 
         except Exception as e:
+
             last_error = e
+
             if attempt < retries:
+
                 wait_time = 2 ** attempt
+
                 print(
-                    f"  [POSTGRES] Retry {attempt + 1}/{retries} "
+                    f"  [POSTGRES] Retry "
+                    f"{attempt + 1}/{retries} "
                     f"after {wait_time}s: {e}"
                 )
-                time.sleep(wait_time)
-            else:
-                print(f"  [POSTGRES] All {retries} retries exhausted: {e}")
 
-    # All retries exhausted -> raise to fail the pipeline
+                time.sleep(wait_time)
+
+            else:
+
+                print(
+                    f"  [POSTGRES] All "
+                    f"{retries} retries exhausted: {e}"
+                )
+
+    # ─────────────────────────────────────────────
+    # Final failure
+    # ─────────────────────────────────────────────
     send_critical_alert(
         f"Postgres FX write failed after {retries} retries",
-        context={"error": str(last_error), "rows": len(df_pg)},
-    )
-    raise RuntimeError(
-        f"Postgres write to public.fx_data failed after {retries} retries: {last_error}"
+        context={
+            "error": str(last_error),
+            "rows": len(df_pg),
+        },
     )
 
+    raise RuntimeError(
+        f"Postgres write to public.fx_data "
+        f"failed after {retries} retries: "
+        f"{last_error}"
+    )
 
 # =============================================================
 # MAIN PIPELINE ENTRY POINT
@@ -1108,6 +1251,7 @@ def write_to_postgres(df, mode, start_date, end_date, retries=3):
 def update_fx_snowflake(
     start_date_override: str  = None,
     replay:              bool = False,
+    airflow_metadata:    dict = None,
 ):
     """
     Production-grade FX update pipeline.
@@ -1141,8 +1285,11 @@ def update_fx_snowflake(
                                   MERGE (incremental)
 
     Postgres writes (serving layer):
-    - Replay/backfill:  DELETE window -> INSERT -> trim to last 2 days
-    - Incremental:      INSERT -> trim to last 2 days
+    - Rules:
+        * 1 unique date:  Append + trim to last 2 days
+        * 2 unique dates: Replace entire table (no trim needed)
+        * >2 unique dates: Trim to latest 2 days in memory, then replace
+    - Never writes data just to delete it later
 
     Failure contract:
     - Pipeline fails if EITHER Snowflake write OR Postgres write fails.
@@ -1520,20 +1667,17 @@ def update_fx_snowflake(
             end_date=end_date,
             run_id=run_id,
         )
-
+ 
         # ══════════════════════════════════════════════════════════════
         # STEP 13 — Write to Postgres serving layer
-        # replay/backfill -> DELETE window + INSERT + trim to last 2 days
-        # incremental     -> INSERT + trim to last 2 days
+        # Rules based on unique dates in DataFrame:
+        #   - 1 date:  Append + trim to last 2 days
+        #   - 2 dates: Replace entire table (no trim needed)
+        #   - >2 dates: Trim to latest 2 days in memory, then replace
         # Failure here -> pipeline FAILS (consistency-first).
         # ══════════════════════════════════════════════════════════════
-        print(f"\n  Writing to Postgres serving layer (mode='{mode}')...")
-        write_to_postgres(
-            df_to_upload,
-            mode=mode,
-            start_date=start_date,
-            end_date=end_date,
-        )
+        print(f"\n  Writing to Postgres serving layer...")
+        write_to_postgres(df_to_upload)
 
         # ══════════════════════════════════════════════════════════════
         # STEP 14 — Pipeline success
@@ -1555,6 +1699,32 @@ def update_fx_snowflake(
         print(f"  Snowflake CLEAN  : OK")
         print(f"  Postgres         : OK")
         print(f"{'=' * 66}\n")
+
+        # Write run summary to S3
+        run_summary = {
+            "pipeline_run_id": run_id,
+            "pipeline_name": "fx_update_pipeline",
+            "status": "SUCCESS",
+            "mode": mode,
+            "start_date": str(start_date.date() if hasattr(start_date, 'date') else start_date),
+            "end_date": str(end_date.date()),
+            "rows_processed": snowflake_rows,
+            "processing_time_s": processing_time,
+            "market_feature_source_run_ids": (
+                df_to_upload["source_run_id"]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            ),
+            "tables_written": [
+                SNOWFLAKE_HISTORY_TABLE,
+                SNOWFLAKE_CLEAN_TABLE,
+                "fx_data",
+            ],
+            "airflow": airflow_metadata,
+        }
+        write_run_summary(run_summary)
 
         return f"UPLOAD_SUCCESS_{snowflake_rows}_ROWS"
 
@@ -1578,6 +1748,18 @@ def update_fx_snowflake(
         print(f"  error    : {e}")
         print(f"  duration : {processing_time}s")
         print(f"{'=' * 66}\n")
+
+        # Write failure summary to S3
+        run_summary = {
+            "pipeline_run_id": run_id,
+            "pipeline_name": "fx_update_pipeline",
+            "status": "FAILED",
+            "mode": mode,
+            "processing_time_s": processing_time,
+            "error": str(e),
+            "airflow": airflow_metadata,
+        }
+        write_run_summary(run_summary)
 
         # Re-raise so Airflow marks the task as FAILED
         raise

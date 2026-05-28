@@ -93,7 +93,7 @@ from botocore.exceptions import ClientError
 from datetime import datetime, timedelta, timezone, date as date_type
 from io import BytesIO
 from fredapi import Fred
-
+from pendulum import timezone
 
 # =============================================================
 # CONFIG  —  single source of truth.  No magic numbers in code.
@@ -228,9 +228,42 @@ def send_critical_alert(message: str, context: dict = None) -> None:
             print(f"[ALERT ERROR] Slack notification failed: {e}")
 
 
-def send_info_alert(message: str, context: dict = None) -> None:
-    """Emit structured INFO log to stdout. No Slack (prevents noise)."""
-    print(f"[INFO] {message} | context={json.dumps(context or {}, default=str)}")
+
+
+
+# =============================================================
+# MARKET DATE HELPERS
+# =============================================================
+
+def get_market_end_date() -> date_type:
+    """
+    Determine the appropriate end date for market data processing.
+    
+    - If before 4:00 PM ET (market close): use yesterday
+    - If after 4:00 PM ET: use today
+    
+    This ensures you don't pull incomplete current-day data before market close.
+    """
+    # Get current time in US Eastern timezone
+    eastern = timezone("America/New_York")
+    
+    now_et = datetime.now(eastern)
+    current_date_et = now_et.date()
+    current_time_et = now_et.time()
+    
+    # Market close is 4:00 PM ET
+    market_close = datetime.strptime("16:00", "%H:%M").time()
+    
+    if current_time_et < market_close:
+        # Before market close -> use yesterday
+        end_date = current_date_et - timedelta(days=1)
+        print(f"  [MARKET] Before 4:00 PM ET — using yesterday as end_date: {end_date}")
+    else:
+        # After market close -> use today
+        end_date = current_date_et
+        print(f"  [MARKET] After 4:00 PM ET — using today as end_date: {end_date}")
+    
+    return end_date
 
 
 # =============================================================
@@ -410,37 +443,54 @@ def _feature_partition_key(date, run_id: str) -> str:
 # =============================================================
 
 def _save_run_metadata(
-    bucket:     str,
-    run_id:     str,
-    mode:       str,
+    bucket: str,
+    run_id: str,
+    mode: str,
     start_date: date_type,
-    end_date:   date_type,
-    nrows:      int,
-    run_ts:     datetime,
+    end_date: date_type,
+    nrows: int,
+    run_ts: datetime,
+    airflow_metadata: dict = None,
+    status: str = "SUCCESS",
+    processing_time_s: float = 0,
+    partition_count: int = 0,
+    rolling_updated: bool = False,
+    error: str = "",
 ) -> None:
     """
-    Persist run metadata to S3 so replay mode can look up run_id by start_date.
+    Persist run metadata to S3 for observability and audit trail.
+    
+    NOT used for replay resolution - raw snapshots are located by run_id
+    passed explicitly or resolved from the original run's metadata.
+    
     Non-fatal on failure — never blocks the pipeline.
     """
     key = f"{CONFIG['run_metadata_prefix']}{run_id}.json"
+    
     payload = {
-        "run_id":     run_id,
-        "mode":       mode,
+        "run_id": run_id,
+        "status": status,
+        "mode": mode,
         "start_date": str(start_date),
-        "end_date":   str(end_date),
-        "rows":       nrows,
-        "timestamp":  run_ts.isoformat(),
+        "end_date": str(end_date),
+        "rows": nrows,
+        "processing_time_s": processing_time_s,
+        "partition_count": partition_count,
+        "rolling_updated": rolling_updated,
+        "timestamp": run_ts.isoformat(),
+        "error": error,
+        "airflow": airflow_metadata,
     }
+    
     try:
         get_s3().put_object(
             Bucket=bucket,
             Key=key,
-            Body=json.dumps(payload, indent=2).encode("utf-8"),
+            Body=json.dumps(payload, indent=2, default=str).encode("utf-8"),
         )
-        print(f"  [METADATA] Run summary saved: s3://{bucket}/{key}")
+        print(f"  [METADATA] {status} metadata written: s3://{bucket}/{key}")
     except Exception as exc:
-        print(f"  [METADATA][WARN] Could not save run metadata: {exc}")
-
+        print(f"  [METADATA][WARN] Could not save metadata: {exc}")
 
 def _resolve_run_id_for_replay(bucket: str, start_date: date_type) -> str:
     """
@@ -649,17 +699,24 @@ def fetch_dgs10_from_fred(
     snapshot_key = _raw_fred_key(start_date, run_id)
 
     if mode == "replay":
-        if not s3_key_exists(bucket, snapshot_key):
-            raise BondPipelineError(
-                f"FRED snapshot not found for replay: s3://{bucket}/{snapshot_key}"
-            )
-        df          = read_parquet_from_s3(bucket, snapshot_key)
-        df["date"]  = pd.to_datetime(df["date"])
+        frames = []
+        current = pd.Timestamp(start_date)
+        end = pd.Timestamp(end_date)
+        
+        while current <= end:
+            if current.weekday() < 5:
+                key = _raw_fred_key(current.date(), run_id)
+                if s3_key_exists(bucket, key):
+                    frames.append(read_parquet_from_s3(bucket, key))
+            current += timedelta(days=1)
+        
+        if not frames:
+            raise BondPipelineError(f"No FRED partitions found for {start_date} to {end_date}")
+        
+        df = pd.concat(frames, ignore_index=True)
+        df["date"] = pd.to_datetime(df["date"])
         df["DGS10"] = pd.to_numeric(df["DGS10"], errors="coerce")
-        print(
-            f"  [STAGE 4] Loaded {len(df)} DGS10 observations from S3 snapshot "
-            f"(replay mode)."
-        )
+        print(f"  [STAGE 4] Loaded {len(df)} DGS10 observations from {len(frames)} S3 snapshots (replay mode).")
         return df
 
     # Normal / Backfill — call live FRED API
@@ -682,23 +739,44 @@ def fetch_dgs10_from_fred(
             )
             if series is None or series.empty:
                 raise ValueError("FRED returned empty series for DGS10.")
-
             df = (
                 series.to_frame("DGS10")
                 .reset_index()
                 .rename(columns={"index": "date"})
             )
+
             df["date"]  = pd.to_datetime(df["date"])
             df["DGS10"] = pd.to_numeric(df["DGS10"], errors="coerce")
+            # =========================================================
+            # WRITE ONE RAW PARQUET PER BUSINESS DATE
+            # =========================================================
 
-            # Save raw snapshot for future replays
-            write_parquet_to_s3(df, bucket, snapshot_key)
+            df["date_only"] = pd.to_datetime(df["date"]).dt.date
+
+            written_dates = 0
+
+            for date_val, group in df.groupby("date_only"):
+
+                # Skip weekends completely
+                if pd.Timestamp(date_val).weekday() >= 5:
+                    continue
+
+                raw_key = _raw_fred_key(date_val, run_id)
+
+                write_parquet_to_s3(
+                    group.drop(columns=["date_only"]),
+                    bucket,
+                    raw_key
+                )
+
+                written_dates += 1
+
             print(
                 f"  [STAGE 4] Fetched {len(df)} DGS10 observations from FRED "
-                f"({df['date'].min().date()} <- {df['date'].max().date()}). "
-                f"Snapshot saved: s3://{bucket}/{snapshot_key}"
+                f"and wrote {written_dates} raw business-date partitions."
             )
-            return df
+
+            return df.drop(columns=["date_only"])
 
         except Exception as exc:
             last_exc = exc
@@ -1142,15 +1220,29 @@ def update_rolling_layer(
         .reset_index(drop=True)
     )
 
-    # Trim to last window_days
-    max_date  = combined["date"].max()
-    cutoff    = max_date - pd.Timedelta(days=window_days)
-    rolling   = combined[combined["date"] > cutoff].reset_index(drop=True)
+    # =========================================================
+    # KEEP LAST N BUSINESS/TRADING DATES
+    # =========================================================
+
+    unique_dates = (
+        combined["date"]
+        .drop_duplicates()
+        .sort_values()
+    )
+
+    last_dates = unique_dates.tail(window_days)
+
+    rolling = (
+        combined[
+            combined["date"].isin(last_dates)
+        ]
+        .reset_index(drop=True)
+    )
 
     write_parquet_to_s3(rolling, bucket, CONFIG["rolling_key"])
     print(
         f"  [ROLLING] Updated rolling layer: {len(rolling):,} rows "
-        f"(cutoff={cutoff.date()}, max_date={max_date.date()})."
+        f"(business_dates_retained={len(last_dates)})."
     )
     return rolling
 
@@ -1192,6 +1284,7 @@ def _add_pipeline_metadata(
 def update_bonds_pipeline(
     start_date_override: str = None,
     replay_from_raw: bool = False,
+    airflow_metadata: dict = None,
 ) -> str:
     """
     FIRST PIPELINE — Bond ingestion and feature engineering.
@@ -1243,7 +1336,7 @@ def update_bonds_pipeline(
     if mode == "replay" and not start_date_override:
         raise BondPipelineError("Replay mode requires start_date_override.")
 
-    end_date = today
+    end_date = get_market_end_date()
 
     print(f"\n{'=' * 66}")
     print(f"  BOND UPDATE PIPELINE (FIRST) START")
@@ -1303,6 +1396,27 @@ def update_bonds_pipeline(
             run_id = f"run_{run_ts.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
 
         print(f"  run_id: {run_id}")
+        
+        # STARTED metadata sentinel for operational observability
+        _save_run_metadata(
+            bucket=bucket,
+
+            run_id=run_id,
+
+            mode=mode,
+
+            start_date=start_date,
+
+            end_date=end_date,
+
+            nrows=0,
+
+            run_ts=run_ts,
+
+            airflow_metadata=airflow_metadata,
+
+            status="STARTED",
+        )
 
         # String forms for pd.date_range and FRED API calls
         start_str = (
@@ -1450,24 +1564,40 @@ def update_bonds_pipeline(
         )
 
         # ══════════════════════════════════════════════════════════════
-        # STEP 12 — Save run metadata (for future replay resolution)
-        # Non-fatal. Replay mode does NOT overwrite prior metadata.
+        # STEP 12 — Save Success run metadata for observability
         # ══════════════════════════════════════════════════════════════
-        if mode != "replay":
-            _save_run_metadata(
-                bucket     = bucket,
-                run_id     = run_id,
-                mode       = mode,
-                start_date = pd.Timestamp(start_str).date(),
-                end_date   = end_date,
-                nrows      = output_rows,
-                run_ts     = run_ts,
-            )
+        processing_time = round(time.time() - pipeline_start, 2)
+        
+        _save_run_metadata(
+            bucket=bucket,
 
+            run_id=run_id,
+
+            mode=mode,
+
+            start_date=pd.Timestamp(start_str).date(),
+
+            end_date=end_date,
+
+            nrows=output_rows,
+
+            run_ts=run_ts,
+
+            airflow_metadata=airflow_metadata,
+
+            status="SUCCESS",
+
+            processing_time_s=processing_time,
+
+            partition_count=len(partition_log),
+
+            rolling_updated=True,
+        )
+        
         # ══════════════════════════════════════════════════════════════
         # STEP 13 — Pipeline success
         # ══════════════════════════════════════════════════════════════
-        processing_time = round(time.time() - pipeline_start, 2)
+
 
         fill_summary = (
             df_output["fill_method_flag"].value_counts().to_dict()
@@ -1487,34 +1617,23 @@ def update_bonds_pipeline(
         print(f"  Rolling parquet    : OK")
         print(f"{'=' * 66}\n")
 
-        send_info_alert(
-            "Bond update pipeline completed successfully",
-            context={
-                "run_id":      run_id,
-                "mode":        mode,
-                "rows":        output_rows,
-                "partitions":  len(partition_log),
-                "date_range":  f"{start_str} <- {end_str}",
-                "fill_flags":  fill_summary,
-                "duration_s":  processing_time,
-            },
-        )
 
         return f"SUCCESS_{output_rows}_ROWS"
 
-    except (BondPipelineError, DataValidationError):
-        # Already alerted inside the raising function — just re-raise cleanly
-        raise
 
     except Exception as exc:
-        processing_time = round(time.time() - pipeline_start, 2)
+
+        processing_time = round(
+            time.time() - pipeline_start,
+            2,
+        )
 
         send_critical_alert(
             "Bond update pipeline failed with unhandled exception",
             context={
-                "mode":     mode,
+                "mode": mode,
                 "duration": f"{processing_time}s",
-                "error":    str(exc),
+                "error": str(exc),
             },
         )
 
@@ -1525,5 +1644,33 @@ def update_bonds_pipeline(
         print(f"  duration : {processing_time}s")
         print(f"{'=' * 66}\n")
 
-        # Re-raise so Airflow marks the task as FAILED
+        # FAILED metadata overwrite
+        _save_run_metadata(
+            bucket=bucket,
+
+            run_id=run_id,
+
+            mode=mode,
+
+            start_date=(
+                pd.Timestamp(start_str).date()
+                if "start_str" in locals()
+                else None
+            ),
+
+            end_date=end_date,
+
+            nrows=0,
+
+            run_ts=run_ts,
+
+            airflow_metadata=airflow_metadata,
+
+            status="FAILED",
+
+            processing_time_s=processing_time,
+
+            error=str(exc),
+        )
+
         raise

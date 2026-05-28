@@ -42,6 +42,39 @@ def get_dag_config(context, replay_key="replay"):
     return config
 
 
+def get_airflow_metadata(context):
+    """
+    Standardized Airflow metadata extractor for pipeline observability.
+
+    Returns:
+        dict: Airflow execution context metadata including:
+            - dag_id
+            - task_id
+            - dag_run_id
+            - dag_run_type (scheduled/manual/backfill/dataset_triggered)
+            - try_number
+            - max_tries
+            - logical_date
+            - execution_date
+            - triggered_by (manual/scheduled)
+    """
+    return {
+        "dag_id": context["dag"].dag_id,
+        "task_id": context["task"].task_id,
+        "dag_run_id": context["dag_run"].run_id,
+        "dag_run_type": context["dag_run"].run_type,
+        "try_number": context["ti"].try_number,
+        "max_tries": context["ti"].max_tries,
+        "logical_date": str(context["logical_date"]),
+        "execution_date": str(context["execution_date"]),
+        "triggered_by": (
+            "manual"
+            if context["dag_run"].external_trigger
+            else "scheduled"
+        ),
+    }
+
+
 # ============================================================
 # LOAN ENRICHMENT PIPELINE
 # ============================================================
@@ -57,9 +90,12 @@ def run_enrich_loans(**context):
         replay_key="replay",
     )
 
+    airflow_metadata = get_airflow_metadata(context)
+
     return run_enrich_loans_pipeline(
         start_date_override=config["start_date_override"],
         replay=config["replay"],
+        airflow_metadata=airflow_metadata,
     ) or "OK"
 
 
@@ -78,9 +114,12 @@ def run_loans_model(**context):
         replay_key="replay",
     )
 
+    airflow_metadata = get_airflow_metadata(context)
+
     return run_loans_model_pipeline(
         start_date_override=config["start_date_override"],
         replay=config["replay"],
+        airflow_metadata=airflow_metadata,
     ) or "OK"
 
 

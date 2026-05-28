@@ -16,9 +16,11 @@ Snowflake EQUITY          (clean, deterministic latest state)
     - Must NEVER contain conflicting rows for same (ticker, date)
 
 Postgres equity_data      (serving layer — NOT source of truth)
-    - Replay / Backfill:  DELETE window -> INSERT
-    - Incremental:        INSERT
-    - Always trim to last 2 calendar days after write
+    - Rules:
+        * 1 unique date:  Append + trim to last 2 days
+        * 2 unique dates: Replace entire table (no trim needed)
+        * >2 unique dates: Trim to latest 2 days in memory, then replace
+    - Never writes data just to delete it later
 
 Failure semantics
 -----------------
@@ -179,6 +181,26 @@ def retry_with_backoff(
 
     raise last_exception
 
+
+def write_run_summary(summary):
+
+    key = (
+        f"historical-equity/equity-risk/metadata/"
+        f"pipeline_run_id={summary['pipeline_run_id']}/"
+        f"run_summary.json"
+    )
+
+    s3.put_object(
+        Bucket=S3_BUCKET,
+        Key=key,
+        Body=json.dumps(
+            summary,
+            default=str,
+            indent=2,
+        ),
+    )
+
+    print(f"  [RUN SUMMARY] Wrote {key}")
 
 
 def get_latest_feature_keys(start_date, end_date):
@@ -876,14 +898,25 @@ def drop_old_pipeline_metrics(df):
     return df.drop(columns=existing)
 
 
-def add_current_pipeline_metadata(df):
+def add_current_pipeline_metadata(df, run_id):
+
     now = datetime.utcnow()
-    df["pipeline_name"]    = "equity_risk_prediction_pipeline"
-    df["pipeline_run_id"]  = now.isoformat()
-    df["data_source"]      = "s3_market_features"
-    df["input_source"]     = "market_features + mtm + financial_enrichment + risk_enrichment"
-    df["transformation"]   = "equity_risk_v1"
+
+    df["pipeline_name"]     = "equity_risk_prediction_pipeline"
+
+    df["pipeline_run_id"]   = run_id
+
+    df["data_source"]       = "s3_market_features"
+
+    df["input_source"]      = (
+        "market_features + mtm + "
+        "financial_enrichment + risk_enrichment"
+    )
+
+    df["transformation"]    = "equity_risk_v1"
+
     df["record_created_at"] = now
+
     return df
 
 
@@ -1305,101 +1338,102 @@ _PG_INTEGER_COLS = [
 ]
 
 
-def write_to_postgres(df, mode, start_date, end_date, retries=3):
+def write_to_postgres(df, retries=3):
     """
     Write enriched equity rows to the Postgres serving layer.
 
-    Steps (executed inside a single transaction per attempt):
-      1. Replay / Backfill only:
-            DELETE FROM equity_data WHERE date BETWEEN start_date AND end_date
-         This purges stale data before inserting the recomputed window.
-
-      2. INSERT new rows via COPY (batched, most efficient Postgres bulk load).
-
-      3. Trim to last 2 calendar days:
-            DELETE FROM equity_data
-            WHERE date <= (SELECT MAX(date) FROM equity_data) - INTERVAL '2 days'
-         Postgres is a UI serving layer; it only needs recent data.
-
-    All three steps are committed together. If any step fails, the transaction
-    is not committed (connection close triggers implicit rollback via psycopg).
-
-    RAISES on final failure — pipeline does NOT continue if Postgres fails.
-    This enforces the consistency-first contract: both Snowflake AND Postgres
-    must succeed for the pipeline run to be considered successful.
-
-    Args:
-        df:         Fully processed DataFrame (with all enrichment + predictions).
-        mode:       "incremental" | "backfill" | "replay".
-        start_date: Window start (used for DELETE in replay/backfill).
-        end_date:   Window end (used for DELETE in replay/backfill).
-        retries:    Maximum retry attempts after first failure.
-
-    Raises:
-        RuntimeError: When all retry attempts are exhausted.
+    Rules:
+    - If incoming DF has >2 unique dates:
+        -> trim in memory to latest 2 dates
+    - If final DF has 2 unique dates:
+        -> FULL REPLACE (DELETE + INSERT)
+        -> NO trim needed
+    - If final DF has 1 unique date:
+        -> INCREMENTAL APPEND
+        -> then trim table to latest 2 days
     """
+
     if df.empty:
         print("  [POSTGRES] Empty DataFrame — nothing to write.")
         return
 
-    start_str = pd.Timestamp(start_date).strftime("%Y-%m-%d")
-    end_str   = pd.Timestamp(end_date).strftime("%Y-%m-%d")
-
-    # Prepare the serving-layer DataFrame: strip metadata, rename columns
+    # ─────────────────────────────────────────────
+    # Prepare serving-layer DataFrame
+    # ─────────────────────────────────────────────
     df_pg = drop_all_metadata_for_serving(df.copy())
     df_pg = df_pg.rename(columns=_POSTGRES_COLUMN_MAP)
+
+    # ─────────────────────────────────────────────
+    # Step 1: Trim in memory if >2 unique dates
+    # ─────────────────────────────────────────────
+    unique_dates = sorted(df_pg["date"].unique())
+
+    if len(unique_dates) > 2:
+        latest_2_dates = unique_dates[-2:]
+        df_pg = df_pg[df_pg["date"].isin(latest_2_dates)].copy()
+
+        print(
+            f"  [POSTGRES] Trimmed incoming DF to latest 2 dates: "
+            f"{latest_2_dates}"
+        )
+
+    # Recalculate after trimming
+    unique_dates = sorted(df_pg["date"].unique())
+    unique_date_count = len(unique_dates)
+
+    print(
+        f"  [POSTGRES] Final incoming DF has "
+        f"{unique_date_count} unique date(s)"
+    )
 
     last_error = None
 
     for attempt in range(retries + 1):
+
         try:
             with get_postgre_conn() as pg_conn:
+
                 with pg_conn.cursor() as pg_cur:
 
-                    # ── Step 1: delete stale window (replay / backfill only) ──
-                    if mode in ("replay", "backfill"):
-                        pg_cur.execute(
-                            """
-                            DELETE FROM public.equity_data
-                            WHERE date BETWEEN %s::DATE AND %s::DATE
-                            """,
-                            (start_str, end_str),
-                        )
-                        deleted = pg_cur.rowcount if pg_cur.rowcount is not None else 0
-                        print(
-                            f"  [POSTGRES] Deleted {deleted:,} rows for "
-                            f"window [{start_str}, {end_str}]"
-                        )
-
-                    # ── Step 2: validate schema against live DB ──
+                    # ─────────────────────────────────────────────
+                    # Step 2: Fetch exact PG schema order
+                    # ─────────────────────────────────────────────
                     pg_cur.execute(
                         """
                         SELECT column_name
-                        FROM   information_schema.columns
-                        WHERE  table_schema = 'public'
-                          AND  table_name   = 'equity_data'
-                        ORDER  BY ordinal_position
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'equity_data'
+                        ORDER BY ordinal_position
                         """
                     )
+
                     pg_cols_order = [
-                        row[0] for row in pg_cur.fetchall()
+                        row[0]
+                        for row in pg_cur.fetchall()
                         if row[0].lower() != "id"
                     ]
 
                     if not pg_cols_order:
                         raise RuntimeError(
-                            "Schema query returned 0 columns for public.equity_data"
+                            "Schema query returned 0 columns "
+                            "for public.equity_data"
                         )
 
                     missing = set(pg_cols_order) - set(df_pg.columns)
+
                     if missing:
                         raise ValueError(
-                            f"DataFrame is missing Postgres columns: {missing}"
+                            f"DataFrame missing PG columns: {missing}"
                         )
 
-                    # ── Step 3: cast integer columns ──
+                    # ─────────────────────────────────────────────
+                    # Step 3: Cast integer columns
+                    # ─────────────────────────────────────────────
                     for col in _PG_INTEGER_COLS:
+
                         if col in df_pg.columns:
+
                             df_pg[col] = (
                                 df_pg[col]
                                 .fillna(0)
@@ -1408,21 +1442,70 @@ def write_to_postgres(df, mode, start_date, end_date, retries=3):
                                 .astype(int)
                             )
 
-                    # Enforce exact Postgres column order for COPY
+                    # Exact COPY order
                     df_pg = df_pg[pg_cols_order]
 
-                    # ── Step 4: bulk INSERT via COPY (batched) ──
+                    # ─────────────────────────────────────────────
+                    # Step 4: Write strategy
+                    # ─────────────────────────────────────────────
+
+                    if unique_date_count == 2:
+
+                        # FULL REPLACE
+                        pg_cur.execute(
+                            "DELETE FROM public.equity_data"
+                        )
+
+                        print(
+                            "  [POSTGRES] Deleted all existing rows "
+                            "(2-day refresh)"
+                        )
+
+                    elif unique_date_count == 1:
+
+                        # INCREMENTAL APPEND
+                        print(
+                            "  [POSTGRES] Incremental append mode "
+                            "(1-day load)"
+                        )
+
+                    else:
+                        raise ValueError(
+                            f"Unexpected unique_date_count="
+                            f"{unique_date_count}"
+                        )
+
+                    # ─────────────────────────────────────────────
+                    # Step 5: Bulk INSERT via COPY
+                    # ─────────────────────────────────────────────
                     BATCH_SIZE = 100_000
-                    copy_sql   = (
-                        f"COPY public.equity_data ({', '.join(pg_cols_order)}) "
+
+                    copy_sql = (
+                        f"COPY public.equity_data "
+                        f"({', '.join(pg_cols_order)}) "
                         f"FROM STDIN WITH CSV"
                     )
 
                     total_rows = 0
-                    for start_idx in range(0, len(df_pg), BATCH_SIZE):
-                        chunk = df_pg.iloc[start_idx : start_idx + BATCH_SIZE]
-                        buf   = StringIO()
-                        chunk.to_csv(buf, index=False, header=False)
+
+                    for start_idx in range(
+                        0,
+                        len(df_pg),
+                        BATCH_SIZE
+                    ):
+
+                        chunk = df_pg.iloc[
+                            start_idx:start_idx + BATCH_SIZE
+                        ]
+
+                        buf = StringIO()
+
+                        chunk.to_csv(
+                            buf,
+                            index=False,
+                            header=False
+                        )
+
                         buf.seek(0)
 
                         with pg_cur.copy(copy_sql) as copy:
@@ -1430,47 +1513,88 @@ def write_to_postgres(df, mode, start_date, end_date, retries=3):
 
                         total_rows += len(chunk)
 
-                    # ── Step 5: trim to last 2 calendar days ──
-                    pg_cur.execute(
-                        """
-                        DELETE FROM public.equity_data
-                        WHERE date <= (
-                            SELECT MAX(date) FROM public.equity_data
-                        ) - INTERVAL '2 days'
-                        """
-                    )
-                    trimmed = pg_cur.rowcount if pg_cur.rowcount is not None else 0
+                    # ─────────────────────────────────────────────
+                    # Step 6: Trim ONLY for incremental loads
+                    # ─────────────────────────────────────────────
+                    if unique_date_count == 1:
 
-                # Commit the entire transaction (delete + insert + trim)
+                        pg_cur.execute(
+                            """
+                            DELETE FROM public.equity_data
+                            WHERE date < (
+                                SELECT MAX(date)
+                                FROM public.equity_data
+                            ) - INTERVAL '1 day'
+                            """
+                        )
+
+                        trimmed = (
+                            pg_cur.rowcount
+                            if pg_cur.rowcount is not None
+                            else 0
+                        )
+
+                        print(
+                            f"  [POSTGRES] Trimmed "
+                            f"{trimmed:,} old rows"
+                        )
+
+                    else:
+                        print(
+                            "  [POSTGRES] No trim needed "
+                            "(exactly 2 dates loaded)"
+                        )
+
+                # Commit transaction
                 pg_conn.commit()
 
             print(
-                f"  [POSTGRES] Success — inserted {total_rows:,} rows, "
-                f"trimmed {trimmed:,} rows (keeping last 2 days)"
+                f"  [POSTGRES] Success — inserted "
+                f"{total_rows:,} rows from "
+                f"{unique_date_count} unique date(s)"
             )
-            return  # success — exit the retry loop
+
+            return
 
         except Exception as e:
+
             last_error = e
+
             if attempt < retries:
+
                 wait_time = 2 ** attempt
+
                 print(
-                    f"  [POSTGRES] Retry {attempt + 1}/{retries} "
+                    f"  [POSTGRES] Retry "
+                    f"{attempt + 1}/{retries} "
                     f"after {wait_time}s: {e}"
                 )
+
                 time.sleep(wait_time)
+
             else:
-                print(f"  [POSTGRES] All {retries} retries exhausted: {e}")
 
-    # All retries exhausted -> raise to fail the pipeline
+                print(
+                    f"  [POSTGRES] All "
+                    f"{retries} retries exhausted: {e}"
+                )
+
+    # ─────────────────────────────────────────────
+    # Final failure
+    # ─────────────────────────────────────────────
     send_critical_alert(
-        f"Postgres write failed after {retries} retries",
-        context={"error": str(last_error), "rows": len(df_pg)},
-    )
-    raise RuntimeError(
-        f"Postgres write to public.equity_data failed after {retries} retries: {last_error}"
+        "Postgres write failed after retries",
+        context={
+            "error": str(last_error),
+            "rows": len(df_pg),
+        },
     )
 
+    raise RuntimeError(
+        f"Postgres write to public.equity_data "
+        f"failed after {retries} retries: "
+        f"{last_error}"
+    )
 
 # =========================
 # MAIN PIPELINE ENTRY POINT
@@ -1478,6 +1602,7 @@ def write_to_postgres(df, mode, start_date, end_date, retries=3):
 def run_equity_risk_pipeline(
     start_date_override: str  = None,
     replay:              bool = False,
+    airflow_metadata:    dict = None,
 ):
     """
     Production-grade equity risk pipeline.
@@ -1506,8 +1631,11 @@ def run_equity_risk_pipeline(
                                      MERGE (incremental)
 
     Postgres writes (serving layer):
-    - Replay/backfill:  DELETE window -> INSERT -> trim to last 2 days
-    - Incremental:      INSERT -> trim to last 2 days
+    - Rules:
+        * 1 unique date:  Append + trim to last 2 days
+        * 2 unique dates: Replace entire table (no trim needed)
+        * >2 unique dates: Trim to latest 2 days in memory, then replace
+    - Never writes data just to delete it later
 
     Failure contract:
     - Pipeline fails if EITHER Snowflake write OR Postgres write fails.
@@ -1757,7 +1885,7 @@ def run_equity_risk_pipeline(
         df_merged = df_merged.sort_values(["date", "ticker"])
         df_merged = rename_source_lineage(df_merged)
         df_merged = drop_old_pipeline_metrics(df_merged)
-        df_merged = add_current_pipeline_metadata(df_merged)
+        df_merged = add_current_pipeline_metadata(df_merged, run_id)
 
         if df_merged.empty:
             print("  No valid rows after processing — pipeline complete.")
@@ -1794,19 +1922,14 @@ def run_equity_risk_pipeline(
 
         # ══════════════════════════════════════════════════════════════
         # STEP 11 — Write to Postgres serving layer
-        # replay/backfill -> DELETE window + INSERT + trim
-        # incremental     -> INSERT + trim
+        # Rules based on unique dates in DataFrame:
+        #   - 1 date:  Append + trim to last 2 days
+        #   - 2 dates: Replace entire table (no trim needed)
+        #   - >2 dates: Trim to latest 2 days in memory, then replace
         # Failure here -> pipeline FAILS (consistency-first).
         # ══════════════════════════════════════════════════════════════
-        print(
-            f"\n  Writing to Postgres serving layer (mode='{mode}')..."
-        )
-        write_to_postgres(
-            df_merged,
-            mode=mode,
-            start_date=start_date,
-            end_date=end_date,
-        )
+        print(f"\n  Writing to Postgres serving layer...")
+        write_to_postgres(df_merged)
 
         # ══════════════════════════════════════════════════════════════
         # STEP 12 — Pipeline success
@@ -1825,28 +1948,92 @@ def run_equity_risk_pipeline(
         print(f"  Postgres         : OK")
         print(f"{'=' * 66}\n")
 
+        run_summary = {
+
+            "pipeline_run_id": run_id,
+
+            "pipeline_name":
+                "equity_risk_prediction_pipeline",
+
+            "status": "SUCCESS",
+
+            "mode": mode,
+
+            "start_date": str(start_date),
+
+            "end_date": str(end_date.date()),
+
+            "rows_processed": final_row_count,
+
+            "processing_time_s": processing_time,
+
+            "market_feature_source_run_ids": (
+                df_merged["source_run_id"]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            ),
+
+            "tables_written": [
+                SNOWFLAKE_HISTORY_TABLE,
+                SNOWFLAKE_CLEAN_TABLE,
+                "equity_data",
+            ],
+            "airflow": airflow_metadata,
+        }
+
+        write_run_summary(run_summary)
+
         return f"UPDATED_ROWS_{final_row_count}"
 
     except Exception as exc:
-        processing_time = round(time.time() - pipeline_start, 2)
+
+        processing_time = round(
+            time.time() - pipeline_start,
+            2,
+        )
+
+        run_summary = {
+
+            "pipeline_run_id": run_id,
+
+            "pipeline_name":
+                "equity_risk_prediction_pipeline",
+
+            "status": "FAILED",
+
+            "mode": mode,
+
+            "start_date": str(start_date),
+
+            "end_date": str(end_date.date()),
+
+            "processing_time_s": processing_time,
+
+            "error": str(exc),
+
+            "airflow": airflow_metadata,
+        }
+
+        write_run_summary(run_summary)
 
         send_critical_alert(
-            f"Pipeline failed with unhandled exception",
+            "Equity risk pipeline failed",
             context={
-                "run_id":   run_id,
-                "mode":     mode,
+                "run_id": run_id,
+                "mode": mode,
                 "duration": f"{processing_time}s",
-                "error":    str(exc),
+                "error": str(exc),
             },
         )
 
         print(f"\n{'=' * 66}")
-        print(f"  PIPELINE FAILED")
+        print(f"  EQUITY RISK PIPELINE FAILED")
         print(f"  run_id   : {run_id}")
         print(f"  mode     : {mode}")
         print(f"  error    : {exc}")
         print(f"  duration : {processing_time}s")
         print(f"{'=' * 66}\n")
 
-        # Re-raise so Airflow marks the task as FAILED
         raise

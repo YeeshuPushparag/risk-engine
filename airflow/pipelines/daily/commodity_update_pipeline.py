@@ -30,7 +30,7 @@ data_quality_flag
 Every row in every layer carries this field:
   "REAL"      — row sourced directly from yfinance
   "SYNTHETIC" — row generated from the 3-day mean of recent history
-                when today's market data is unavailable
+                when any date's market data is unavailable
 This ensures full auditability: downstream consumers can always
 distinguish live data from imputed fills.
 
@@ -63,6 +63,7 @@ from datetime import datetime, timedelta, timezone, date as date_type
 from io import BytesIO
 import requests
 import os
+from pendulum import timezone
 
 # =============================================================
 # CONFIG  —  single source of truth.  No magic numbers in code.
@@ -242,6 +243,42 @@ def send_alert(
                 requests.post(webhook, json={"text": text}, timeout=5)
         except Exception as e:
             print(f"[ALERT ERROR] Slack failed: {e}")
+
+
+# =============================================================
+# MARKET DATE HELPERS
+# =============================================================
+
+def get_market_end_date() -> date_type:
+    """
+    Determine the appropriate end date for market data processing.
+    
+    - If before 4:00 PM ET (market close): use yesterday
+    - If after 4:00 PM ET: use today
+    
+    This ensures you don't pull incomplete current-day data before market close.
+    """
+    # Get current time in US Eastern timezone
+    eastern = timezone("America/New_York")
+    
+    now_et = datetime.now(eastern)
+    current_date_et = now_et.date()
+    current_time_et = now_et.time()
+    
+    # Market close is 4:00 PM ET
+    market_close = datetime.strptime("16:00", "%H:%M").time()
+    
+    if current_time_et < market_close:
+        # Before market close -> use yesterday
+        end_date = current_date_et - timedelta(days=1)
+        print(f"  [MARKET] Before 4:00 PM ET — using yesterday as end_date: {end_date}")
+    else:
+        # After market close -> use today
+        end_date = current_date_et
+        print(f"  [MARKET] After 4:00 PM ET — using today as end_date: {end_date}")
+    
+    return end_date
+
 
 # =============================================================
 # TIMEZONE HELPERS
@@ -692,7 +729,7 @@ def build_synthetic_rows(
     old_rolling:  pd.DataFrame | None,
     tickers:      list[str],
     start_date:   date_type,        # <- REQUIRED for full backfill
-    today:        date_type,
+    end_date:     date_type,
     run_id:       str,
     run_ts:       datetime,
 ) -> pd.DataFrame:
@@ -706,7 +743,7 @@ def build_synthetic_rows(
         - Ignored gaps if yfinance missed multiple days
 
     Now:
-        - Fills ALL missing business dates between start_date -> today
+        - Fills ALL missing business dates between start_date -> end_date
         - Uses rolling average of last N available rows
         - Works for 1-day or multi-day gaps (e.g., 10 missing days)
 
@@ -731,7 +768,7 @@ def build_synthetic_rows(
     history_n = CONFIG["synthetic_history_days"]
 
     # Convert date range into UTC timestamps
-    all_dates = pd.date_range(start=start_date, end=today, freq="B", tz='UTC')
+    all_dates = pd.date_range(start=start_date, end=end_date, freq="B", tz='UTC')
 
 
     for tkr in tickers:
@@ -1336,7 +1373,6 @@ def write_rolling_layer(
 
     Uses atomic write to prevent corrupt rolling file on partial failure.
     """
-    cutoff = to_utc_timestamp(today - timedelta(days=CONFIG["window_days"]))
 
     combined = (
         pd.concat([old_rolling_df, new_features], ignore_index=True)
@@ -1344,17 +1380,42 @@ def write_rolling_layer(
         else new_features.copy()
     )
 
-    combined = combined[combined["date"] >= cutoff]
     combined = combined.drop_duplicates(
-        subset=["commodity_symbol", "date"], keep="last"
+        subset=["commodity_symbol", "date"],
+        keep="last"
     )
+
     combined = combined.sort_values(
         ["commodity_symbol", "date"]
     ).reset_index(drop=True)
 
-    atomic_write_parquet_to_s3(combined, bucket, rolling_key)
-    return combined
+    # =========================================================
+    # KEEP LAST N TRADING / BUSINESS DATES
+    # =========================================================
 
+    unique_dates = (
+        combined["date"]
+        .drop_duplicates()
+        .sort_values()
+    )
+
+    last_dates = unique_dates.tail(CONFIG["window_days"])
+
+    combined = combined[
+        combined["date"].isin(last_dates)
+    ]
+
+    combined = combined.sort_values(
+        ["commodity_symbol", "date"]
+    ).reset_index(drop=True)
+
+    atomic_write_parquet_to_s3(
+        combined,
+        bucket,
+        rolling_key
+    )
+
+    return combined
 
 # =============================================================
 # DLQ WRITE HELPER
@@ -1407,7 +1468,7 @@ def write_metadata(
     mode_label:       str,
     force_overwrite:  bool,
     start_date:       date_type,
-    today:            date_type,
+    end_date:         date_type,
     input_source:     str,
     expected_tickers: int,
     actual_tickers:   int,
@@ -1421,6 +1482,7 @@ def write_metadata(
     anomalies:        list,
     raw_partition_log:  dict,
     feat_partition_log: dict,
+    airflow_metadata: dict = None,
     reason:           str = "",
 ) -> None:
     """Write the complete run summary JSON. Called on both success and failure."""
@@ -1431,8 +1493,9 @@ def write_metadata(
         "mode":                mode_label,
         "force_overwrite":     force_overwrite,
         "reason":              reason,
+        "airflow":             airflow_metadata, 
         "start_date":          str(start_date),
-        "end_date":            str(today),
+        "end_date":            str(end_date),
         "input_source":        input_source,
         "feature_version":     CONFIG["feature_version"],
         "transformation":      CONFIG["transformation"],
@@ -1461,6 +1524,7 @@ def write_metadata(
 def update_commodity_pipeline(
     bucket:              str        = "yeeshu-commodity-bucket",
     prefix:              str        = "historical-commodity/",
+    airflow_metadata:    dict       = None,
     tickers:             list[str]  = None,
     start_date_override: str        = None,   # "YYYY-MM-DD" -> backfill mode
     replay_from_raw:     bool       = False,  # True -> skip yfinance, read Layer 1
@@ -1468,6 +1532,12 @@ def update_commodity_pipeline(
 ) -> tuple[pd.DataFrame | None, str]:
     """
     Main pipeline entry point.
+
+
+    Args:
+        ...
+        airflow_metadata: Airflow execution context (dag_id, task_id, etc.)
+        ...
 
     Modes
     -----
@@ -1507,6 +1577,7 @@ def update_commodity_pipeline(
     run_ts  = utc_now()
     run_id  = f"run_{run_ts.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     today   = today_utc()
+    end_date = get_market_end_date()
 
     effective_overwrite = force_overwrite or replay_from_raw
 
@@ -1589,28 +1660,28 @@ def update_commodity_pipeline(
         else:
             start_date = today - timedelta(days=365)
 
-        print(f"  date range: {start_date} -> {today}")
+        print(f"  date range: {start_date} -> {end_date}")
 
         # ── STAGE 3: Fetch raw data (or read from raw layer) ─────────────
         if replay_from_raw:
             print("\n[ STAGE 3 ] Read raw data from Layer 1 (replay mode)")
             raw_df = read_raw_layer(
-                bucket, prefix, start_date, today
+                bucket, prefix, start_date, end_date
             )
 
             if raw_df.empty:
                 msg = "Replay aborted — no raw partitions found for the requested range."
                 send_alert(msg, level="ERROR",
-                           context={"start_date": str(start_date), "end_date": str(today)})
+                           context={"start_date": str(start_date), "end_date": str(end_date)})
                 write_metadata(
                     bucket=bucket, meta_key=meta_key, status="FAILED",
                     run_id=run_id, run_ts=run_ts, mode_label=mode_label,
                     force_overwrite=effective_overwrite, start_date=start_date,
-                    today=today, input_source=input_source,
+                    end_date=end_date, input_source=input_source,
                     expected_tickers=expected_tickers, actual_tickers=0,
                     failed_tickers=[], failure_rate=0.0, input_rows=0, output_rows=0,
                     processing_time_s=0.0, dq_report={}, sla={}, anomalies=[],
-                    raw_partition_log={}, feat_partition_log={}, reason=msg,
+                    raw_partition_log={}, feat_partition_log={}, airflow_metadata=airflow_metadata, reason=msg,
                 )
                 return None, msg
 
@@ -1619,7 +1690,7 @@ def update_commodity_pipeline(
             raw_df, failed_by_date, hard_failed_tickers, missing_dates_by_ticker = fetch_commodity_data(
                 tickers    = active_tickers,
                 start_date = start_date,
-                end_date   = today,
+                end_date   = end_date,
                 run_id     = run_id,
                 run_ts     = run_ts,
             )
@@ -1641,14 +1712,14 @@ def update_commodity_pipeline(
                     }
                 )
 
-            # Build synthetic rows for tickers missing today's data
-            print("  [STAGE 3b] Building synthetic rows for missing today's data...")
+            # Build synthetic rows for tickers missing all date data
+            print("  [STAGE 3b] Building synthetic rows for missing all dates data...")
             synth_df = build_synthetic_rows(
                 fetched_df  = raw_df,
                 old_rolling = old_rolling_df,
                 tickers     = active_tickers,
                 start_date  = start_date,
-                today       = today,
+                end_date       = end_date,
                 run_id      = run_id,
                 run_ts      = run_ts,
             )
@@ -1669,12 +1740,12 @@ def update_commodity_pipeline(
                     bucket=bucket, meta_key=meta_key, status="FAILED",
                     run_id=run_id, run_ts=run_ts, mode_label=mode_label,
                     force_overwrite=effective_overwrite, start_date=start_date,
-                    today=today, input_source=input_source,
+                    end_date=end_date, input_source=input_source,
                     expected_tickers=expected_tickers, actual_tickers=0,
                     failed_tickers=failed_tickers, failure_rate=1.0, input_rows=0,
                     output_rows=0, processing_time_s=0.0, dq_report={}, sla={},
                     anomalies=[], raw_partition_log={}, feat_partition_log={},
-                    reason=msg,
+                    airflow_metadata=airflow_metadata, reason=msg,
                 )
                 return None, "NO_NEW_DATA"
 
@@ -1690,12 +1761,12 @@ def update_commodity_pipeline(
                     bucket=bucket, meta_key=meta_key, status="FAILED",
                     run_id=run_id, run_ts=run_ts, mode_label=mode_label,
                     force_overwrite=effective_overwrite, start_date=start_date,
-                    today=today, input_source=input_source,
+                    end_date=end_date, input_source=input_source,
                     expected_tickers=expected_tickers, actual_tickers=0,
                     failed_tickers=failed_tickers, failure_rate=failure_rate,
                     input_rows=0, output_rows=0, processing_time_s=0.0,
                     dq_report={}, sla={}, anomalies=[],
-                    raw_partition_log={}, feat_partition_log={}, reason=msg,
+                    raw_partition_log={}, feat_partition_log={}, airflow_metadata=airflow_metadata,reason=msg,
                 )
                 raise RuntimeError(msg)
 
@@ -1708,12 +1779,12 @@ def update_commodity_pipeline(
                 bucket=bucket, meta_key=meta_key, status="FAILED",
                 run_id=run_id, run_ts=run_ts, mode_label=mode_label,
                 force_overwrite=effective_overwrite, start_date=start_date,
-                today=today, input_source=input_source,
+                end_date=end_date, input_source=input_source,
                 expected_tickers=expected_tickers, actual_tickers=0,
                 failed_tickers=failed_tickers, failure_rate=failure_rate,
                 input_rows=0, output_rows=0, processing_time_s=0.0,
                 dq_report={}, sla={}, anomalies=[],
-                raw_partition_log={}, feat_partition_log={},
+                raw_partition_log={}, feat_partition_log={}, airflow_metadata=airflow_metadata,
                 reason="Raw schema enforcement failed",
             )
             raise
@@ -1742,14 +1813,14 @@ def update_commodity_pipeline(
                 bucket=bucket, meta_key=meta_key, status="FAILED",
                 run_id=run_id, run_ts=run_ts, mode_label=mode_label,
                 force_overwrite=effective_overwrite, start_date=start_date,
-                today=today, input_source=input_source,
+                end_date=end_date, input_source=input_source,
                 expected_tickers=expected_tickers,
                 actual_tickers=clean_df["commodity_symbol"].nunique(),
                 failed_tickers=failed_tickers, failure_rate=failure_rate,
                 input_rows=len(clean_df), output_rows=0,
                 processing_time_s=0.0, dq_report=dq_report, sla=sla,
                 anomalies=[], raw_partition_log=raw_partition_log,
-                feat_partition_log={}, reason=msg,
+                feat_partition_log={}, airflow_metadata=airflow_metadata, reason=msg,
             )
             raise RuntimeError(msg)
 
@@ -1773,14 +1844,14 @@ def update_commodity_pipeline(
                 bucket=bucket, meta_key=meta_key, status="FAILED",
                 run_id=run_id, run_ts=run_ts, mode_label=mode_label,
                 force_overwrite=effective_overwrite, start_date=start_date,
-                today=today, input_source=input_source,
+                end_date=end_date, input_source=input_source,
                 expected_tickers=expected_tickers,
                 actual_tickers=clean_df["commodity_symbol"].nunique(),
                 failed_tickers=failed_tickers, failure_rate=failure_rate,
                 input_rows=len(clean_df), output_rows=0,
                 processing_time_s=processing_time_s, dq_report=dq_report,
                 sla=sla, anomalies=[], raw_partition_log=raw_partition_log,
-                feat_partition_log={}, reason=msg,
+                feat_partition_log={}, airflow_metadata=airflow_metadata, reason=msg,
             )
             return None, msg
 
@@ -1813,14 +1884,14 @@ def update_commodity_pipeline(
                 bucket=bucket, meta_key=meta_key, status="FAILED",
                 run_id=run_id, run_ts=run_ts, mode_label=mode_label,
                 force_overwrite=effective_overwrite, start_date=start_date,
-                today=today, input_source=input_source,
+                end_date=end_date, input_source=input_source,
                 expected_tickers=expected_tickers,
                 actual_tickers=clean_df["commodity_symbol"].nunique(),
                 failed_tickers=failed_tickers, failure_rate=failure_rate,
                 input_rows=len(clean_df), output_rows=len(new_features),
                 processing_time_s=processing_time_s, dq_report=dq_report,
                 sla=sla, anomalies=anomalies,
-                raw_partition_log=raw_partition_log, feat_partition_log={},
+                raw_partition_log=raw_partition_log, feat_partition_log={},airflow_metadata=airflow_metadata,
                 reason="Feature schema enforcement failed",
             )
             raise
@@ -1849,7 +1920,7 @@ def update_commodity_pipeline(
             bucket=bucket, meta_key=meta_key, status="SUCCESS",
             run_id=run_id, run_ts=run_ts, mode_label=mode_label,
             force_overwrite=effective_overwrite, start_date=start_date,
-            today=today, input_source=input_source,
+            end_date=end_date, input_source=input_source,
             expected_tickers=expected_tickers,
             actual_tickers=clean_df["commodity_symbol"].nunique(),
             failed_tickers=failed_tickers, failure_rate=failure_rate,
@@ -1858,6 +1929,7 @@ def update_commodity_pipeline(
             sla=sla, anomalies=anomalies,
             raw_partition_log=raw_partition_log,
             feat_partition_log=feat_partition_log,
+            airflow_metadata=airflow_metadata,
         )
 
         print(f"\n{'=' * 66}")
@@ -1868,15 +1940,7 @@ def update_commodity_pipeline(
         print(f"  anomalies     : {len(anomalies)}")
         print(f"  synthetic rows: {int((new_features['data_quality_flag'] == 'SYNTHETIC').sum()):,}")
         print(f"{'=' * 66}\n")
-        send_alert(
-            "Commodity pipeline completed successfully",
-            level="INFO",
-            context={
-                "run_id": run_id,
-                "rows": len(new_features),
-                "tickers": new_features["commodity_symbol"].nunique()
-            }
-        )
+
         return rolling_df, f"UPDATED_{len(new_features)}_ROWS"
 
     except Exception as exc:

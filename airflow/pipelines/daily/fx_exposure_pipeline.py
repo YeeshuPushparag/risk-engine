@@ -54,6 +54,7 @@ from fredapi import Fred
 from datetime import datetime, timedelta, timezone, date as date_type
 from io import BytesIO
 import requests
+from pendulum import timezone
 
 # =============================================================
 # CONFIG  —  single source of truth.  No magic numbers in code.
@@ -240,6 +241,34 @@ def send_alert(
                 requests.post(webhook, json={"text": text}, timeout=5)
         except Exception as e:
             print(f"[ALERT ERROR] Slack failed: {e}")
+
+
+# =============================================================
+# MARKET DATE HELPERS
+# =============================================================
+
+def get_market_end_date() -> date_type:
+    """
+    Determine the appropriate end date for market data processing.
+    
+    - If before 4:00 PM ET (market close): use yesterday
+    - If after 4:00 PM ET: use today
+    """
+    eastern = timezone("America/New_York")
+    now_et = datetime.now(eastern)
+    current_date_et = now_et.date()
+    current_time_et = now_et.time()
+    
+    market_close = datetime.strptime("16:00", "%H:%M").time()
+    
+    if current_time_et < market_close:
+        end_date = current_date_et - timedelta(days=1)
+        print(f"  [MARKET] Before 4:00 PM ET — using yesterday as end_date: {end_date}")
+    else:
+        end_date = current_date_et
+        print(f"  [MARKET] After 4:00 PM ET — using today as end_date: {end_date}")
+    
+    return end_date
 
 # =============================================================
 # TIMEZONE HELPERS
@@ -1250,13 +1279,11 @@ def write_rolling_layer(
 
     Merge semantics:
     - New rows win over old rows for the same (ticker, currency_pair, date).
-    - Rows older than window_days are trimmed.
-    - Correct for incremental, backfill, and replay runs — dedup is
-      key-based, not positional.
+    - Keeps ONLY last N trading/business dates.
+    - Correct for incremental, backfill, and replay runs.
 
     Uses atomic write to prevent a corrupt rolling file on partial failure.
     """
-    cutoff = to_utc_timestamp(today - timedelta(days=CONFIG["window_days"]))
 
     combined = (
         pd.concat([old_rolling_df, new_features], ignore_index=True)
@@ -1264,13 +1291,41 @@ def write_rolling_layer(
         else new_features.copy()
     )
 
-    combined = combined[combined["date"] >= cutoff]
     combined = combined.drop_duplicates(
-        subset=["ticker", "currency_pair", "date"], keep="last"
+        subset=["ticker", "currency_pair", "date"],
+        keep="last"
     )
-    combined = combined.sort_values(["ticker", "currency_pair", "date"]).reset_index(drop=True)
 
-    atomic_write_parquet_to_s3(combined, bucket, rolling_key)
+    combined = combined.sort_values(
+        ["ticker", "currency_pair", "date"]
+    ).reset_index(drop=True)
+
+    # =========================================================
+    # KEEP LAST N TRADING / BUSINESS DATES
+    # =========================================================
+
+    unique_dates = (
+        combined["date"]
+        .drop_duplicates()
+        .sort_values()
+    )
+
+    last_dates = unique_dates.tail(CONFIG["window_days"])
+
+    combined = combined[
+        combined["date"].isin(last_dates)
+    ]
+
+    combined = combined.sort_values(
+        ["ticker", "currency_pair", "date"]
+    ).reset_index(drop=True)
+
+    atomic_write_parquet_to_s3(
+        combined,
+        bucket,
+        rolling_key
+    )
+
     return combined
 
 
@@ -1324,7 +1379,7 @@ def write_metadata(
     mode_label:      str,
     force_overwrite: bool,
     start_date:      date_type,
-    today:           date_type,
+    end_date:        date_type,
     input_source:    str,
     expected_pairs:  int,
     actual_pairs:    int,
@@ -1338,6 +1393,7 @@ def write_metadata(
     anomalies:       list,
     raw_partition_log:  dict,
     feat_partition_log: dict,
+    airflow_metadata: dict = None,
     reason:          str = "",
 ) -> None:
     """Write the complete run summary JSON. Called on both success and failure."""
@@ -1348,8 +1404,9 @@ def write_metadata(
         "mode":                mode_label,
         "force_overwrite":     force_overwrite,
         "reason":              reason,
+        "airflow":             airflow_metadata, 
         "start_date":          str(start_date),
-        "end_date":            str(today),
+        "end_date":            str(end_date),
         "input_source":        input_source,
         "feature_version":     CONFIG["feature_version"],
         "transformation":      CONFIG["transformation"],
@@ -1380,12 +1437,18 @@ def update_fx_pipeline(
     prefix:              str       = "historical-fx/",
     input_key:           str       = "historical-fx/final_merged.parquet",
     macro_key:           str       = "historical-fx/macro_data.csv",
+    airflow_metadata:    dict      = None,
     start_date_override: str       = None,   # "YYYY-MM-DD" -> backfill mode
     replay_from_raw:     bool      = False,  # True -> skip yfinance+FRED, read Layer 1
     force_overwrite:     bool      = False,  # True -> overwrite existing partitions
 ) -> tuple[pd.DataFrame | None, str]:
     """
     Main pipeline entry point.
+
+    Args:
+        ...
+        airflow_metadata: Airflow execution context (dag_id, task_id, etc.)
+        ...
 
     Modes
     -----
@@ -1417,7 +1480,7 @@ def update_fx_pipeline(
     # ── 0. INIT ────────────────────────────────────────────────────────
     run_ts  = utc_now()
     run_id  = f"run_{run_ts.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-    today   = today_utc()
+    end_date = get_market_end_date()
 
     effective_overwrite = force_overwrite or replay_from_raw
 
@@ -1500,26 +1563,26 @@ def update_fx_pipeline(
         else:
             start_date = today - timedelta(days=7)
 
-        print(f"  date range: {start_date} -> {today}")
+        print(f"  date range: {start_date} -> {end_date}")
 
         # ── STAGE 3: Fetch raw data ──────────────────────────────────────
         if replay_from_raw:
             print("\n[ STAGE 3 ] Read raw data from Layer 1 (replay mode)")
-            raw_df = read_raw_layer(bucket, prefix, start_date, today)
+            raw_df = read_raw_layer(bucket, prefix, start_date, end_date)
 
             if raw_df.empty:
                 msg = "Replay aborted — no raw partitions found for the requested range."
                 send_alert(msg, level="ERROR",
-                           context={"start_date": str(start_date), "end_date": str(today)})
+                           context={"start_date": str(start_date), "end_date": str(end_date)})
                 write_metadata(
                     bucket=bucket, meta_key=meta_key, status="FAILED",
                     run_id=run_id, run_ts=run_ts, mode_label=mode_label,
                     force_overwrite=effective_overwrite, start_date=start_date,
-                    today=today, input_source=input_source,
+                    end_date=end_date, input_source=input_source,
                     expected_pairs=expected_pairs, actual_pairs=0,
                     failed_pairs=[], failure_rate=0.0, input_rows=0, output_rows=0,
                     processing_time_s=0.0, dq_report={}, sla={}, anomalies=[],
-                    raw_partition_log={}, feat_partition_log={}, reason=msg,
+                    raw_partition_log={}, feat_partition_log={}, airflow_metadata=airflow_metadata, reason=msg,
                 )
                 return None, msg
 
@@ -1530,7 +1593,7 @@ def update_fx_pipeline(
             fx_df, failed_by_date = fetch_fx_data(
                 pairs      = active_pairs,
                 start_date = start_date,
-                end_date   = today,
+                end_date   = end_date,
                 run_id     = run_id,
                 run_ts     = run_ts,
             )
@@ -1562,11 +1625,11 @@ def update_fx_pipeline(
                     bucket=bucket, meta_key=meta_key, status="FAILED",
                     run_id=run_id, run_ts=run_ts, mode_label=mode_label,
                     force_overwrite=effective_overwrite, start_date=start_date,
-                    today=today, input_source=input_source,
+                    end_date=end_date, input_source=input_source,
                     expected_pairs=expected_pairs, actual_pairs=0,
                     failed_pairs=failed_pairs, failure_rate=1.0, input_rows=0,
                     output_rows=0, processing_time_s=0.0, dq_report={}, sla={},
-                    anomalies=[], raw_partition_log={}, feat_partition_log={},
+                    anomalies=[], raw_partition_log={}, feat_partition_log={},airflow_metadata=airflow_metadata,
                     reason=msg,
                 )
                 return None, msg
@@ -1590,17 +1653,17 @@ def update_fx_pipeline(
                     bucket=bucket, meta_key=meta_key, status="FAILED",
                     run_id=run_id, run_ts=run_ts, mode_label=mode_label,
                     force_overwrite=effective_overwrite, start_date=start_date,
-                    today=today, input_source=input_source,
+                    end_date=end_date, input_source=input_source,
                     expected_pairs=expected_pairs, actual_pairs=0,
                     failed_pairs=failed_pairs, failure_rate=failure_rate,
                     input_rows=0, output_rows=0, processing_time_s=0.0,
                     dq_report={}, sla={}, anomalies=[],
-                    raw_partition_log={}, feat_partition_log={}, reason=msg,
+                    raw_partition_log={}, feat_partition_log={}, airflow_metadata=airflow_metadata,reason=msg,
                 )
                 raise RuntimeError(msg)
 
             print("  [STAGE 3b] Fetching interest rates from FRED...")
-            rates_long, failed_currencies = fetch_interest_rates(start_date, today)
+            rates_long, failed_currencies = fetch_interest_rates(start_date, end_date)
 
             # Join fx_rate with interest_diff via merge_asof (original logic)
             fx_df      = fx_df.sort_values("date")
@@ -1626,12 +1689,12 @@ def update_fx_pipeline(
                 bucket=bucket, meta_key=meta_key, status="FAILED",
                 run_id=run_id, run_ts=run_ts, mode_label=mode_label,
                 force_overwrite=effective_overwrite, start_date=start_date,
-                today=today, input_source=input_source,
+                end_date=end_date, input_source=input_source,
                 expected_pairs=expected_pairs, actual_pairs=0,
                 failed_pairs=failed_pairs, failure_rate=failure_rate,
                 input_rows=0, output_rows=0, processing_time_s=0.0,
                 dq_report={}, sla={}, anomalies=[],
-                raw_partition_log={}, feat_partition_log={},
+                raw_partition_log={}, feat_partition_log={}, airflow_metadata=airflow_metadata,
                 reason="Raw schema enforcement failed",
             )
             raise
@@ -1660,14 +1723,14 @@ def update_fx_pipeline(
                 bucket=bucket, meta_key=meta_key, status="FAILED",
                 run_id=run_id, run_ts=run_ts, mode_label=mode_label,
                 force_overwrite=effective_overwrite, start_date=start_date,
-                today=today, input_source=input_source,
+                end_date=end_date, input_source=input_source,
                 expected_pairs=expected_pairs,
                 actual_pairs=clean_raw_df["currency_pair"].nunique(),
                 failed_pairs=failed_pairs, failure_rate=failure_rate,
                 input_rows=len(clean_raw_df), output_rows=0,
                 processing_time_s=0.0, dq_report=dq_report, sla=sla,
                 anomalies=[], raw_partition_log=raw_partition_log,
-                feat_partition_log={}, reason=msg,
+                feat_partition_log={}, airflow_metadata=airflow_metadata, reason=msg,
             )
             raise RuntimeError(msg)
 
@@ -1715,7 +1778,7 @@ def update_fx_pipeline(
                 bucket=bucket, meta_key=meta_key, status="FAILED",
                 run_id=run_id, run_ts=run_ts, mode_label=mode_label,
                 force_overwrite=effective_overwrite, start_date=start_date,
-                today=today, input_source=input_source,
+                end_date=end_date, input_source=input_source,
                 expected_pairs=expected_pairs,
                 actual_pairs=clean_raw_df["currency_pair"].nunique(),
                 failed_pairs=failed_pairs, failure_rate=failure_rate,
@@ -1723,7 +1786,7 @@ def update_fx_pipeline(
                 processing_time_s=processing_time_s, dq_report=dq_report,
                 sla=sla, anomalies=anomalies,
                 raw_partition_log=raw_partition_log, feat_partition_log={},
-                reason="Feature schema enforcement failed",
+                airflow_metadata=airflow_metadata, reason="Feature schema enforcement failed",
             )
             raise
 
@@ -1751,7 +1814,7 @@ def update_fx_pipeline(
             bucket=bucket, meta_key=meta_key, status="SUCCESS",
             run_id=run_id, run_ts=run_ts, mode_label=mode_label,
             force_overwrite=effective_overwrite, start_date=start_date,
-            today=today, input_source=input_source,
+            end_date=end_date, input_source=input_source,
             expected_pairs=expected_pairs,
             actual_pairs=clean_raw_df["currency_pair"].nunique(),
             failed_pairs=failed_pairs, failure_rate=failure_rate,
@@ -1759,7 +1822,7 @@ def update_fx_pipeline(
             processing_time_s=processing_time_s, dq_report=dq_report,
             sla=sla, anomalies=anomalies,
             raw_partition_log=raw_partition_log,
-            feat_partition_log=feat_partition_log,
+            feat_partition_log=feat_partition_log, airflow_metadata=airflow_metadata,
         )
 
         print(f"\n{'=' * 66}")
@@ -1769,15 +1832,7 @@ def update_fx_pipeline(
         print(f"  feature time : {processing_time_s}s")
         print(f"  anomalies    : {len(anomalies)}")
         print(f"{'=' * 66}\n")
-        send_alert(
-            "FX pipeline completed successfully",
-            level="INFO",
-            context={
-                "run_id": run_id,
-                "output_rows": len(new_features),
-                "pairs": new_features["currency_pair"].nunique()
-            }
-        )
+
         return rolling_df, f"UPDATED_ROWS_{len(new_features)}"
 
     except Exception as exc:

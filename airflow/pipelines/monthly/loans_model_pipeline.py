@@ -8,6 +8,7 @@ import xgboost as xgb
 import joblib
 import boto3
 import requests
+import json
 from snowflake.connector.pandas_tools import write_pandas
 from connections.snowflake_conn import get_snowflake_conn
 from connections.postgre_conn import get_postgre_conn
@@ -97,6 +98,47 @@ def send_success_alert(context: dict = None):
         except Exception as e:
             print(f"[ALERT ERROR] Slack notification failed: {e}")
 
+
+# ============================================================
+# RUN SUMMARY WRITER
+# ============================================================
+def write_run_summary(summary: dict) -> None:
+    """
+    Write pipeline run summary to S3 for observability and audit.
+
+    Args:
+        summary: Dictionary containing run metadata including:
+            - pipeline_run_id
+            - pipeline_name
+            - status (SUCCESS/FAILED)
+            - mode
+            - start_date
+            - rows_processed_clean
+            - rows_processed_history
+            - processing_time_s
+            - tables_written (list)
+            - error (if failed)
+    """
+    key = (
+        f"metadata/loans_model_pipeline/"
+        f"pipeline_run_id={summary['pipeline_run_id']}/"
+        f"run_summary.json"
+    )
+
+    try:
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=key,
+            Body=json.dumps(
+                summary,
+                default=str,
+                indent=2,
+            ),
+        )
+        print(f"  [RUN SUMMARY] Wrote {key}")
+    except Exception as e:
+        # Don't fail the pipeline if summary write fails, but log the error
+        print(f"  [RUN SUMMARY][WARN] Failed to write summary to S3: {e}")
 
 # ============================================================
 # RETRY DECORATOR (PRODUCTION-GRADE)
@@ -320,62 +362,102 @@ def get_processed_months_from_clean_table(table_name, months_to_check, run_id=No
         raise
 
 
+# ============================================================
+# POSTGRES — SERVING LAYER (consistency-first: RAISES on failure)
+# ============================================================
 
-# ============================================================
-# SNOWFLAKE WAREHOUSE HELPERS (DETERMINISTIC + TRANSACTIONAL)
-# ============================================================
-def transactional_delete_insert_postgres(
-    df,
-    table_name,
-    target_months=None,
-    retries=3,
-):
+def write_to_postgres(df, retries=3):
     """
-    Production-grade transactional Postgres serving-layer writer.
+    Write loan rows to the Postgres serving layer.
 
-    Architecture:
-    ------------------------------------------------------------
-    Postgres is NOT the system of record.
-
-    Snowflake CLEAN:
-        - full deterministic warehouse
-        - stores complete historical timeline
-
-    Snowflake HISTORY:
-        - immutable audit log
-        - append-only lineage/history store
-
-    Postgres:
-        - lightweight hot serving cache
-        - keeps ONLY latest 2 months
-        - optimized for dashboards/APIs/UI
-
-    Mode Behavior:
-    ------------------------------------------------------------
-
-    replay/backfill:
-        DELETE affected months
-        INSERT recomputed rows
-        TRIM older months
-
-    incremental:
-        INSERT only new rows
-        TRIM older months
-
-    Transaction Guarantees:
-    ------------------------------------------------------------
-    - BEGIN transaction
-    - optional DELETE for replay/backfill
-    - INSERT new rows
-    - TRIM table to latest 2 months
-    - COMMIT on success
-    - ROLLBACK on failure
+    Rules:
+    - If incoming DF has >2 unique months:
+        -> trim in memory to latest 2 months
+    - If final DF has 2 unique months:
+        -> FULL REPLACE (DELETE + INSERT)
+        -> NO trim needed
+    - If final DF has 1 unique month:
+        -> INCREMENTAL APPEND
+        -> then trim table to latest 2 months
     """
 
     if df.empty:
-        return True, "Empty DataFrame - nothing to write"
+        print("  [POSTGRES] Empty DataFrame — nothing to write.")
+        return
 
-    BATCH_SIZE = 100_000
+    # ─────────────────────────────────────────────
+    # Prepare serving-layer DataFrame
+    # ─────────────────────────────────────────────
+    df_pg = drop_metadata_for_serving(df.copy())
+
+    df_pg["month"] = (
+        pd.to_datetime(df_pg["date"])
+        .dt.to_period("M")
+        .dt.to_timestamp()
+        .dt.date
+    )
+
+    # ─────────────────────────────────────────────
+    # Step 1: Trim in memory if >2 unique months
+    # ─────────────────────────────────────────────
+    unique_months = sorted(df_pg["month"].unique())
+
+    if len(unique_months) > 2:
+
+        latest_2_months = unique_months[-2:]
+
+        df_pg = df_pg[
+            df_pg["month"].isin(latest_2_months)
+        ].copy()
+
+        print(
+            f"  [POSTGRES] Trimmed incoming DF "
+            f"to latest 2 months: {latest_2_months}"
+        )
+
+    # Recalculate after trimming
+    unique_months = sorted(df_pg["month"].unique())
+    unique_month_count = len(unique_months)
+
+    print(
+        f"  [POSTGRES] Final incoming DF has "
+        f"{unique_month_count} unique month(s)"
+    )
+
+    # ─────────────────────────────────────────────
+    # Type fixes for Postgres
+    # ─────────────────────────────────────────────
+    if "stage" in df_pg.columns:
+
+        df_pg["stage"] = (
+            df_pg["stage"]
+            .astype(float)
+            .round()
+            .astype(int)
+        )
+
+    for col in [
+        "loan_age_months",
+        "time_to_maturity_months"
+    ]:
+
+        if col in df_pg.columns:
+
+            df_pg[col] = (
+                df_pg[col]
+                .fillna(0)
+                .astype(float)
+                .round()
+                .astype(int)
+            )
+
+    df_final = df_pg.copy()
+
+    # Drop Snowflake-only column if needed
+    if "date" in df_final.columns:
+        df_final = df_final.drop(columns=["date"])
+
+    last_error = None
 
     for attempt in range(retries + 1):
 
@@ -383,231 +465,153 @@ def transactional_delete_insert_postgres(
 
             with get_postgre_conn() as pg_conn:
 
-                with pg_conn.cursor() as cur:
+                with pg_conn.cursor() as pg_cur:
 
-                    # =================================================
-                    # BEGIN TRANSACTION
-                    # =================================================
+                    # ─────────────────────────────────────────────
+                    # Step 2: Validate live schema
+                    # ─────────────────────────────────────────────
+                    pg_cur.execute("""
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'loan_data'
+                        ORDER BY ordinal_position
+                    """)
 
-                    cur.execute("BEGIN")
+                    pg_cols = [
+                        r[0]
+                        for r in pg_cur.fetchall()
+                        if r[0].lower() != "id"
+                    ]
 
-                    try:
+                    if not pg_cols:
 
-                        # =================================================
-                        # REPLAY/BACKFILL:
-                        # DELETE TARGET MONTHS BEFORE RECOMPUTE
-                        # =================================================
+                        raise RuntimeError(
+                            "Schema query returned 0 columns "
+                            "for public.loan_data"
+                        )
 
-                        if target_months:
+                    missing = (
+                        set(pg_cols)
+                        - set(df_final.columns)
+                    )
 
-                            month_conditions = []
+                    if missing:
 
-                            for period in target_months:
+                        raise ValueError(
+                            f"DataFrame missing Postgres columns: "
+                            f"{missing}"
+                        )
 
-                                start_date = (
-                                    period.start_time
-                                    .strftime("%Y-%m-%d")
-                                )
+                    # Exact column order
+                    df_ordered = df_final[
+                        pg_cols
+                    ].copy()
 
-                                end_date = (
-                                    period.end_time
-                                    .strftime("%Y-%m-%d")
-                                )
+                    # ─────────────────────────────────────────────
+                    # Step 3: Write strategy
+                    # ─────────────────────────────────────────────
+                    if unique_month_count == 2:
 
-                                month_conditions.append(
-                                    f"(month >= '{start_date}' "
-                                    f"AND month <= '{end_date}')"
-                                )
+                        # FULL REPLACE
+                        pg_cur.execute(
+                            "DELETE FROM public.loan_data"
+                        )
 
-                            delete_condition = (
-                                " OR ".join(month_conditions)
-                            )
+                        print(
+                            "  [POSTGRES] Deleted all existing rows "
+                            "(2-month refresh)"
+                        )
 
-                            delete_sql = f"""
-                                DELETE FROM {table_name}
-                                WHERE {delete_condition}
-                            """
+                    elif unique_month_count == 1:
 
-                            cur.execute(delete_sql)
+                        # INCREMENTAL APPEND
+                        print(
+                            "  [POSTGRES] Incremental append mode "
+                            "(1-month load)"
+                        )
 
-                            deleted_rows = cur.rowcount
+                    else:
 
-                            print(
-                                f"    Deleted {deleted_rows} rows "
-                                f"from Postgres {table_name}"
-                            )
+                        raise ValueError(
+                            f"Unexpected unique_month_count="
+                            f"{unique_month_count}"
+                        )
 
-                        # =================================================
-                        # FETCH POSTGRES SCHEMA ORDER
-                        # =================================================
+                    # ─────────────────────────────────────────────
+                    # Step 4: Bulk INSERT via COPY
+                    # ─────────────────────────────────────────────
+                    copy_sql = (
+                        f"COPY public.loan_data "
+                        f"({', '.join(pg_cols)}) "
+                        f"FROM STDIN WITH CSV"
+                    )
 
-                        cur.execute(f"""
-                            SELECT column_name
-                            FROM information_schema.columns
-                            WHERE table_schema='public'
-                            AND table_name='{table_name}'
-                            ORDER BY ordinal_position
+                    buf = StringIO()
+
+                    df_ordered.to_csv(
+                        buf,
+                        index=False,
+                        header=False
+                    )
+
+                    buf.seek(0)
+
+                    with pg_cur.copy(copy_sql) as copy:
+                        copy.write(buf.getvalue())
+
+                    # ─────────────────────────────────────────────
+                    # Step 5: Trim ONLY for incremental loads
+                    # ─────────────────────────────────────────────
+                    if unique_month_count == 1:
+
+                        pg_cur.execute("""
+                            DELETE FROM public.loan_data
+                            WHERE month < (
+                                SELECT MAX(month)
+                                FROM public.loan_data
+                            ) - INTERVAL '1 month'
                         """)
 
-                        cols = [
-                            r[0]
-                            for r in cur.fetchall()
-                            if r[0] != "id"
-                        ]
-
-                        if not cols:
-
-                            raise RuntimeError(
-                                f"No columns found for "
-                                f"{table_name}"
-                            )
-
-                        # =================================================
-                        # VALIDATE SCHEMA CONSISTENCY
-                        # =================================================
-
-                        missing = (
-                            set(cols) - set(df.columns)
+                        trimmed = (
+                            pg_cur.rowcount
+                            if pg_cur.rowcount is not None
+                            else 0
                         )
-
-                        if missing:
-
-                            raise ValueError(
-                                f"Missing columns for "
-                                f"{table_name}: {missing}"
-                            )
-
-                        # =================================================
-                        # ENFORCE DATABASE COLUMN ORDER
-                        # =================================================
-
-                        df_pg = df[cols].copy()
-
-                        quoted_cols = [
-                            f'"{c}"'
-                            for c in cols
-                        ]
-
-                        copy_sql = (
-                            f"COPY public.{table_name} "
-                            f"({','.join(quoted_cols)}) "
-                            f"FROM STDIN WITH CSV"
-                        )
-
-                        # =================================================
-                        # HIGH-PERFORMANCE BATCH COPY
-                        # =================================================
-
-                        for start in range(
-                            0,
-                            len(df_pg),
-                            BATCH_SIZE,
-                        ):
-
-                            chunk = df_pg.iloc[
-                                start:start + BATCH_SIZE
-                            ]
-
-                            buf = StringIO()
-
-                            chunk.to_csv(
-                                buf,
-                                index=False,
-                                header=False,
-                            )
-
-                            buf.seek(0)
-
-                            with cur.copy(copy_sql) as copy:
-
-                                copy.write(buf.getvalue())
 
                         print(
-                            f"    Inserted {len(df_pg)} rows "
-                            f"into Postgres {table_name}"
+                            f"  [POSTGRES] Trimmed "
+                            f"{trimmed:,} old rows"
                         )
 
-                        # =================================================
-                        # TRIM SERVING TABLE TO LATEST 2 MONTHS
-                        #
-                        # Postgres is intentionally maintained as a
-                        # lightweight serving cache rather than a
-                        # full historical warehouse.
-                        # =================================================
-
-                        cur.execute(f"""
-                            SELECT MAX(month)
-                            FROM {table_name}
-                        """)
-
-                        max_month = cur.fetchone()[0]
-
-                        if max_month:
-
-                            max_month = pd.Period(
-                                max_month,
-                                freq="M",
-                            )
-
-                            cutoff = (
-                                max_month - 1
-                            ).start_time.date()
-
-                            trim_sql = f"""
-                                DELETE FROM {table_name}
-                                WHERE month < '{cutoff}'
-                            """
-
-                            cur.execute(trim_sql)
-
-                            trimmed_rows = cur.rowcount
-
-                            print(
-                                f"    Trimmed "
-                                f"{trimmed_rows} old rows "
-                                f"from {table_name}"
-                            )
-
-                        # =================================================
-                        # COMMIT TRANSACTION
-                        # =================================================
-
-                        pg_conn.commit()
+                    else:
 
                         print(
-                            f"  TRANSACTION COMMITTED: "
-                            f"Postgres {table_name} updated "
-                            f"with {len(df)} rows"
+                            "  [POSTGRES] No trim needed "
+                            "(exactly 2 months loaded)"
                         )
 
-                        return True, None
+                # Commit transaction
+                pg_conn.commit()
 
-                    except Exception as e:
+            print(
+                f"  [POSTGRES] Success — inserted "
+                f"{len(df_ordered):,} rows from "
+                f"{unique_month_count} unique month(s)"
+            )
 
-                        # =================================================
-                        # ROLLBACK ON FAILURE
-                        # =================================================
-
-                        cur.execute("ROLLBACK")
-
-                        pg_conn.commit()
-
-                        print(
-                            f"  TRANSACTION ROLLED BACK: "
-                            f"Postgres {table_name} "
-                            f"update failed"
-                        )
-
-                        raise e
+            return
 
         except Exception as e:
+
+            last_error = e
 
             if attempt < retries:
 
                 wait_time = 2 ** attempt
 
                 print(
-                    f"  Postgres retry "
+                    f"  [POSTGRES] Retry "
                     f"{attempt + 1}/{retries} "
                     f"after {wait_time}s: {e}"
                 )
@@ -617,13 +621,25 @@ def transactional_delete_insert_postgres(
             else:
 
                 print(
-                    f"  Postgres {table_name} failed "
-                    f"after {retries} retries: {e}"
+                    f"  [POSTGRES] All "
+                    f"{retries} retries exhausted: {e}"
                 )
 
-                return False, str(e)
+    # ─────────────────────────────────────────────
+    # Final failure
+    # ─────────────────────────────────────────────
+    send_critical_alert(
+        f"Postgres write to loan_data "
+        f"failed after {retries} retries",
+        context={
+            "error": str(last_error)
+        },
+    )
 
-    return False, "Max retries exceeded"
+    raise RuntimeError(
+        f"Postgres write to loan_data failed: "
+        f"{last_error}"
+    )
     
 # ============================================================
 # S3 LOAD WITH RETRY (CRITICAL)
@@ -823,6 +839,7 @@ def get_watermark_from_clean_table(table_name, run_id=None):
 def run_loans_model_pipeline(
     start_date_override=None,
     replay=False,
+    airflow_metadata=None,
 ):
     """
     Complete production-grade loans model pipeline with deterministic replay/backfill.
@@ -853,10 +870,12 @@ def run_loans_model_pipeline(
         - Contains run_mode and full lineage
     
     Postgres Serving Layer:
-        - Deterministic current-state table
-        - NO metadata columns
-        - TRANSACTIONAL delete+insert for replay/backfill
-        - TRANSACTIONAL delete+insert for incremental (idempotent)
+        - Date-aware optimal strategy for MONTHLY data:
+            * 1 month:  Append + trim to last 2 months
+            * 2 months: Replace entire table (exactly 2 months, no trim)
+            * >2 months: Trim to latest 2 months in memory, then replace
+        - NEVER writes data just to delete it later
+        - NO mode-specific logic needed
     """
     pipeline_start = time.time()
     run_id = datetime.utcnow().isoformat()
@@ -1158,47 +1177,34 @@ def run_loans_model_pipeline(
             snowflake_clean_rows = clean_rows
             print(f"  Clean table: {clean_rows} rows written (transactional replace for {len(months_to_process)} months)")
         
-        # ============================================================
-        # STEP 14: Write to Postgres (TRANSACTIONAL, serving layer only)
-        # ============================================================
-        print("[STEP 14] Writing to Postgres (transactional)...")
-        
+        # ══════════════════════════════════════════════════════════════
+        # STEP 14 — Write to Postgres
+        # Rules based on unique months in DataFrame:
+        #   - 1 month:  Append + trim to last 2 months
+        #   - 2 months: Replace entire table (no trim needed)
+        #   - >2 months: Trim to latest 2 months in memory, then replace
+        # Failure here -> pipeline FAILS (consistency-first).
+        # ══════════════════════════════════════════════════════════════
+        print("[STEP 14] Writing to Postgres...")
+
         # Prepare for Postgres (drop ALL metadata columns including run_mode)
         df_pg = drop_metadata_for_serving(loans_with_metadata.copy())
-        df_pg["month"] = pd.to_datetime(df_pg["date"]).dt.to_period("M").dt.to_timestamp().dt.date
-        
-        # Drop Snowflake-only column
-        if "date" in df_pg.columns:
-            df_pg = df_pg.drop(columns=["date"])
-        
+
         # Type fixes for Postgres
         if "stage" in df_pg.columns:
             df_pg["stage"] = df_pg["stage"].astype(float).round().astype(int)
-        
+
         for c in ["loan_age_months", "time_to_maturity_months"]:
             if c in df_pg.columns:
                 df_pg[c] = df_pg[c].fillna(0).astype(float).round().astype(int)
-        
-        # For ALL modes, use transactional delete+insert for Postgres
-        # This ensures Postgres serving layer has no duplicate states
-        postgres_target_months = (
-            months_to_process
-            if mode in ["replay", "backfill"]
-            else None
-        )
 
-        postgres_ok, postgres_error = (
-            transactional_delete_insert_postgres(
-                df_pg,
-                "loan_data",
-                postgres_target_months,
-                retries=3,
-            )
-        )
-        postgres_success = postgres_ok
-        
-        if not postgres_ok:
-            print(f"  WARNING: Postgres loan_data write failed: {postgres_error}")
+        # Drop Snowflake-only column
+        if "date" in df_pg.columns:
+            df_pg = df_pg.drop(columns=["date"])
+
+        # ONE FUNCTION CALL - handles everything (unique months check, trim, delete, insert)
+        write_to_postgres(df_pg)
+        postgres_success = True
         
         # ============================================================
         # STEP 15: Success - Send COMPLETORY Slack Alert
@@ -1226,7 +1232,7 @@ def run_loans_model_pipeline(
                 "mode": mode,
                 "snowflake_rows": snowflake_clean_rows,
                 "history_rows": snowflake_history_rows,
-                "postgres_status": f"FAILED ({postgres_error})",
+                "postgres_status": f"FAILED",
                 "postgres_rows": pg_rows,
                 "macro_loaded": macro_loaded,
                 "duration_seconds": processing_time
@@ -1243,22 +1249,61 @@ def run_loans_model_pipeline(
         print(f"  Duration: {processing_time}s")
         print(f"{'='*66}\n")
         
+        # Write run summary to S3
+        run_summary = {
+            "pipeline_run_id": run_id,
+            "pipeline_name": "loans_model_pipeline",
+            "status": "SUCCESS",
+            "mode": mode,
+            "start_date": str(start_date_override) if start_date_override else None,
+            "rows_processed_clean": snowflake_clean_rows,
+            "rows_processed_history": snowflake_history_rows,
+            "postgres_rows": pg_rows,
+            "processing_time_s": processing_time,
+            "macro_loaded": macro_loaded,
+            "months_processed": [str(m) for m in months_to_process],
+            "tables_written": [
+                OUTPUT_TABLE,
+                HISTORY_TABLE,
+                "loan_data",
+            ],
+            "airflow": airflow_metadata,
+        }
+        write_run_summary(run_summary)
+        
         return f"SUCCESS_{mode}_CLEAN_{snowflake_clean_rows}_HISTORY_{snowflake_history_rows}_PG_{pg_rows}"
     
     except Exception as e:
+        processing_time = round(time.time() - pipeline_start, 2)
+        
         # Send CRITICAL alert for any unhandled exception
         send_critical_alert(
             f"Pipeline failed with unhandled exception",
             context={"run_id": run_id, "mode": mode, "error": str(e)}
         )
         
-        processing_time = round(time.time() - pipeline_start, 2)
         print(f"\n{'='*66}")
         print(f"  LOANS PIPELINE FAILED - run_id={run_id}")
         print(f"  Mode: {mode}")
         print(f"  Error: {str(e)}")
         print(f"  Duration: {processing_time}s")
         print(f"{'='*66}\n")
+        
+        # Write failure summary to S3
+        run_summary = {
+            "pipeline_run_id": run_id,
+            "pipeline_name": "loans_model_pipeline",
+            "status": "FAILED",
+            "mode": mode,
+            "start_date": str(start_date_override) if start_date_override else None,
+            "processing_time_s": processing_time,
+            "error": str(e),
+            "airflow": airflow_metadata,
+        }
+        try:
+            write_run_summary(run_summary)
+        except Exception:
+            pass  # Don't mask the original exception
         
         # Re-raise for Airflow to catch
         raise

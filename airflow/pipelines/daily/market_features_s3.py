@@ -52,6 +52,8 @@ from datetime import datetime, timedelta, timezone, date as date_type
 from io import BytesIO
 import os
 import requests
+from pendulum import timezone
+
 
 # =============================================================
 # CONFIG  —  single source of truth.  No magic numbers in code.
@@ -108,7 +110,7 @@ RAW_SCHEMA: dict[str, str] = {
     "record_id": "object",
 }
 
-# ✅ FIXED FEATURE SCHEMA (includes metadata)
+# FIXED FEATURE SCHEMA (includes metadata)
 FEATURE_SCHEMA: dict[str, str] = {
     # core
     "date":            "datetime64[ns, UTC]",
@@ -217,6 +219,41 @@ def send_alert(
                 requests.post(webhook, json={"text": text}, timeout=5)
         except Exception as e:
             print(f"[ALERT ERROR] Slack failed: {e}")
+
+
+# =============================================================
+# MARKET DATE HELPERS
+# =============================================================
+
+def get_market_end_date() -> date_type:
+    """
+    Determine the appropriate end date for market data processing.
+    
+    - If before 4:00 PM ET (market close): use yesterday
+    - If after 4:00 PM ET: use today
+    
+    This ensures you don't pull incomplete current-day data before market close.
+    """
+    # Get current time in US Eastern timezone
+    eastern = timezone("America/New_York")
+    
+    now_et = datetime.now(eastern)
+    current_date_et = now_et.date()
+    current_time_et = now_et.time()
+    
+    # Market close is 4:00 PM ET
+    market_close = datetime.strptime("16:00", "%H:%M").time()
+    
+    if current_time_et < market_close:
+        # Before market close -> use yesterday
+        end_date = current_date_et - timedelta(days=1)
+        print(f"  [MARKET] Before 4:00 PM ET — using yesterday as end_date: {end_date}")
+    else:
+        # After market close -> use today
+        end_date = current_date_et
+        print(f"  [MARKET] After 4:00 PM ET — using today as end_date: {end_date}")
+    
+    return end_date
 
 # =============================================================
 # TIMEZONE HELPERS
@@ -1264,13 +1301,11 @@ def write_rolling_layer(
 
     Merge semantics:
     - New rows always win over old rows for the same (ticker, date) pair.
-    - Rows older than window_days are trimmed.
-    - Correct for incremental, backfill, and replay runs — because dedup
-      is key-based, not positional.
+    - Keeps ONLY last N trading/business dates.
+    - Correct for incremental, backfill, and replay runs.
 
     Uses atomic write to prevent corrupt rolling file on partial failure.
     """
-    cutoff = to_utc_timestamp(today - timedelta(days=CONFIG["window_days"]))
 
     combined = (
         pd.concat([old_rolling_df, new_features], ignore_index=True)
@@ -1278,11 +1313,41 @@ def write_rolling_layer(
         else new_features.copy()
     )
 
-    combined = combined[combined["date"] >= cutoff]
-    combined = combined.drop_duplicates(["ticker", "date"], keep="last")
-    combined = combined.sort_values(["ticker", "date"]).reset_index(drop=True)
+    combined = combined.drop_duplicates(
+        ["ticker", "date"],
+        keep="last"
+    )
 
-    atomic_write_parquet_to_s3(combined, bucket, rolling_key)
+    combined = combined.sort_values(
+        ["ticker", "date"]
+    ).reset_index(drop=True)
+
+    # =========================================================
+    # KEEP LAST N TRADING / BUSINESS DATES
+    # =========================================================
+
+    unique_dates = (
+        combined["date"]
+        .drop_duplicates()
+        .sort_values()
+    )
+
+    last_dates = unique_dates.tail(CONFIG["window_days"])
+
+    combined = combined[
+        combined["date"].isin(last_dates)
+    ]
+
+    combined = combined.sort_values(
+        ["ticker", "date"]
+    ).reset_index(drop=True)
+
+    atomic_write_parquet_to_s3(
+        combined,
+        bucket,
+        rolling_key
+    )
+
     return combined
 
 # =============================================================
@@ -1298,7 +1363,7 @@ def write_metadata(
     mode_label:      str,
     force_overwrite: bool,
     start_date:      date_type,
-    today:           date_type,
+    end_date:        date_type,
     input_source:    str,
     ticker_universe_size: int,
     tickers_actual:  int,
@@ -1312,6 +1377,7 @@ def write_metadata(
     anomalies:       list,
     raw_partition_log:  dict,
     feat_partition_log: dict,
+    airflow_metadata: dict = None,
     reason:          str = "",
 ) -> None:
     """Write the complete run summary JSON. Called on success AND failure."""
@@ -1326,7 +1392,11 @@ def write_metadata(
 
         # Date range
         "start_date":          str(start_date),
-        "end_date":            str(today),
+        "end_date":            str(end_date),
+        
+        # Airflow metadata 
+        "airflow":             airflow_metadata,  
+
 
         # Lineage
         "input_source":        input_source,
@@ -1410,12 +1480,18 @@ def update_market_features(
     input_filename:      str        = "final_tickers.csv",
     bucket:              str        = "yeeshu-equity-bucket",
     prefix:              str        = "historical-equity/",
+    airflow_metadata:    dict       = None,
     start_date_override: str        = None,   # "YYYY-MM-DD" -> backfill mode
     replay_from_raw:     bool       = False,  # True -> skip yfinance, read Layer 1
     force_overwrite:     bool       = False,  # True -> overwrite existing partitions
 ) -> tuple[pd.DataFrame | None, str]:
     """
     Main pipeline entry point.
+ 
+    Args:
+        ...
+        airflow_metadata: Airflow execution context (dag_id, task_id, etc.)
+        ...
 
     Modes
     -----
@@ -1454,6 +1530,7 @@ def update_market_features(
     run_ts  = utc_now()
     run_id  = f"run_{run_ts.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     today   = today_utc()
+    end_date = get_market_end_date()
 
     effective_overwrite   = force_overwrite or replay_from_raw
 
@@ -1545,26 +1622,26 @@ def update_market_features(
         else:
             start_date = today - timedelta(days=365)
 
-        print(f"  date range: {start_date} -> {today}")
+        print(f"  date range: {start_date} -> {end_date}")
 
         # --------------------------------------------------------------
         # STAGE 3 — Acquire raw data  (fetch or replay)
         # --------------------------------------------------------------
         if replay_from_raw:
             print("\n[ STAGE 3 ] Read raw data from Layer 1 (replay mode)")
-            raw_df = read_raw_layer(bucket, prefix, start_date, today)
+            raw_df = read_raw_layer(bucket, prefix, start_date, end_date)
 
             if raw_df.empty:
                 msg = "Replay aborted — no raw partitions found for the requested range."
-                send_alert(msg, level="ERROR", context={"start_date": str(start_date), "end_date": str(today)})
+                send_alert(msg, level="ERROR", context={"start_date": str(start_date), "end_date": str(end_date)})
                 write_metadata(
                     bucket=bucket, meta_key=meta_key, status="FAILED", run_id=run_id,
                     run_ts=run_ts, mode_label=mode_label, force_overwrite=effective_overwrite,
-                    start_date=start_date, today=today, input_source=input_source,
+                    start_date=start_date, end_date=end_date, input_source=input_source,
                     ticker_universe_size=ticker_universe_size, tickers_actual=0,
                     failed_tickers=[], failure_rate=0.0, input_rows=0, output_rows=0,
                     processing_time_s=0.0, dq_report={}, sla={}, anomalies=[],
-                    raw_partition_log={}, feat_partition_log={}, reason=msg,
+                    raw_partition_log={}, feat_partition_log={}, airflow_metadata=airflow_metadata,reason=msg,
                 )
                 return None, msg
 
@@ -1574,7 +1651,7 @@ def update_market_features(
             raw_df, failed_by_date = fetch_raw_data(
                 tickers    = tickers,
                 start_date = start_date,
-                end_date   = today,
+                end_date   = end_date,
                 run_id     = run_id,
                 run_ts     = run_ts,
             )
@@ -1602,11 +1679,11 @@ def update_market_features(
                 write_metadata(
                     bucket=bucket, meta_key=meta_key, status="FAILED", run_id=run_id,
                     run_ts=run_ts, mode_label=mode_label, force_overwrite=effective_overwrite,
-                    start_date=start_date, today=today, input_source=input_source,
+                    start_date=start_date, end_date=end_date, input_source=input_source,
                     ticker_universe_size=ticker_universe_size, tickers_actual=0,
                     failed_tickers=failed_tickers, failure_rate=1.0, input_rows=0,
                     output_rows=0, processing_time_s=0.0, dq_report={}, sla={},
-                    anomalies=[], raw_partition_log={}, feat_partition_log={}, reason=msg,
+                    anomalies=[], raw_partition_log={}, feat_partition_log={}, airflow_metadata=airflow_metadata, reason=msg,
                 )
                 return None, msg
 
@@ -1617,12 +1694,12 @@ def update_market_features(
                 write_metadata(
                     bucket=bucket, meta_key=meta_key, status="FAILED", run_id=run_id,
                     run_ts=run_ts, mode_label=mode_label, force_overwrite=effective_overwrite,
-                    start_date=start_date, today=today, input_source=input_source,
+                    start_date=start_date, end_date=end_date, input_source=input_source,
                     ticker_universe_size=ticker_universe_size, tickers_actual=0,
                     failed_tickers=failed_tickers, failure_rate=failure_rate,
                     input_rows=0, output_rows=0, processing_time_s=0.0, dq_report={},
                     sla={}, anomalies=[], raw_partition_log={}, feat_partition_log={},
-                    reason=msg,
+                    airflow_metadata=airflow_metadata, reason=msg,
                 )
                 raise RuntimeError(msg)
 
@@ -1636,11 +1713,11 @@ def update_market_features(
             write_metadata(
                 bucket=bucket, meta_key=meta_key, status="FAILED", run_id=run_id,
                 run_ts=run_ts, mode_label=mode_label, force_overwrite=effective_overwrite,
-                start_date=start_date, today=today, input_source=input_source,
+                start_date=start_date, end_date=end_date, input_source=input_source,
                 ticker_universe_size=ticker_universe_size, tickers_actual=0,
                 failed_tickers=failed_tickers, failure_rate=failure_rate,
                 input_rows=0, output_rows=0, processing_time_s=0.0, dq_report={},
-                sla={}, anomalies=[], raw_partition_log={}, feat_partition_log={},
+                sla={}, anomalies=[], raw_partition_log={}, feat_partition_log={},airflow_metadata=airflow_metadata,
                 reason="Schema enforcement failed on raw data",
             )
             raise
@@ -1673,13 +1750,13 @@ def update_market_features(
             write_metadata(
                 bucket=bucket, meta_key=meta_key, status="FAILED", run_id=run_id,
                 run_ts=run_ts, mode_label=mode_label, force_overwrite=effective_overwrite,
-                start_date=start_date, today=today, input_source=input_source,
+                start_date=start_date, end_date=end_date, input_source=input_source,
                 ticker_universe_size=ticker_universe_size,
                 tickers_actual=clean_df["ticker"].nunique(),
                 failed_tickers=failed_tickers, failure_rate=failure_rate,
                 input_rows=len(clean_df), output_rows=0, processing_time_s=0.0,
                 dq_report=dq_report, sla=sla, anomalies=[], raw_partition_log=raw_partition_log,
-                feat_partition_log={}, reason=msg,
+                feat_partition_log={}, airflow_metadata=airflow_metadata, reason=msg,
             )
             raise RuntimeError(msg)
 
@@ -1766,14 +1843,14 @@ def update_market_features(
             write_metadata(
                 bucket=bucket, meta_key=meta_key, status="FAILED", run_id=run_id,
                 run_ts=run_ts, mode_label=mode_label, force_overwrite=effective_overwrite,
-                start_date=start_date, today=today, input_source=input_source,
+                start_date=start_date, end_date=end_date, input_source=input_source,
                 ticker_universe_size=ticker_universe_size,
                 tickers_actual=clean_df["ticker"].nunique(),
                 failed_tickers=failed_tickers, failure_rate=failure_rate,
                 input_rows=len(clean_df), output_rows=len(new_features),
                 processing_time_s=processing_time_s, dq_report=dq_report, sla=sla,
                 anomalies=[], raw_partition_log=raw_partition_log,
-                feat_partition_log={}, reason="Feature schema enforcement failed",
+                feat_partition_log={}, airflow_metadata=airflow_metadata, reason="Feature schema enforcement failed",
             )
             raise
 
@@ -1808,13 +1885,13 @@ def update_market_features(
         write_metadata(
             bucket=bucket, meta_key=meta_key, status="SUCCESS", run_id=run_id,
             run_ts=run_ts, mode_label=mode_label, force_overwrite=effective_overwrite,
-            start_date=start_date, today=today, input_source=input_source,
+            start_date=start_date, end_date=end_date, input_source=input_source,
             ticker_universe_size=ticker_universe_size,
             tickers_actual=clean_df["ticker"].nunique(),
             failed_tickers=failed_tickers, failure_rate=failure_rate,
             input_rows=len(clean_df), output_rows=len(new_features),
             processing_time_s=processing_time_s, dq_report=dq_report, sla=sla,
-            anomalies=anomalies, raw_partition_log=raw_partition_log,
+            anomalies=anomalies, raw_partition_log=raw_partition_log, airflow_metadata=airflow_metadata,
             feat_partition_log=feat_partition_log,
         )
 
@@ -1826,16 +1903,7 @@ def update_market_features(
         print(f"  anomalies    : {len(anomalies)}")
         print(f"{'=' * 66}\n")
         print("PIPELINE SUCCESS")
-        send_alert(
-            "Pipeline completed successfully",
-            level="INFO",
-            context={
-                "run_id": run_id,
-                "rows": len(new_features),
-                "anomalies": len(anomalies),
-                "mode": mode_label
-            }
-        )
+
         return rolling_df, "Success"
 
     except Exception as exc:

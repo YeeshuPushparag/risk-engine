@@ -40,6 +40,39 @@ def get_dag_config(context, replay_key="replay_from_raw"):
     return config
 
 
+def get_airflow_metadata(context):
+    """
+    Standardized Airflow metadata extractor for pipeline observability.
+
+    Returns:
+        dict: Airflow execution context metadata including:
+            - dag_id
+            - task_id
+            - dag_run_id
+            - dag_run_type (scheduled/manual/backfill/dataset_triggered)
+            - try_number
+            - max_tries
+            - logical_date
+            - execution_date
+            - triggered_by (manual/scheduled)
+    """
+    return {
+        "dag_id": context["dag"].dag_id,
+        "task_id": context["task"].task_id,
+        "dag_run_id": context["dag_run"].run_id,
+        "dag_run_type": context["dag_run"].run_type,
+        "try_number": context["ti"].try_number,
+        "max_tries": context["ti"].max_tries,
+        "logical_date": str(context["logical_date"]),
+        "execution_date": str(context["execution_date"]),
+        "triggered_by": (
+            "manual"
+            if context["dag_run"].external_trigger
+            else "scheduled"
+        ),
+    }
+
+
 # ============================================================
 # EQUITY PIPELINES
 # ============================================================
@@ -56,9 +89,12 @@ def run_equity_feature_pipeline(**context):
         replay_key="replay_from_raw",
     )
 
+    airflow_metadata = get_airflow_metadata(context)
+
     return update_market_features(
         start_date_override=config["start_date_override"],
         replay_from_raw=config["replay_from_raw"],
+        airflow_metadata=airflow_metadata,
     ) or "OK"
 
 
@@ -73,9 +109,12 @@ def run_equity_processing_pipeline(**context):
         replay_key="replay",
     )
 
+    airflow_metadata = get_airflow_metadata(context)
+
     return run_equity_risk_pipeline(
         start_date_override=config["start_date_override"],
         replay=config["replay"],
+        airflow_metadata=airflow_metadata,
     ) or "OK"
 
 
@@ -95,9 +134,12 @@ def run_fx_feature_pipeline(**context):
         replay_key="replay_from_raw",
     )
 
+    airflow_metadata = get_airflow_metadata(context)
+
     return update_fx_pipeline(
         start_date_override=config["start_date_override"],
         replay_from_raw=config["replay_from_raw"],
+        airflow_metadata=airflow_metadata,
     ) or "OK"
 
 
@@ -112,9 +154,12 @@ def run_fx_processing_pipeline(**context):
         replay_key="replay",
     )
 
+    airflow_metadata = get_airflow_metadata(context)
+
     return update_fx_snowflake(
         start_date_override=config["start_date_override"],
         replay=config["replay"],
+        airflow_metadata=airflow_metadata,
     ) or "OK"
 
 
@@ -134,9 +179,12 @@ def run_commodity_feature_pipeline(**context):
         replay_key="replay_from_raw",
     )
 
+    airflow_metadata = get_airflow_metadata(context)
+
     return update_commodity_pipeline(
         start_date_override=config["start_date_override"],
         replay_from_raw=config["replay_from_raw"],
+        airflow_metadata=airflow_metadata,
     ) or "OK"
 
 
@@ -151,9 +199,12 @@ def run_commodity_processing_pipeline(**context):
         replay_key="replay",
     )
 
+    airflow_metadata = get_airflow_metadata(context)
+
     return process_commodities(
         start_date_override=config["start_date_override"],
         replay=config["replay"],
+        airflow_metadata=airflow_metadata,
     ) or "OK"
 
 
@@ -173,9 +224,12 @@ def run_bonds_feature_pipeline(**context):
         replay_key="replay_from_raw",
     )
 
+    airflow_metadata = get_airflow_metadata(context)
+
     return update_bonds_pipeline(
         start_date_override=config["start_date_override"],
         replay_from_raw=config["replay_from_raw"],
+        airflow_metadata=airflow_metadata,
     ) or "OK"
 
 
@@ -190,9 +244,12 @@ def run_bonds_processing_pipeline(**context):
         replay_key="replay",
     )
 
+    airflow_metadata = get_airflow_metadata(context)
+
     return process_bonds(
         start_date_override=config["start_date_override"],
         replay=config["replay"],
+        airflow_metadata=airflow_metadata,
     ) or "OK"
 
 
@@ -211,9 +268,12 @@ def run_derivatives_pipeline(**context):
         replay_key="replay",
     )
 
+    airflow_metadata = get_airflow_metadata(context)
+
     return run_derivatives_processing(
         start_date_override=config["start_date_override"],
         replay=config["replay"],
+        airflow_metadata=airflow_metadata,
     ) or "OK"
 
 
@@ -232,9 +292,56 @@ def run_collateral_pipeline(**context):
         replay_key="replay",
     )
 
+    airflow_metadata = get_airflow_metadata(context)
+
     return run_collateral_pipeline(
         start_date_override=config["start_date_override"],
         replay=config["replay"],
+        airflow_metadata=airflow_metadata,
+    ) or "OK"
+
+
+# ============================================================
+# LOANS PIPELINES
+# ============================================================
+
+def run_loans_enrichment_pipeline(**context):
+
+    from pipelines.daily.enrich_loans_pipeline import (
+        run_enrich_loans_pipeline,
+    )
+
+    config = get_dag_config(
+        context,
+        replay_key="replay",
+    )
+
+    airflow_metadata = get_airflow_metadata(context)
+
+    return run_enrich_loans_pipeline(
+        start_date_override=config["start_date_override"],
+        replay=config["replay"],
+        airflow_metadata=airflow_metadata,
+    ) or "OK"
+
+
+def run_loans_model_pipeline(**context):
+
+    from pipelines.daily.loans_model_pipeline import (
+        run_loans_model_pipeline,
+    )
+
+    config = get_dag_config(
+        context,
+        replay_key="replay",
+    )
+
+    airflow_metadata = get_airflow_metadata(context)
+
+    return run_loans_model_pipeline(
+        start_date_override=config["start_date_override"],
+        replay=config["replay"],
+        airflow_metadata=airflow_metadata,
     ) or "OK"
 
 
@@ -342,6 +449,20 @@ with DAG(
     )
 
     # ========================================================
+    # LOANS
+    # ========================================================
+
+    loans_enrichment = PythonOperator(
+        task_id="loans_enrichment_pipeline",
+        python_callable=run_loans_enrichment_pipeline,
+    )
+
+    loans_model = PythonOperator(
+        task_id="loans_model_pipeline",
+        python_callable=run_loans_model_pipeline,
+    )
+
+    # ========================================================
     # PIPELINE FLOW
     # ========================================================
 
@@ -356,4 +477,6 @@ with DAG(
         >> bonds_processing
         >> derivatives_processing
         >> collateral_processing
+        >> loans_enrichment
+        >> loans_model
     )

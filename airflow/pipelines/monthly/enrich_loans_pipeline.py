@@ -7,6 +7,7 @@ import pandas as pd
 from dateutil import parser
 import boto3
 import requests
+import json
 from datetime import datetime, timedelta
 from connections.snowflake_conn import get_snowflake_conn
 from connections.postgre_conn import get_postgre_conn
@@ -61,6 +62,46 @@ def send_critical_alert(message: str, context: dict = None):
         except Exception as e:
             print(f"[ALERT ERROR] Slack notification failed: {e}")
 
+
+# ============================================================
+# RUN SUMMARY WRITER
+# ============================================================
+def write_run_summary(summary: dict) -> None:
+    """
+    Write pipeline run summary to S3 for observability and audit.
+
+    Args:
+        summary: Dictionary containing run metadata including:
+            - pipeline_run_id
+            - pipeline_name
+            - status (SUCCESS/FAILED)
+            - mode
+            - start_date
+            - rows_processed
+            - processing_time_s
+            - tables_loaded (list)
+            - error (if failed)
+    """
+    key = (
+        f"metadata/enrich_loans_pipeline/"
+        f"pipeline_run_id={summary['pipeline_run_id']}/"
+        f"run_summary.json"
+    )
+
+    try:
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=key,
+            Body=json.dumps(
+                summary,
+                default=str,
+                indent=2,
+            ),
+        )
+        print(f"  [RUN SUMMARY] Wrote {key}")
+    except Exception as e:
+        # Don't fail the pipeline if summary write fails, but log the error
+        print(f"  [RUN SUMMARY][WARN] Failed to write summary to S3: {e}")
 
 # ============================================================
 # RETRY DECORATOR (PRODUCTION-GRADE)
@@ -323,6 +364,7 @@ def replace_month_window(prev_df, new_df, recompute_start_period):
 def run_enrich_loans_pipeline(
     start_date_override=None,
     replay=False,
+    airflow_metadata=None,
 ):
     """
     Complete production-grade loan enrichment pipeline with deterministic replay/backfill.
@@ -651,16 +693,32 @@ def run_enrich_loans_pipeline(
         print(f"  Duration: {total_time:.1f}s")
         print(f"{'='*66}\n")
         
+        # Write run summary to S3
+        run_summary = {
+            "pipeline_run_id": run_id,
+            "pipeline_name": "enrich_loans_pipeline",
+            "status": "SUCCESS",
+            "mode": mode,
+            "start_date": str(start_date_override) if start_date_override else None,
+            "rows_processed": len(final_df),
+            "processing_time_s": round(total_time, 2),
+            "tables_loaded": succeeded_tables,
+            "output_key": OUTPUT_KEY,
+            "airflow": airflow_metadata,
+        }
+        write_run_summary(run_summary)
+        
         return "SUCCESS"
     
     except Exception as e:
+        total_time = time.time() - pipeline_start
+        
         # Send CRITICAL alert for any unhandled exception
         send_critical_alert(
             f"Pipeline failed with unhandled exception",
             context={"run_id": run_id, "mode": mode, "error": str(e)}
         )
         
-        total_time = time.time() - pipeline_start
         print(f"\n{'='*66}")
         print(f"  LOAN ENRICHMENT PIPELINE FAILED - run_id={run_id}")
         print(f"  Mode: {mode}")
@@ -668,6 +726,23 @@ def run_enrich_loans_pipeline(
         print(f"  Succeeded tables: {succeeded_tables}")
         print(f"  Duration: {total_time:.1f}s")
         print(f"{'='*66}\n")
+        
+        # Write failure summary to S3
+        run_summary = {
+            "pipeline_run_id": run_id,
+            "pipeline_name": "enrich_loans_pipeline",
+            "status": "FAILED",
+            "mode": mode,
+            "start_date": str(start_date_override) if start_date_override else None,
+            "processing_time_s": round(total_time, 2),
+            "tables_loaded": succeeded_tables,
+            "error": str(e),
+            "airflow": airflow_metadata,
+        }
+        try:
+            write_run_summary(run_summary)
+        except Exception:
+            pass  # Don't mask the original exception
         
         # Re-raise for Airflow to catch
         raise
