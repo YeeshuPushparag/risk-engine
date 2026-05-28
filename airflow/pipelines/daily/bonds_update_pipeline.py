@@ -93,7 +93,7 @@ from botocore.exceptions import ClientError
 from datetime import datetime, timedelta, timezone, date as date_type
 from io import BytesIO
 from fredapi import Fred
-from pendulum import timezone
+import pendulum
 
 # =============================================================
 # CONFIG  —  single source of truth.  No magic numbers in code.
@@ -245,7 +245,7 @@ def get_market_end_date() -> date_type:
     This ensures you don't pull incomplete current-day data before market close.
     """
     # Get current time in US Eastern timezone
-    eastern = timezone("America/New_York")
+    eastern = pendulum.timezone("America/New_York")
     
     now_et = datetime.now(eastern)
     current_date_et = now_et.date()

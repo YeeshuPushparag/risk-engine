@@ -54,7 +54,7 @@ from fredapi import Fred
 from datetime import datetime, timedelta, timezone, date as date_type
 from io import BytesIO
 import requests
-from pendulum import timezone
+import pendulum
 
 # =============================================================
 # CONFIG  —  single source of truth.  No magic numbers in code.
@@ -254,7 +254,7 @@ def get_market_end_date() -> date_type:
     - If before 4:00 PM ET (market close): use yesterday
     - If after 4:00 PM ET: use today
     """
-    eastern = timezone("America/New_York")
+    eastern = pendulum.timezone("America/New_York")
     now_et = datetime.now(eastern)
     current_date_et = now_et.date()
     current_time_et = now_et.time()
