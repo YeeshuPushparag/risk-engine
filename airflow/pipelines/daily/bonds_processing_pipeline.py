@@ -83,7 +83,7 @@ from io import BytesIO, StringIO
 from connections.snowflake_conn import get_snowflake_conn
 from connections.postgre_conn import get_postgre_conn
 from snowflake.connector.pandas_tools import write_pandas
-
+import pendulum
 
 # =============================================================
 # CONFIG  —  single source of truth. No magic numbers in code.
@@ -304,6 +304,40 @@ def retry_with_backoff(
 
     raise last_exception
 
+
+# =============================================================
+# MARKET DATE HELPERS
+# =============================================================
+
+def get_market_end_date() -> date_type:
+    """
+    Determine the appropriate end date for market data processing.
+    
+    - If before 4:00 PM ET (market close): use yesterday
+    - If after 4:00 PM ET: use today
+    
+    This ensures you don't pull incomplete current-day data before market close.
+    """
+    # Get current time in US Eastern timezone
+    eastern = pendulum.timezone("America/New_York")
+    
+    now_et = datetime.now(eastern)
+    current_date_et = now_et.date()
+    current_time_et = now_et.time()
+    
+    # Market close is 4:00 PM ET
+    market_close = datetime.strptime("16:00", "%H:%M").time()
+    
+    if current_time_et < market_close:
+        # Before market close -> use yesterday
+        end_date = current_date_et - timedelta(days=1)
+        print(f"  [MARKET] Before 4:00 PM ET — using yesterday as end_date: {end_date}")
+    else:
+        # After market close -> use today
+        end_date = current_date_et
+        print(f"  [MARKET] After 4:00 PM ET — using today as end_date: {end_date}")
+    
+    return end_date
 
 # =============================================================
 # TIMEZONE HELPERS
@@ -1720,8 +1754,8 @@ def process_bonds(
         # ══════════════════════════════════════════════════════════════
         # STEP 6 — Validate output before any DB write
         # ══════════════════════════════════════════════════════════════
-        print("\n  [STEP 6] Validating output...")
-        validate_output(df_to_upload, end_date, run_id=run_id)
+        market_end = get_market_end_date()
+        validate_output(df_to_upload, market_end, run_id=run_id)
 
         # Resolve timestamp objects for Snowflake write calls
         snowflake_start = pd.Timestamp(start_date)
