@@ -704,6 +704,11 @@ def fetch_fx_data(
     df.sort_values(["currency_pair", "date"], inplace=True)
     df["fx_rate"] = df.groupby("currency_pair")["fx_rate"].ffill()
 
+    print(f"  [DEBUG] fetch_fx_data returning: {len(df)} rows for {len(pairs)} pairs")
+    if len(df) > 0:
+        print(f"    Date range: {df['date'].min()} to {df['date'].max()}")
+        print(f"    Pairs: {df['currency_pair'].unique().tolist()}")
+
     return df, failed_by_date
 
 # =============================================================
@@ -1716,19 +1721,32 @@ def update_fx_pipeline(
             rates_long, failed_currencies = fetch_interest_rates(start_date, end_date)
 
             # Join fx_rate with interest_diff via merge_asof (original logic)
-            fx_df      = fx_df.sort_values("date")
+            fx_df = fx_df.sort_values("date")
             rates_long = rates_long.sort_values("date")
-            raw_df     = pd.merge_asof(
+
+            print(f"  [DEBUG] Before merge_asof:")
+            print(f"    fx_df rows: {len(fx_df):,}")
+            print(f"    fx_df date range: {fx_df['date'].min()} to {fx_df['date'].max()}")
+            print(f"    rates_long rows: {len(rates_long):,}")
+            print(f"    rates_long date range: {rates_long['date'].min()} to {rates_long['date'].max()}")
+
+            raw_df = pd.merge_asof(
                 fx_df,
                 rates_long,
-                on        = "date",
-                by        = "currency_pair",
-                direction = "backward",
+                on="date",
+                by="currency_pair",
+                direction="backward",
             )
 
-            # Filter to new dates only (exclude already-stored in rolling)
-            if last_date is not None:
+            print(f"  [DEBUG] After merge_asof: raw_df rows = {len(raw_df):,}")
+
+            # Fix: Only filter for incremental mode, NOT for backfill
+            if not start_date_override and last_date is not None:
+                before_filter = len(raw_df)
                 raw_df = raw_df[raw_df["date"].dt.date > last_date]
+                print(f"  [DEBUG] Incremental mode - filtered rows > {last_date}: {before_filter} -> {len(raw_df)} rows")
+            else:
+                print(f"  [DEBUG] {'Backfill' if start_date_override else 'Replay'} mode - keeping all {len(raw_df)} rows")
 
         # ── STAGE 4: Schema enforcement — raw ───────────────────────────
         print("\n[ STAGE 4 ] Schema enforcement — raw layer")
