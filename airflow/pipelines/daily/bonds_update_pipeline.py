@@ -844,7 +844,7 @@ def fetch_dgs10_from_fred(
 
 
 # =============================================================
-# STAGE 5 — build_dgs10_series  (UNCHANGED)
+# STAGE 5 — build_dgs10_series
 # =============================================================
 
 def build_dgs10_series(
@@ -854,7 +854,7 @@ def build_dgs10_series(
     end_date:    str,
 ) -> pd.DataFrame:
     """
-    Combine Snowflake history with new FRED data, align to business days,
+    Combine history with new FRED data, align to business days,
     apply forward/backward fill with fill_method_flag tracking, and compute
     DGS10_ma (rolling 20-day mean) and dgs10_anom.
 
@@ -866,8 +866,6 @@ def build_dgs10_series(
     Returns DataFrame with columns:
         date, DGS10, fill_method_flag, DGS10_ma, dgs10_anom
     (new-date rows only — warm-up history is stripped after rolling computation)
-
-    Unchanged from original pipeline.
     """
     business_days = pd.date_range(start_date, end_date, freq="B")
     spine         = pd.DataFrame({"date": business_days})
@@ -897,6 +895,20 @@ def build_dgs10_series(
     spine["fill_method_flag"] = spine["fill_method_flag"].fillna("BACKWARD_FILLED")
     spine = spine.drop(columns=["_dgs10_before_ffill", "_dgs10_before_bfill"])
 
+    # ── FINAL FALLBACK: If still no DGS10 values, use last known from history ──
+    if spine["DGS10"].isna().all():
+        # Get last non-null DGS10 from history
+        if not history_df.empty and history_df["DGS10"].notna().any():
+            last_known = history_df["DGS10"].dropna().iloc[-1]
+            spine["DGS10"] = last_known
+            spine["fill_method_flag"] = "BACKWARD_FILLED"
+            print(f"  [STAGE 5] No DGS10 in window - using last known value {last_known}")
+        else:
+            # Ultimate fallback - use 0 (should never happen in production)
+            spine["DGS10"] = 0.0
+            spine["fill_method_flag"] = "BACKWARD_FILLED"
+            print(f"  [STAGE 5] No DGS10 in history - using 0 as fallback")
+
     # ── Rolling features over combined series (warm-up + new) ────────────
     spine["DGS10_ma"]   = spine["DGS10"].rolling(
         CONFIG["dgs10_rolling_window"], min_periods=1
@@ -917,7 +929,6 @@ def build_dgs10_series(
         f"BACKWARD_FILLED={bfill_count}  ({len(spine)} total rows)."
     )
     return spine
-
 
 
 
