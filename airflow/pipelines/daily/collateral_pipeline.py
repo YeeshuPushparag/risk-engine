@@ -214,6 +214,7 @@ def write_run_summary(summary: dict) -> None:
         summary: Dictionary containing run metadata including:
             - pipeline_run_id
             - pipeline_name
+            - run_ts
             - status (SUCCESS/FAILED)
             - mode
             - start_date
@@ -1336,7 +1337,8 @@ def run_collateral_pipeline(
         so Airflow marks the task as FAILED.
     """
     pipeline_start = time.time()
-    run_id         = datetime.utcnow().isoformat()
+    run_ts = datetime.utcnow()
+    run_id = run_ts.isoformat() 
 
     # ──────────────────────────────────────────
     # MODE DETECTION — single, explicit decision
@@ -1605,6 +1607,7 @@ def run_collateral_pipeline(
         run_summary = {
             "pipeline_run_id": run_id,
             "pipeline_name": "collateral_pipeline",
+            "run_ts": run_ts.isoformat(),
             "status": "SUCCESS",
             "mode": mode,
             "start_date": start_str,
@@ -1650,6 +1653,7 @@ def run_collateral_pipeline(
         run_summary = {
             "pipeline_run_id": run_id,
             "pipeline_name": "collateral_pipeline",
+            "run_ts": run_ts.isoformat(),
             "status": "FAILED",
             "mode": mode,
             "processing_time_s": processing_time,

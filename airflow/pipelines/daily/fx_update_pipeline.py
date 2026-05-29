@@ -146,6 +146,7 @@ def write_run_summary(summary):
         summary: Dictionary containing run metadata including:
             - pipeline_run_id
             - pipeline_name
+            - run_ts
             - status (SUCCESS/FAILED)
             - mode
             - start_date
@@ -1316,7 +1317,8 @@ def update_fx_snowflake(
         for Airflow to mark the task as FAILED.
     """
     pipeline_start = time.time()
-    run_id         = datetime.utcnow().isoformat()
+    run_ts = datetime.utcnow()
+    run_id = run_ts.isoformat()
 
     # ──────────────────────────────────────────
     # MODE DETECTION — single, explicit decision
@@ -1715,6 +1717,7 @@ def update_fx_snowflake(
         run_summary = {
             "pipeline_run_id": run_id,
             "pipeline_name": "fx_update_pipeline",
+            "run_ts": run_ts.isoformat(),
             "status": "SUCCESS",
             "mode": mode,
             "start_date": str(start_date.date() if hasattr(start_date, 'date') else start_date),
@@ -1764,6 +1767,7 @@ def update_fx_snowflake(
         run_summary = {
             "pipeline_run_id": run_id,
             "pipeline_name": "fx_update_pipeline",
+            "run_ts": run_ts.isoformat(),
             "status": "FAILED",
             "mode": mode,
             "processing_time_s": processing_time,

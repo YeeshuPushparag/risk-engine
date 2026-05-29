@@ -1658,7 +1658,8 @@ def run_equity_risk_pipeline(
         Airflow to catch and mark the task as failed.
     """
     pipeline_start = time.time()
-    run_id         = datetime.utcnow().isoformat()
+    run_ts = datetime.utcnow()
+    run_id = run_ts.isoformat()
 
     # ──────────────────────────────────────────
     # MODE DETECTION — single, explicit decision
@@ -1954,7 +1955,9 @@ def run_equity_risk_pipeline(
 
             "pipeline_name":
                 "equity_risk_prediction_pipeline",
-
+            
+            "run_ts": run_ts.isoformat(),
+            
             "status": "SUCCESS",
 
             "mode": mode,
@@ -2000,6 +2003,8 @@ def run_equity_risk_pipeline(
 
             "pipeline_name":
                 "equity_risk_prediction_pipeline",
+
+            "run_ts": run_ts.isoformat(),
 
             "status": "FAILED",
 

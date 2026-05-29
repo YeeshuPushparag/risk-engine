@@ -110,6 +110,7 @@ def write_run_summary(summary: dict) -> None:
         summary: Dictionary containing run metadata including:
             - pipeline_run_id
             - pipeline_name
+            - run_ts
             - status (SUCCESS/FAILED)
             - mode
             - start_date
@@ -878,7 +879,8 @@ def run_loans_model_pipeline(
         - NO mode-specific logic needed
     """
     pipeline_start = time.time()
-    run_id = datetime.utcnow().isoformat()
+    run_ts = datetime.utcnow()
+    run_id = run_ts.isoformat()
     np.random.seed(42)
     
     # ============================================================
@@ -1253,6 +1255,7 @@ def run_loans_model_pipeline(
         run_summary = {
             "pipeline_run_id": run_id,
             "pipeline_name": "loans_model_pipeline",
+            "run_ts": run_ts.isoformat(),
             "status": "SUCCESS",
             "mode": mode,
             "start_date": str(start_date_override) if start_date_override else None,
@@ -1293,6 +1296,7 @@ def run_loans_model_pipeline(
         run_summary = {
             "pipeline_run_id": run_id,
             "pipeline_name": "loans_model_pipeline",
+            "run_ts": run_ts.isoformat(),
             "status": "FAILED",
             "mode": mode,
             "start_date": str(start_date_override) if start_date_override else None,

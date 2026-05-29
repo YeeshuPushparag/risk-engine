@@ -218,6 +218,7 @@ def write_run_summary(summary: dict) -> None:
         summary: Dictionary containing run metadata including:
             - pipeline_run_id
             - pipeline_name
+            - run_ts
             - status (SUCCESS/FAILED)
             - mode
             - start_date
@@ -1827,6 +1828,7 @@ def process_bonds(
         run_summary = {
             "pipeline_run_id": run_id,
             "pipeline_name": CONFIG["pipeline_name"],
+            "run_ts": run_ts.isoformat(),
             "status": "SUCCESS",
             "mode": mode,
             "start_date": str(start_date),
@@ -1880,6 +1882,7 @@ def process_bonds(
         run_summary = {
             "pipeline_run_id": run_id,
             "pipeline_name": CONFIG["pipeline_name"],
+            "run_ts": run_ts.isoformat(),
             "status": "FAILED",
             "mode": mode,
             "processing_time_s": processing_time,
