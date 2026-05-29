@@ -1372,7 +1372,11 @@ def update_fx_snowflake(
             )
 
             if last_date_sf is not None:
-                last_date_sf = pd.Timestamp(last_date_sf).normalize().tz_localize(None)
+                # Snowflake returns VARCHAR, convert to naive datetime
+                last_date_sf = pd.to_datetime(last_date_sf).normalize()
+                # Ensure no timezone
+                if hasattr(last_date_sf, 'tz') and last_date_sf.tz is not None:
+                    last_date_sf = last_date_sf.tz_localize(None)
             else:
                 last_date_sf = pd.Timestamp("1970-01-01")
 
@@ -1410,9 +1414,11 @@ def update_fx_snowflake(
                 retries=3,
             )
 
-        fx["date"] = pd.to_datetime(
-            fx["date"]
-        ).dt.normalize().dt.tz_localize('UTC')
+        # Keep as naive datetime to match Snowflake VARCHAR comparisons
+        fx["date"] = pd.to_datetime(fx["date"]).dt.normalize()
+        # Remove timezone if present
+        if fx["date"].dt.tz is not None:
+            fx["date"] = fx["date"].dt.tz_localize(None)
 
         print(f"  Loaded FX rows: {len(fx):,}")
 
