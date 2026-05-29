@@ -1332,26 +1332,25 @@ def write_rolling_layer(
     # This excludes holidays automatically
     # =========================================================
     
+    # Ensure date is UTC-aware for consistent comparison
+    if combined["date"].dt.tz is None:
+        combined["date"] = combined["date"].dt.tz_localize('UTC')
+    
     # Get unique dates and filter to valid market days only
     unique_dates = combined["date"].drop_duplicates().sort_values()
     
-    # Convert to date objects for market day check
-    unique_dates_list = unique_dates.dt.date.tolist()
-    
-    # Filter to valid market days using NYSE calendar
+    # Convert to UTC-aware Timestamps for market day check
     market_days = []
-    for d in unique_dates_list:
-        if not is_market_holiday(d):
-            market_days.append(pd.Timestamp(d))
-    
-    # Convert back to Timestamp series
-    market_days_series = pd.Series(market_days)
+    for d in unique_dates:
+        d_as_date = d.date() if hasattr(d, 'date') else d
+        if not is_market_holiday(d_as_date):
+            market_days.append(d)  # Keep original timezone-aware Timestamp
     
     # Take last N market days
-    last_market_dates = market_days_series.tail(CONFIG["window_days"])
-    
-    # Filter combined DataFrame to only market days
-    combined = combined[combined["date"].isin(last_market_dates)]
+    if market_days:
+        last_market_dates = pd.Series(market_days).tail(CONFIG["window_days"])
+        # Filter combined DataFrame to only market days
+        combined = combined[combined["date"].isin(last_market_dates)]
     
     combined = combined.sort_values(
         ["ticker", "date"]
