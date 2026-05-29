@@ -778,7 +778,9 @@ def fetch_dgs10_from_fred(
                 observation_end=end_date,
             )
             if series is None or series.empty:
-                raise ValueError("FRED returned empty series for DGS10.")
+                print(f"  [STAGE 4] FRED returned no data for {start_date} to {end_date}")
+                # Return empty DataFrame - let build_dgs10_series use history only
+                return pd.DataFrame(columns=["date", "DGS10"])
             df = (
                 series.to_frame("DGS10")
                 .reset_index()
