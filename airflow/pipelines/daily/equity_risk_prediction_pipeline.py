@@ -1671,7 +1671,7 @@ def run_equity_risk_pipeline(
     else:
         mode = "incremental"
 
-    today    = pd.Timestamp.today().normalize()
+    today = pd.Timestamp.today(tz='UTC').normalize()
     end_date = today   # processing window always ends at today
 
     print(f"\n{'=' * 66}")
@@ -1693,7 +1693,7 @@ def run_equity_risk_pipeline(
                 raise ValueError(
                     f"mode='{mode}' requires start_date_override to be provided."
                 )
-            start_date = pd.Timestamp(start_date_override).normalize()
+            start_date = pd.Timestamp(start_date_override).tz_localize('UTC').normalize()
             print(
                 f"  [{mode.upper()}] Processing window: "
                 f"{start_date.date()} -> {end_date.date()}"
@@ -1715,7 +1715,7 @@ def run_equity_risk_pipeline(
             )
 
             if last_date is not None:
-                last_date = pd.Timestamp(last_date).normalize()
+                last_date = pd.Timestamp(last_date).tz_localize('UTC').normalize()
             else:
                 last_date = pd.Timestamp("1970-01-01")
 
