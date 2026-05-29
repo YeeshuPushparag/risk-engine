@@ -853,7 +853,7 @@ def write_to_snowflake_clean(df, mode, start_date, end_date, run_id=None, chunk_
     Route to the correct Snowflake CLEAN write strategy based on mode.
 
     - "replay" / "backfill": DELETE window then INSERT (atomic transaction).
-    - "incremental":         INSERT only (watermark ensures no duplicates).
+    - "incremental":         MERGE (upsert on business key).
 
     Wraps the strategy call in retry_with_backoff. Raises on exhaustion.
 
@@ -872,23 +872,19 @@ def write_to_snowflake_clean(df, mode, start_date, end_date, run_id=None, chunk_
             _snowflake_clean_delete_insert(df, start_date, end_date, run_id, chunk_size)
 
     else:  # incremental
-
         strategy_name = "Snowflake CLEAN MERGE (incremental)"
 
         def do_write():
-            _snowflake_clean_merge(
-                df,
-                run_id,
-                chunk_size,
-            )
+            _snowflake_clean_merge(df, run_id, chunk_size)
 
-        retry_with_backoff(
-            do_write,
-            retries=3,
-            critical_name=strategy_name,
-            run_id=run_id,
-        )
-
+    # Execute the write with retry logic for ALL modes
+    # IMPORTANT: This must be outside the if-else block to work for both backfill AND incremental
+    retry_with_backoff(
+        do_write,
+        retries=3,
+        critical_name=strategy_name,
+        run_id=run_id,
+    )
 
 
 # =============================================================
