@@ -952,6 +952,8 @@ def validate_sla(
     df:               pd.DataFrame,
     expected_tickers: int,
     run_date:         date_type,
+    start_date:       date_type,  
+    end_date:         date_type,  
 ) -> dict:
     """
     SLA gate — pipeline raises RuntimeError on FAIL.
@@ -1846,6 +1848,8 @@ def update_market_features(
             clean_df,
             expected_tickers = ticker_universe_size,
             run_date         = end_date,
+            start_date       = start_date,  
+            end_date         = end_date,    
         )
 
         if sla["status"] == "FAIL":
