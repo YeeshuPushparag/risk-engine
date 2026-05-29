@@ -1436,22 +1436,17 @@ def update_fx_snowflake(
         # This is the same pattern as the equity pipeline's tail_df logic.
         # ══════════════════════════════════════════════════════════════
         if mode in ("replay", "backfill"):
-            start_d = start_date.date()
-            end_d   = end_date.date()
-
+            # Convert to pandas Timestamp for comparison
+            start_ts = pd.Timestamp(start_date)
+            end_ts = pd.Timestamp(end_date)
+            
             # Buffer: up to BUFFER_DAYS rows per ticker strictly before window
-            buffer_rows = fx[fx["date"] < start_d]
-            buffer_rows = (
-                buffer_rows
-                .groupby("ticker", group_keys=False)
-                .apply(lambda x: x.sort_values("date").tail(BUFFER_DAYS))
-                .reset_index(drop=True)
-            )
-
+            buffer_rows = fx[fx["date"] < start_ts]
+            
             # Window rows: target dates to process and write
             window_rows = fx[
-                (fx["date"] >= start_d) &
-                (fx["date"] <= end_d)
+                (fx["date"] >= start_ts) &
+                (fx["date"] <= end_ts)
             ].copy()
 
             print(
@@ -1527,8 +1522,8 @@ def update_fx_snowflake(
         # ══════════════════════════════════════════════════════════════
         if mode in ("replay", "backfill"):
             final_rows = df_enriched[
-                (df_enriched["date"] >= start_d) &
-                (df_enriched["date"] <= end_d)
+                (df_enriched["date"] >= start_ts) &
+                (df_enriched["date"] <= end_ts)
             ].copy()
         else:  # incremental
             final_rows = df_enriched[df_enriched["date"] > last_date_sf].copy()
