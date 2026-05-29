@@ -631,9 +631,9 @@ def load_dgs10_history(
         No Snowflake or rolling parquet access — fully deterministic.
 
     Normal / Backfill mode:
-        Extracts the last N rows (with DGS10 not null, date < start_date)
-        from the rolling parquet (already loaded by the caller).
-        Saves a snapshot to S3 so the same history can be loaded in replay.
+        - FIRST: Try to extract from rolling parquet (if available)
+        - SECOND: If rolling parquet has no data (first run), fetch directly from FRED
+        - ALWAYS saves a snapshot to S3 for future replayability
 
     Returns DataFrame with columns [date, DGS10] sorted ascending.
     Empty DataFrame is valid (rolling computation uses min_periods=1).
@@ -648,6 +648,9 @@ def load_dgs10_history(
     n           = CONFIG["dgs10_history_rows"]
     snapshot_key = _raw_dgs10_key(start_date, run_id)
 
+    # =============================================================
+    # REPLAY MODE - Load from existing snapshot only
+    # =============================================================
     if mode == "replay":
         if not s3_key_exists(bucket, snapshot_key):
             raise BondPipelineError(
@@ -664,42 +667,96 @@ def load_dgs10_history(
         )
         return history
 
-    # Normal / Backfill — extract from rolling parquet
-    if old_rolling is None or old_rolling.empty:
-        print(
-            "  [STAGE 3] No rolling parquet available — proceeding without warm-up. "
-            "DGS10_ma will rely on min_periods=1 for the first runs."
-        )
-        return pd.DataFrame(columns=["date", "DGS10"])
-
+    # =============================================================
+    # NORMAL / BACKFILL MODE - Try to get warm-up data
+    # =============================================================
+    hist_rows = pd.DataFrame(columns=["date", "DGS10"])
     start_ts = pd.Timestamp(start_date)
-    hist_rows = (
-        old_rolling[
-            (old_rolling["date"] < start_ts) &
-            (old_rolling["DGS10"].notna())
-        ]
-        [["date", "DGS10"]]
-        .sort_values("date")
-        .tail(n)
-        .reset_index(drop=True)
-    )
+    
+    # Option 1: Extract from existing rolling parquet (incremental mode, or subsequent backfill)
+    if old_rolling is not None and not old_rolling.empty:
+        hist_rows = (
+            old_rolling[
+                (old_rolling["date"] < start_ts) &
+                (old_rolling["DGS10"].notna())
+            ]
+            [["date", "DGS10"]]
+            .sort_values("date")
+            .tail(n)
+            .reset_index(drop=True)
+        )
+        
+        if not hist_rows.empty:
+            print(
+                f"  [STAGE 3] Found {len(hist_rows)} DGS10 history rows in rolling parquet "
+                f"({hist_rows['date'].min().date()} <- {hist_rows['date'].max().date()})."
+            )
+    
+    # Option 2: If no history found (first backfill run), fetch directly from FRED
+    if hist_rows.empty and mode in ("backfill", "incremental"):
+        print(
+            f"  [STAGE 3] No DGS10 history in rolling parquet - "
+            f"fetching last {n} days from FRED for warm-up..."
+        )
+        
+        # Calculate date range for warm-up (need n days before start_date)
+        warmup_end = start_ts - timedelta(days=1)
+        warmup_start = warmup_end - timedelta(days=n * 2)  # Buffer to ensure we get n days
+        
+        fred_api_key = os.getenv("FRED_API_KEY")
+        if not fred_api_key:
+            print(f"  [STAGE 3][WARN] FRED_API_KEY not set - cannot fetch warm-up data")
+        else:
+            try:
+                fred = Fred(api_key=fred_api_key)
+                series = fred.get_series(
+                    "DGS10",
+                    observation_start=warmup_start.strftime("%Y-%m-%d"),
+                    observation_end=warmup_end.strftime("%Y-%m-%d"),
+                )
+                
+                if series is not None and not series.empty:
+                    fred_df = (
+                        series.to_frame("DGS10")
+                        .reset_index()
+                        .rename(columns={"index": "date"})
+                    )
+                    fred_df["date"] = pd.to_datetime(fred_df["date"])
+                    fred_df["DGS10"] = pd.to_numeric(fred_df["DGS10"], errors="coerce")
+                    
+                    # Take only business days and last n rows
+                    # Filter to business days (Monday-Friday)
+                    fred_df = fred_df[fred_df["date"].dt.dayofweek < 5]
+                    hist_rows = fred_df.tail(n).reset_index(drop=True)
+                    
+                    print(
+                        f"  [STAGE 3] Fetched {len(hist_rows)} DGS10 history rows from FRED "
+                        f"({hist_rows['date'].min().date()} <- {hist_rows['date'].max().date()})."
+                    )
+                else:
+                    print(f"  [STAGE 3] FRED returned no data for warm-up period")
+                    
+            except Exception as exc:
+                print(f"  [STAGE 3][WARN] Failed to fetch warm-up from FRED: {exc}")
 
+    # =============================================================
+    # ALWAYS SAVE SNAPSHOT if we have data (for future replayability)
+    # This ensures backfill runs can be replayed deterministically
+    # =============================================================
     if not hist_rows.empty:
-        # Save snapshot so this run is replayable later
         try:
             write_parquet_to_s3(hist_rows, bucket, snapshot_key)
             print(
-                f"  [STAGE 3] Loaded {len(hist_rows)} DGS10 history rows from rolling parquet "
-                f"({hist_rows['date'].min().date()} <- {hist_rows['date'].max().date()}). "
-                f"Snapshot saved."
+                f"  [STAGE 3] DGS10 history snapshot saved: "
+                f"s3://{bucket}/{snapshot_key} ({len(hist_rows)} rows)"
             )
         except Exception as exc:
-            # Non-fatal — snapshot is best-effort
+            # Non-fatal — snapshot is best-effort, but we log it
             print(f"  [STAGE 3][WARN] Could not save DGS10 history snapshot: {exc}")
     else:
         print(
-            "  [STAGE 3] No prior DGS10 history found in rolling parquet — "
-            "proceeding without warm-up."
+            "  [STAGE 3] No prior DGS10 history found — proceeding without warm-up. "
+            "DGS10_ma will rely on min_periods=1 for the first runs."
         )
 
     return hist_rows
