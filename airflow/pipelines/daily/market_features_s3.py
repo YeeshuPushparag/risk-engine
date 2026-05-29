@@ -1294,22 +1294,6 @@ def write_feature_layer(
 # STAGE 9 — write_rolling_layer  (Layer 3, mutable serving file)
 # =============================================================
 
-def read_rolling_layer(
-    bucket:      str,
-    rolling_key: str,
-) -> tuple[pd.DataFrame | None, date_type | None]:
-    """
-    Layer 3 read: returns (df, last_date) or (None, None) if not yet created.
-    Date column is normalized to UTC on read.
-    """
-    if not s3_key_exists(bucket, rolling_key):
-        return None, None
-
-    df         = read_parquet_from_s3(bucket, rolling_key)
-    df["date"] = pd.to_datetime(df["date"], utc=True)
-    return df, df["date"].max().date()
-
-
 def write_rolling_layer(
     new_features:   pd.DataFrame,
     old_rolling_df: pd.DataFrame | None,
@@ -1322,7 +1306,7 @@ def write_rolling_layer(
 
     Merge semantics:
     - New rows always win over old rows for the same (ticker, date) pair.
-    - Keeps ONLY last N trading/business dates.
+    - Keeps ONLY last N MARKET DAYS (NYSE trading days, excludes holidays).
     - Correct for incremental, backfill, and replay runs.
 
     Uses atomic write to prevent corrupt rolling file on partial failure.
@@ -1344,21 +1328,31 @@ def write_rolling_layer(
     ).reset_index(drop=True)
 
     # =========================================================
-    # KEEP LAST N TRADING / BUSINESS DATES
+    # KEEP LAST N MARKET DAYS (NYSE TRADING DAYS ONLY)
+    # This excludes holidays automatically
     # =========================================================
-
-    unique_dates = (
-        combined["date"]
-        .drop_duplicates()
-        .sort_values()
-    )
-
-    last_dates = unique_dates.tail(CONFIG["window_days"])
-
-    combined = combined[
-        combined["date"].isin(last_dates)
-    ]
-
+    
+    # Get unique dates and filter to valid market days only
+    unique_dates = combined["date"].drop_duplicates().sort_values()
+    
+    # Convert to date objects for market day check
+    unique_dates_list = unique_dates.dt.date.tolist()
+    
+    # Filter to valid market days using NYSE calendar
+    market_days = []
+    for d in unique_dates_list:
+        if not is_market_holiday(d):
+            market_days.append(pd.Timestamp(d))
+    
+    # Convert back to Timestamp series
+    market_days_series = pd.Series(market_days)
+    
+    # Take last N market days
+    last_market_dates = market_days_series.tail(CONFIG["window_days"])
+    
+    # Filter combined DataFrame to only market days
+    combined = combined[combined["date"].isin(last_market_dates)]
+    
     combined = combined.sort_values(
         ["ticker", "date"]
     ).reset_index(drop=True)
@@ -1370,6 +1364,24 @@ def write_rolling_layer(
     )
 
     return combined
+
+
+
+def read_rolling_layer(
+    bucket:      str,
+    rolling_key: str,
+) -> tuple[pd.DataFrame | None, date_type | None]:
+    """
+    Layer 3 read: returns (df, last_date) or (None, None) if not yet created.
+    Date column is normalized to UTC on read.
+    """
+    if not s3_key_exists(bucket, rolling_key):
+        return None, None
+
+    df         = read_parquet_from_s3(bucket, rolling_key)
+    df["date"] = pd.to_datetime(df["date"], utc=True)
+    return df, df["date"].max().date()
+
 
 # =============================================================
 # STAGE 10 — write_metadata  (run audit trail)

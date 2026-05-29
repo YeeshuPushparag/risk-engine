@@ -1303,7 +1303,7 @@ def write_rolling_layer(
 
     Merge semantics:
     - New rows win over old rows for the same (ticker, currency_pair, date).
-    - Keeps ONLY last N trading/business dates.
+    - Keeps ONLY last N MARKET DAYS (NYSE trading days, excludes holidays).
     - Correct for incremental, backfill, and replay runs.
 
     Uses atomic write to prevent a corrupt rolling file on partial failure.
@@ -1325,21 +1325,26 @@ def write_rolling_layer(
     ).reset_index(drop=True)
 
     # =========================================================
-    # KEEP LAST N TRADING / BUSINESS DATES
+    # KEEP LAST N MARKET DAYS (NYSE TRADING DAYS ONLY)
+    # This excludes weekends AND holidays automatically
     # =========================================================
 
-    unique_dates = (
-        combined["date"]
-        .drop_duplicates()
-        .sort_values()
-    )
-
-    last_dates = unique_dates.tail(CONFIG["window_days"])
-
-    combined = combined[
-        combined["date"].isin(last_dates)
-    ]
-
+    # Get unique dates from combined data
+    unique_dates = combined["date"].drop_duplicates().sort_values()
+    
+    # Convert to date objects and filter to valid market days
+    market_day_dates = []
+    for d in unique_dates:
+        d_as_date = d.date() if hasattr(d, 'date') else d
+        if not is_market_holiday(d_as_date):
+            market_day_dates.append(d)
+    
+    # Take last N market days
+    last_market_dates = pd.Series(market_day_dates).tail(CONFIG["window_days"])
+    
+    # Filter combined DataFrame to only market days
+    combined = combined[combined["date"].isin(last_market_dates)]
+    
     combined = combined.sort_values(
         ["ticker", "currency_pair", "date"]
     ).reset_index(drop=True)
@@ -1351,7 +1356,6 @@ def write_rolling_layer(
     )
 
     return combined
-
 
 # =============================================================
 # DLQ WRITE HELPER

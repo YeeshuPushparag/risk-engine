@@ -591,25 +591,25 @@ def generate_daily_rows(
     end_date:   str,
 ) -> pd.DataFrame:
     """
-    Expand the base bond universe to one row per bond per business day.
-    Applies volatility mapping. Pure function — no I/O.
-    Unchanged from original pipeline.
+    Expand the base bond universe to one row per bond per MARKET DAY only.
+    Excludes weekends AND NYSE holidays.
     """
-    dates  = pd.date_range(start_date, end_date, freq="B")
+    # Get valid NYSE trading days (excludes weekends AND holidays)
+    valid_days = get_valid_market_days(start_date, end_date)
+    
+    if not valid_days:
+        print(f"  [STAGE 2] No market days in range [{start_date}, {end_date}] - returning empty.")
+        return pd.DataFrame()
+    
+    dates = pd.DatetimeIndex(sorted(valid_days))
     n_days = len(dates)
 
-    if n_days == 0:
-        raise DataValidationError(
-            f"No business days in range [{start_date}, {end_date}]."
-        )
-
-    daily         = base.loc[base.index.repeat(n_days)].copy()
+    daily = base.loc[base.index.repeat(n_days)].copy()
     daily["date"] = np.tile(dates, len(base))
-    daily["vol"]  = daily["credit_rating"].map(VOL_MAP).fillna(10) / 100
+    daily["vol"] = daily["credit_rating"].map(VOL_MAP).fillna(10) / 100
 
-    print(f"  [STAGE 2] Generated {len(daily):,} daily rows across {n_days} business days.")
+    print(f"  [STAGE 2] Generated {len(daily):,} daily rows across {n_days} market days.")
     return daily
-
 
 # =============================================================
 # STAGE 3 — load_dgs10_history  (warm-up rows for rolling window)
@@ -908,21 +908,42 @@ def build_dgs10_series(
     end_date:    str,
 ) -> pd.DataFrame:
     """
-    Combine history with new FRED data, align to business days,
+    Combine history with new FRED data, align to MARKET DAYS (NYSE trading days),
     apply forward/backward fill with fill_method_flag tracking, and compute
     DGS10_ma (rolling 20-day mean) and dgs10_anom.
 
+    This function uses NYSE calendar to exclude market holidays (e.g., Christmas,
+    July 4th) - not just weekends. This ensures alignment with bond rows which
+    are also generated only for market days.
+
     fill_method_flag values:
-      "REAL"             — FRED observed value for that business day
+      "REAL"             — FRED observed value for that market day
       "FORWARD_FILLED"   — no FRED value; filled forward from prior observation
       "BACKWARD_FILLED"  — no FRED value and no prior; filled backward
 
     Returns DataFrame with columns:
         date, DGS10, fill_method_flag, DGS10_ma, dgs10_anom
     (new-date rows only — warm-up history is stripped after rolling computation)
+
+    Args:
+        history_df:  Warm-up DGS10 rows (dates before start_date)
+        new_fred_df: Fresh FRED DGS10 observations for the window
+        start_date:  Start of processing window (YYYY-MM-DD)
+        end_date:    End of processing window (YYYY-MM-DD)
+
+    Returns:
+        DataFrame with DGS10 series aligned to market days only
     """
-    business_days = pd.date_range(start_date, end_date, freq="B")
-    spine         = pd.DataFrame({"date": business_days})
+    # Get valid NYSE trading days (excludes weekends AND holidays)
+    valid_market_days = get_valid_market_days(start_date, end_date)
+    
+    # If no market days in range, return empty DataFrame
+    if not valid_market_days:
+        print(f"  [STAGE 5] No market days in range [{start_date}, {end_date}] - returning empty.")
+        return pd.DataFrame(columns=["date", "DGS10", "fill_method_flag", "DGS10_ma", "dgs10_anom"])
+    
+    # Create spine with market days only (not just business days)
+    spine = pd.DataFrame({"date": pd.DatetimeIndex(sorted(valid_market_days))})
 
     # Combine warm-up history + new FRED rows
     combined_fred = pd.concat(
@@ -930,28 +951,33 @@ def build_dgs10_series(
         ignore_index=True,
     ).drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
 
+    # Merge FRED data onto market day spine
     spine = spine.merge(combined_fred, on="date", how="left")
 
     # ── Fill method tracking ──────────────────────────────────────────────
+    # Track which rows have REAL FRED observations
     real_mask                    = spine["DGS10"].notna()
     spine["fill_method_flag"]    = np.where(real_mask, "REAL", pd.NA)
 
+    # Forward fill missing DGS10 values (e.g., holidays with no FRED data)
     spine["_dgs10_before_ffill"] = spine["DGS10"].copy()
     spine["DGS10"]               = spine["DGS10"].ffill()
     ffill_mask = spine["_dgs10_before_ffill"].isna() & spine["DGS10"].notna()
     spine.loc[ffill_mask, "fill_method_flag"] = "FORWARD_FILLED"
 
+    # Backward fill any remaining missing values (e.g., first day of window)
     spine["_dgs10_before_bfill"] = spine["DGS10"].copy()
     spine["DGS10"]               = spine["DGS10"].bfill()
     bfill_mask = spine["_dgs10_before_bfill"].isna() & spine["DGS10"].notna()
     spine.loc[bfill_mask, "fill_method_flag"] = "BACKWARD_FILLED"
 
+    # Any remaining NULLs get BACKWARD_FILLED as fallback
     spine["fill_method_flag"] = spine["fill_method_flag"].fillna("BACKWARD_FILLED")
     spine = spine.drop(columns=["_dgs10_before_ffill", "_dgs10_before_bfill"])
 
     # ── FINAL FALLBACK: If still no DGS10 values, use last known from history ──
     if spine["DGS10"].isna().all():
-        # Get last non-null DGS10 from history
+        # Get last non-null DGS10 from warm-up history
         if not history_df.empty and history_df["DGS10"].notna().any():
             last_known = history_df["DGS10"].dropna().iloc[-1]
             spine["DGS10"] = last_known
@@ -964,15 +990,18 @@ def build_dgs10_series(
             print(f"  [STAGE 5] No DGS10 in history - using 0 as fallback")
 
     # ── Rolling features over combined series (warm-up + new) ────────────
+    # Calculate 20-day rolling average and anomaly (deviation from average)
     spine["DGS10_ma"]   = spine["DGS10"].rolling(
         CONFIG["dgs10_rolling_window"], min_periods=1
     ).mean()
     spine["dgs10_anom"] = spine["DGS10"] - spine["DGS10_ma"]
 
     # ── Strip warm-up rows — return only new-date rows ───────────────────
+    # Remove warm-up history rows that were only needed for rolling calculation
     start_ts = pd.Timestamp(start_date)
     spine     = spine[spine["date"] >= start_ts].reset_index(drop=True)
 
+    # Log fill method statistics for observability
     real_count  = int((spine["fill_method_flag"] == "REAL").sum())
     ffill_count = int((spine["fill_method_flag"] == "FORWARD_FILLED").sum())
     bfill_count = int((spine["fill_method_flag"] == "BACKWARD_FILLED").sum())
@@ -983,7 +1012,6 @@ def build_dgs10_series(
         f"BACKWARD_FILLED={bfill_count}  ({len(spine)} total rows)."
     )
     return spine
-
 
 
 
@@ -1302,17 +1330,13 @@ def update_rolling_layer(
     same (bond_id, date) pair (keep="last" after sort). This ensures the
     rolling parquet always reflects the latest recomputed state.
 
-    Steps:
-      1. Concatenate old rolling data + new features.
-      2. Deduplicate by (bond_id, date) — keep last (newest run wins).
-      3. Trim rows older than max(date) - window_days.
-      4. Sort by (bond_id, date) and write atomically to S3.
+    Keeps ONLY last N MARKET DAYS (NYSE trading days, excludes holidays).
 
     Args:
         new_features:   Fully featured DataFrame for the processing window.
         old_rolling_df: Existing rolling parquet (None if first run).
         bucket:         S3 bucket name.
-        window_days:    Calendar days to retain (default 30).
+        window_days:    Market days to retain (default 30).
 
     Returns:
         Updated rolling DataFrame after write.
@@ -1333,28 +1357,32 @@ def update_rolling_layer(
     )
 
     # =========================================================
-    # KEEP LAST N BUSINESS/TRADING DATES
+    # KEEP LAST N MARKET DAYS (NYSE TRADING DAYS ONLY)
+    # This excludes weekends AND holidays automatically
     # =========================================================
 
-    unique_dates = (
-        combined["date"]
-        .drop_duplicates()
-        .sort_values()
-    )
-
-    last_dates = unique_dates.tail(window_days)
-
-    rolling = (
-        combined[
-            combined["date"].isin(last_dates)
-        ]
-        .reset_index(drop=True)
-    )
+    # Get unique dates from combined data
+    unique_dates = combined["date"].drop_duplicates().sort_values()
+    
+    # Convert to date objects and filter to valid market days
+    market_day_dates = []
+    for d in unique_dates:
+        d_as_date = d.date() if hasattr(d, 'date') else d
+        if not is_market_holiday(d_as_date):
+            market_day_dates.append(d)
+    
+    # Take last N market days
+    last_market_dates = pd.Series(market_day_dates).tail(window_days)
+    
+    # Filter combined DataFrame to only market days
+    rolling = combined[combined["date"].isin(last_market_dates)]
+    
+    rolling = rolling.sort_values(["bond_id", "date"]).reset_index(drop=True)
 
     write_parquet_to_s3(rolling, bucket, CONFIG["rolling_key"])
     print(
         f"  [ROLLING] Updated rolling layer: {len(rolling):,} rows "
-        f"(business_dates_retained={len(last_dates)})."
+        f"(market_days_retained={len(last_market_dates)})."
     )
     return rolling
 
