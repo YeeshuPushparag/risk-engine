@@ -818,54 +818,33 @@ def fetch_interest_rates(
 # =============================================================
 
 def read_raw_layer(
-    bucket:     str,
-    prefix:     str,
+    bucket: str,
+    prefix: str,
     start_date: date_type,
-    end_date:   date_type,
+    end_date: date_type,
 ) -> pd.DataFrame:
-    """
-    Read raw partitions (Layer 1) for every weekday in [start_date, end_date].
-    Used exclusively when replay_from_raw=True.
-
-    Both fx_rate and interest_diff were stored together at ingestion time,
-    so replay is fully self-contained — no yfinance or FRED calls needed.
-
-    """
-    frames:  list      = []
-    current: date_type = start_date
-
-    valid_days = get_valid_market_days(start_date, end_date)
-
-    while current <= end_date:
-
-        if current in valid_days:
-            y, m, d = current.year, current.month, current.day
-            key     = f"{prefix}raw/year={y}/month={m:02d}/day={d:02d}/data.parquet"
-
-            if s3_key_exists(bucket, key):
-                part = read_parquet_from_s3(bucket, key)
-                frames.append(part)
-            else:
-                print(f"  [RAW READ][WARN] partition missing — skipping: {key}")
-                send_alert(
-                    f"Raw partition missing during replay: {key}",
-                    level="WARNING",
-                    context={"key": key, "date": str(current)},
-                )
-        current += timedelta(days=1)
-
-    if not frames:
+    """Load most recent raw file per date for replay."""
+    latest_keys = get_latest_raw_keys(bucket, prefix, start_date, end_date)
+    
+    if not latest_keys:
+        print(f"  [RAW READ] No raw files found for window [{start_date}, {end_date}]")
         return pd.DataFrame()
-
-    combined         = pd.concat(frames, ignore_index=True)
+    
+    frames = []
+    for current_date, key in sorted(latest_keys.items()):
+        print(f"  [RAW READ] Loading latest for {current_date}: {key}")
+        part = read_parquet_from_s3(bucket, key)
+        frames.append(part)
+    
+    combined = pd.concat(frames, ignore_index=True)
     combined["date"] = pd.to_datetime(combined["date"], utc=True)
-
-
+    
+    # Rebuild record_id if absent
     if "record_id" not in combined.columns:
         combined["record_id"] = (
-            combined["currency_pair"] + "_" + combined["date"].astype(str)
+            combined["currency_pair"].astype(str) + "_" + combined["date"].astype(str)
         )
-
+    
     print(f"  [RAW READ] {len(frames)} partition(s), {len(combined):,} rows loaded.")
     return combined
 
@@ -1200,40 +1179,23 @@ def add_metadata(
 # WRITE HELPERS — Layer 1 (raw)
 # =============================================================
 
-def _raw_partition_key(prefix: str, dt: date_type) -> str:
-    return f"{prefix}raw/year={dt.year}/month={dt.month:02d}/day={dt.day:02d}/data.parquet"
+def _raw_partition_key(prefix: str, dt: date_type, run_id: str) -> str:
+    return f"{prefix}raw/year={dt.year}/month={dt.month:02d}/day={dt.day:02d}/run_id={run_id}/data.parquet"
 
 
 def write_raw_layer(
-    df:              pd.DataFrame,
-    bucket:          str,
-    prefix:          str,
-    force_overwrite: bool,
+    df: pd.DataFrame,
+    bucket: str,
+    prefix: str,
+    run_id: str,
 ) -> dict[str, str]:
-    """
-    Layer 1: write immutable raw partitions (FX rates + interest_diff) by date.
-
-    Normal run  -> skip existing partitions (idempotent, cost-efficient).
-    Backfill    -> overwrite when force_overwrite=True.
-
-    Uses atomic writes to prevent partial/corrupt partitions.
-    Returns {date_str: action} audit log for the run summary.
-    """
+    """Write raw data with run_id folder. Always writes, never skips."""
     partition_log: dict[str, str] = {}
 
     for dt, sub in df.groupby(df["date"].dt.date):
-        key    = _raw_partition_key(prefix, dt)
-        exists = s3_key_exists(bucket, key)
-
-        if exists and not force_overwrite:
-            print(f"  [RAW][SKIP]      partition exists, force_overwrite=False: {key}")
-            partition_log[str(dt)] = "SKIPPED"
-            continue
-
-        action = "OVERWRITE" if exists else "NEW"
-        print(f"  [RAW][{action}]  s3://{bucket}/{key}  rows={len(sub):,}")
+        key = _raw_partition_key(prefix, dt, run_id)
         atomic_write_parquet_to_s3(sub.copy(), bucket, key)
-        partition_log[str(dt)] = action
+        partition_log[str(dt)] = "WRITTEN"
 
     return partition_log
 
@@ -1251,58 +1213,58 @@ def _feature_partition_key(prefix: str, dt: date_type, run_id: str) -> str:
 
 
 def write_feature_layer(
-    df:              pd.DataFrame,
-    bucket:          str,
-    prefix:          str,
-    run_id:          str,
-    force_overwrite: bool,
+    df: pd.DataFrame,
+    bucket: str,
+    prefix: str,
+    run_id: str,
 ) -> dict[str, str]:
-    """
-    Layer 2: write feature partitions versioned by run_id.
-
-    Versioning guarantee:
-    - Each run_id gets its own partition folder — re-runs do NOT silently
-      overwrite history.
-    - force_overwrite=True replaces the same run_id's output (Airflow
-      task retry case).
-
-    Updates features/latest.json pointer after writing all partitions.
-    Uses atomic writes to prevent partial/corrupt partitions.
-    Returns {date_str: action} audit log for the run summary.
-    """
+    """Write features with run_id folder. Always writes, never skips."""
     partition_log: dict[str, str] = {}
 
     for dt, sub in df.groupby(df["date"].dt.date):
-        key    = _feature_partition_key(prefix, dt, run_id)
-        exists = s3_key_exists(bucket, key)
-
-        if exists and not force_overwrite:
-            print(f"  [FEAT][SKIP]     existing versioned partition: {key}")
-            partition_log[str(dt)] = "SKIPPED"
-            continue
-
-        action = "OVERWRITE" if exists else "NEW"
-        print(f"  [FEAT][{action}]  s3://{bucket}/{key}  rows={len(sub):,}")
+        key = _feature_partition_key(prefix, dt, run_id)
         atomic_write_parquet_to_s3(sub.copy(), bucket, key)
-        partition_log[str(dt)] = action
+        partition_log[str(dt)] = "WRITTEN"
 
-    # Update latest.json pointer so downstream consumers know the freshest run
     latest_key = f"{prefix}features/latest.json"
     write_json_to_s3(
         {
-            "run_id":          run_id,
-            "updated_at":      utc_now().isoformat(),
+            "run_id": run_id,
+            "updated_at": utc_now().isoformat(),
             "feature_version": CONFIG["feature_version"],
-            "schema_version":  SCHEMA_VERSION,
-            "schema_hash":     SCHEMA_HASH,
-            "dates_written":   list(partition_log.keys()),
         },
         bucket,
         latest_key,
     )
-
     return partition_log
 
+
+def get_latest_raw_keys(bucket: str, prefix: str, start_date: date_type, end_date: date_type) -> dict:
+    """Find most recent raw file per date by LastModified."""
+    s3_client = get_s3()
+    paginator = s3_client.get_paginator("list_objects_v2")
+    result = {}
+
+    valid_days = get_valid_market_days(start_date, end_date)
+
+    for current_date in valid_days:
+        date_prefix = f"{prefix}raw/year={current_date.year}/month={current_date.month:02d}/day={current_date.day:02d}/"
+        latest_key = None
+        latest_modified = None
+
+        for page in paginator.paginate(Bucket=bucket, Prefix=date_prefix):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                if not key.endswith("data.parquet"):
+                    continue
+                if latest_modified is None or obj["LastModified"] > latest_modified:
+                    latest_key = key
+                    latest_modified = obj["LastModified"]
+
+        if latest_key:
+            result[current_date] = latest_key
+
+    return result
 
 # =============================================================
 # WRITE HELPERS — Layer 3 (rolling serving file)
@@ -1434,7 +1396,6 @@ def write_metadata(
     run_id:          str,
     run_ts:          datetime,
     mode_label:      str,
-    force_overwrite: bool,
     start_date:      date_type,
     end_date:        date_type,
     input_source:    str,
@@ -1459,7 +1420,6 @@ def write_metadata(
         "run_ts":              run_ts.isoformat(),
         "status":              status,
         "mode":                mode_label,
-        "force_overwrite":     force_overwrite,
         "reason":              reason,
         "airflow":             airflow_metadata, 
         "start_date":          str(start_date),
@@ -1497,7 +1457,6 @@ def update_fx_pipeline(
     airflow_metadata:    dict      = None,
     start_date_override: str       = None,   # "YYYY-MM-DD" -> backfill mode
     replay_from_raw:     bool      = False,  # True -> skip yfinance+FRED, read Layer 1
-    force_overwrite:     bool      = False,  # True -> overwrite existing partitions
 ) -> tuple[pd.DataFrame | None, str]:
     """
     Main pipeline entry point.
@@ -1514,7 +1473,6 @@ def update_fx_pipeline(
 
     Backfill  (start_date_override set)
         start_date = override. Fetches from yfinance + FRED.
-        Set force_overwrite=True to replace existing feature partitions.
 
     Replay from raw  (replay_from_raw=True)
         Reads Layer 1 raw partitions — does NOT call yfinance or FRED.
@@ -1578,7 +1536,6 @@ def update_fx_pipeline(
         return None, msg
 
 
-    effective_overwrite = force_overwrite or replay_from_raw
 
     mode_label = (
         "replay_from_raw" if replay_from_raw
@@ -1588,7 +1545,6 @@ def update_fx_pipeline(
 
     print(f"\n{'=' * 66}")
     print(f"  FX PIPELINE START  run_id={run_id}")
-    print(f"  mode={mode_label}   force_overwrite={effective_overwrite}")
     print(f"{'=' * 66}\n")
 
 
@@ -1671,7 +1627,7 @@ def update_fx_pipeline(
                 write_metadata(
                     bucket=bucket, meta_key=meta_key, status="FAILED",
                     run_id=run_id, run_ts=run_ts, mode_label=mode_label,
-                    force_overwrite=effective_overwrite, start_date=start_date,
+                    start_date=start_date,
                     end_date=end_date, input_source=input_source,
                     expected_pairs=expected_pairs, actual_pairs=0,
                     failed_pairs=[], failure_rate=0.0, input_rows=0, output_rows=0,
@@ -1718,7 +1674,7 @@ def update_fx_pipeline(
                 write_metadata(
                     bucket=bucket, meta_key=meta_key, status="FAILED",
                     run_id=run_id, run_ts=run_ts, mode_label=mode_label,
-                    force_overwrite=effective_overwrite, start_date=start_date,
+                    start_date=start_date,
                     end_date=end_date, input_source=input_source,
                     expected_pairs=expected_pairs, actual_pairs=0,
                     failed_pairs=failed_pairs, failure_rate=1.0, input_rows=0,
@@ -1746,7 +1702,7 @@ def update_fx_pipeline(
                 write_metadata(
                     bucket=bucket, meta_key=meta_key, status="FAILED",
                     run_id=run_id, run_ts=run_ts, mode_label=mode_label,
-                    force_overwrite=effective_overwrite, start_date=start_date,
+                    start_date=start_date,
                     end_date=end_date, input_source=input_source,
                     expected_pairs=expected_pairs, actual_pairs=0,
                     failed_pairs=failed_pairs, failure_rate=failure_rate,
@@ -1782,7 +1738,7 @@ def update_fx_pipeline(
             write_metadata(
                 bucket=bucket, meta_key=meta_key, status="FAILED",
                 run_id=run_id, run_ts=run_ts, mode_label=mode_label,
-                force_overwrite=effective_overwrite, start_date=start_date,
+                start_date=start_date,
                 end_date=end_date, input_source=input_source,
                 expected_pairs=expected_pairs, actual_pairs=0,
                 failed_pairs=failed_pairs, failure_rate=failure_rate,
@@ -1796,9 +1752,7 @@ def update_fx_pipeline(
         # ── STAGE 5: Write raw partitions (Layer 1) ─────────────────────
         if not replay_from_raw:
             print("\n[ STAGE 5 ] Write raw partitions (Layer 1)")
-            raw_partition_log = write_raw_layer(
-                raw_df, bucket, prefix, force_overwrite=effective_overwrite
-            )
+            raw_partition_log = write_raw_layer(raw_df, bucket, prefix, run_id)
         else:
             print("\n[ STAGE 5 ] Skipped — Layer 1 is immutable source in replay mode")
 
@@ -1816,7 +1770,7 @@ def update_fx_pipeline(
             write_metadata(
                 bucket=bucket, meta_key=meta_key, status="FAILED",
                 run_id=run_id, run_ts=run_ts, mode_label=mode_label,
-                force_overwrite=effective_overwrite, start_date=start_date,
+                start_date=start_date,
                 end_date=end_date, input_source=input_source,
                 expected_pairs=expected_pairs,
                 actual_pairs=clean_raw_df["currency_pair"].nunique(),
@@ -1871,7 +1825,7 @@ def update_fx_pipeline(
             write_metadata(
                 bucket=bucket, meta_key=meta_key, status="FAILED",
                 run_id=run_id, run_ts=run_ts, mode_label=mode_label,
-                force_overwrite=effective_overwrite, start_date=start_date,
+                start_date=start_date,
                 end_date=end_date, input_source=input_source,
                 expected_pairs=expected_pairs,
                 actual_pairs=clean_raw_df["currency_pair"].nunique(),
@@ -1886,11 +1840,7 @@ def update_fx_pipeline(
 
         # ── STAGE 11: Write feature partitions (Layer 2) ────────────────
         print("\n[ STAGE 11 ] Write feature partitions (Layer 2)")
-        feat_partition_log = write_feature_layer(
-            new_features, bucket, prefix,
-            run_id          = run_id,
-            force_overwrite = effective_overwrite,
-        )
+        feat_partition_log = write_feature_layer(new_features, bucket, prefix, run_id)
 
         # ── STAGE 12: Update rolling serving file (Layer 3) ─────────────
         print("\n[ STAGE 12 ] Update rolling window (Layer 3)")
@@ -1907,7 +1857,7 @@ def update_fx_pipeline(
         write_metadata(
             bucket=bucket, meta_key=meta_key, status="SUCCESS",
             run_id=run_id, run_ts=run_ts, mode_label=mode_label,
-            force_overwrite=effective_overwrite, start_date=start_date,
+            start_date=start_date,
             end_date=end_date, input_source=input_source,
             expected_pairs=expected_pairs,
             actual_pairs=clean_raw_df["currency_pair"].nunique(),
@@ -1967,5 +1917,4 @@ def replay_fx_from_raw(
         prefix               = prefix,
         start_date_override  = start_date,
         replay_from_raw      = True,
-        force_overwrite      = True,
     )

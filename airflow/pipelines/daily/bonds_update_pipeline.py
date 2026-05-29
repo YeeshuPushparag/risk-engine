@@ -525,39 +525,40 @@ def _save_run_metadata(
     except Exception as exc:
         print(f"  [METADATA][WARN] Could not save metadata: {exc}")
 
-def _resolve_run_id_for_replay(bucket: str, start_date: date_type) -> str:
-    """
-    Look up the run_id from a prior normal/backfill run for a given start_date.
-    Used so replay mode can locate the correct FRED and DGS10 history snapshots.
-
-    Raises BondPipelineError if no matching run is found.
-    """
+def _resolve_run_id_for_date(bucket: str, target_date: date_type) -> str:
+    """Find the most recent run_id that wrote this specific date."""
     prefix = CONFIG["run_metadata_prefix"]
+    latest_run = None
+    latest_ts = None
+    
     try:
         paginator = get_s3().get_paginator("list_objects_v2")
-        pages     = paginator.paginate(Bucket=bucket, Prefix=prefix)
+        pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
+        
+        for page in pages:
+            for obj in page.get("Contents", []):
+                try:
+                    raw = get_s3().get_object(Bucket=bucket, Key=obj["Key"])["Body"].read()
+                    data = json.loads(raw)
+                    
+                    start = pd.Timestamp(data["start_date"]).date()
+                    end = pd.Timestamp(data["end_date"]).date()
+                    
+                    if start <= target_date <= end and data["status"] == "SUCCESS":
+                        ts = pd.Timestamp(data["timestamp"])
+                        if latest_ts is None or ts > latest_ts:
+                            latest_ts = ts
+                            latest_run = data["run_id"]
+                except Exception:
+                    continue
+        
+        if not latest_run:
+            raise BondPipelineError(f"No run found for date {target_date}")
+        
+        return latest_run
+        
     except ClientError as exc:
-        raise BondPipelineError(
-            f"Could not list run metadata in s3://{bucket}/{prefix}: {exc}"
-        ) from exc
-
-    for page in pages:
-        for obj in page.get("Contents", []):
-            try:
-                raw  = get_s3().get_object(Bucket=bucket, Key=obj["Key"])["Body"].read()
-                data = json.loads(raw)
-                if str(data.get("start_date")) == str(start_date):
-                    run_id = data["run_id"]
-                    print(f"  [REPLAY] Resolved run_id={run_id} for start_date={start_date}")
-                    return run_id
-            except Exception:
-                continue  # skip corrupt metadata entries
-
-    raise BondPipelineError(
-        f"No run metadata found for start_date={start_date}. "
-        f"A prior normal or backfill run for this date must exist before replaying."
-    )
-
+        raise BondPipelineError(f"Failed to list metadata: {exc}") from exc
 
 # =============================================================
 # STAGE 1 — load_base_bond_data  (UNCHANGED)
@@ -736,27 +737,23 @@ def fetch_dgs10_from_fred(
         current = pd.Timestamp(start_date)
         end = pd.Timestamp(end_date)
         
-        # Get valid market days in the range
-        valid_days = get_valid_market_days(
-            pd.Timestamp(start_date).date(),
-            pd.Timestamp(end_date).date()
-        )
+        valid_days = get_valid_market_days(start_date, end_date)
         
         while current <= end:
             current_date = current.date()
             if current_date in valid_days:
-                key = _raw_fred_key(current_date, run_id)
+                date_run_id = _resolve_run_id_for_date(bucket, current_date)
+                key = _raw_fred_key(current_date, date_run_id)
                 if s3_key_exists(bucket, key):
                     frames.append(read_parquet_from_s3(bucket, key))
             current += timedelta(days=1)
         
         if not frames:
-            raise BondPipelineError(f"No FRED partitions found for {start_date} to {end_date}")
+            raise BondPipelineError(f"No FRED partitions found")
         
         df = pd.concat(frames, ignore_index=True)
         df["date"] = pd.to_datetime(df["date"])
         df["DGS10"] = pd.to_numeric(df["DGS10"], errors="coerce")
-        print(f"  [STAGE 4] Loaded {len(df)} DGS10 observations from {len(frames)} S3 snapshots (replay mode).")
         return df
 
     # Normal / Backfill — call live FRED API
@@ -1166,24 +1163,6 @@ def write_layer2_features(
 ) -> dict:
     """
     Write one Parquet per calendar date to the Layer 2 feature store.
-
-    Partition structure:
-        historical-bonds/features/year=Y/month=MM/day=DD/run_id=<id>/data.parquet
-
-    One file per date means the second pipeline can efficiently resolve
-    the latest partition per date using S3 LastModified — even when
-    multiple run_ids exist for the same date (backfill / replay reruns).
-
-    Args:
-        df:     Fully featured DataFrame with date column.
-        bucket: S3 bucket name.
-        run_id: Current pipeline run identifier.
-
-    Returns:
-        dict: {date_str <- {"key": s3_key, "rows": int}} partition log.
-
-    Raises:
-        BondPipelineError: Propagated from write_parquet_to_s3 on S3 failures.
     """
     df_copy           = df.copy()
     df_copy["_date_"] = pd.to_datetime(df_copy["date"]).dt.date
@@ -1194,6 +1173,29 @@ def write_layer2_features(
         key         = _feature_partition_key(date_val, run_id)
         write_parquet_to_s3(clean_group, bucket, key)
         partition_log[str(date_val)] = {"key": key, "rows": len(clean_group)}
+
+    # =========================================================
+    # ADD THIS: Write latest.json after all partitions
+    # =========================================================
+    latest_key = f"{CONFIG['features_prefix']}latest.json"
+    latest_payload = {
+        "run_id": run_id,
+        "updated_at": utc_now().isoformat(),
+        "feature_version": "v1",
+        "schema_version": "1.0",
+        "dates_written": list(partition_log.keys()),
+    }
+    
+    try:
+        s3 = get_s3()
+        s3.put_object(
+            Bucket=bucket,
+            Key=latest_key,
+            Body=json.dumps(latest_payload, default=str, indent=2),
+        )
+        print(f"  [LAYER 2] Updated latest.json: {latest_key}")
+    except Exception as e:
+        print(f"  [LAYER 2][WARN] Could not write latest.json: {e}")
 
     print(
         f"  [LAYER 2] Written {len(partition_log)} date partitions "
@@ -1461,14 +1463,10 @@ def update_bonds_pipeline(
 
             start_date = last_date  # business days from last_date+1 generated below
 
-        # Resolve run_id — fresh for new runs, looked up for replay
-        if mode == "replay":
-            run_id = _resolve_run_id_for_replay(bucket, start_date)
-        else:
-            run_id = f"run_{run_ts.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
 
-        print(f"  run_id: {run_id}")
-        
+        run_id = f"run_{run_ts.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        print(f"  output_run_id: {run_id}")
+
         # STARTED metadata sentinel for operational observability
         _save_run_metadata(
             bucket=bucket,
