@@ -1315,7 +1315,11 @@ def process_commodities(
             )
 
             if last_date_sf is not None:
-                last_date_sf = pd.Timestamp(last_date_sf).normalize()
+                # Snowflake returns VARCHAR, convert to naive datetime
+                last_date_sf = pd.to_datetime(last_date_sf).normalize()
+                # Ensure no timezone
+                if hasattr(last_date_sf, 'tz') and last_date_sf.tz is not None:
+                    last_date_sf = last_date_sf.tz_localize(None)
             else:
                 last_date_sf = pd.Timestamp("1970-01-01")
 
@@ -1622,6 +1626,8 @@ def process_commodities(
         if final_new.empty:
             print("  No output rows generated — pipeline complete.")
             return "NO_OUTPUT_ROWS"
+        
+        final_new["date"] = pd.to_datetime(final_new["date"]).dt.strftime("%Y-%m-%d")
 
         snowflake_rows = len(final_new)
         print(f"  Final rows prepared: {snowflake_rows:,}")

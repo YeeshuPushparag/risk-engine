@@ -1646,6 +1646,8 @@ def update_fx_snowflake(
         df_to_upload = final_rows[
             [c for c in final_cols if c in final_rows.columns]
         ].copy()
+        # Force to YYYY-MM-DD string
+        df_to_upload["date"] = pd.to_datetime(df_to_upload["date"]).dt.strftime("%Y-%m-%d")
         df_to_upload  = df_to_upload.sort_values(["ticker", "date"])
         snowflake_rows = len(df_to_upload)
         print(f"  Preparing {snowflake_rows:,} rows for Snowflake...")

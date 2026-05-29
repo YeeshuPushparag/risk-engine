@@ -67,7 +67,7 @@ CONFIG: dict = {
     "retry_backoff_s":         5,
 
     # Failure handling
-    "failure_threshold":       0.3,
+    "failure_threshold":       0.1,
 
     # Feature engineering
     "risk_free_rate":          0.05,

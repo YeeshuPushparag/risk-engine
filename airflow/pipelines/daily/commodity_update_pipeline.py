@@ -832,7 +832,7 @@ def build_synthetic_rows(
         # STEP 2: Loop over ALL expected dates
         # ---------------------------------------------------------
         for d in all_dates:
-            d_date = d.date()
+            d_date = d if isinstance(d, date_type) else d.date()
 
             # If data already exists -> skip
             if d_date in existing_dates:
