@@ -1750,9 +1750,12 @@ def update_commodity_pipeline(
             if not synth_df.empty:
                 raw_df = pd.concat([raw_df, synth_df], ignore_index=True)
 
-            # Filter to strictly new dates only
-            if last_date is not None:
+            # Only filter for incremental mode, NOT for backfill
+            if not start_date_override and last_date is not None:
                 raw_df = raw_df[raw_df["date"].dt.date > last_date]
+                print(f"  [DEBUG] Incremental mode - filtered to dates > {last_date}: {len(raw_df)} rows")
+            else:
+                print(f"  [DEBUG] {'Backfill' if start_date_override else 'Replay'} mode - keeping all {len(raw_df)} rows")
 
             if raw_df.empty:
                 msg = "No new data fetched and no synthetic rows generated."
