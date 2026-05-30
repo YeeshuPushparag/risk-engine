@@ -872,17 +872,19 @@ def fetch_dgs10_from_fred(
             written_dates = 0
 
             valid_market_days = get_valid_market_days(start_date, end_date)
-            
-            for date_val, group in df.groupby("date_only"):
-                if date_val not in valid_market_days:
-                    continue
 
-                raw_key = _raw_fred_key(date_val, run_id)
+            for market_day in valid_market_days:
+
+                group = df[
+                    df["date_only"] == market_day
+                ]
+
+                raw_key = _raw_fred_key(market_day, run_id)
 
                 write_parquet_to_s3(
-                        group.drop(columns=["date_only"]),
-                        bucket,
-                        raw_key
+                    group.drop(columns=["date_only"], errors="ignore"),
+                    bucket,
+                    raw_key
                 )
 
                 written_dates += 1
