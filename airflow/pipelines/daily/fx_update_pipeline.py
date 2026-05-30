@@ -364,6 +364,21 @@ def fx_enrichment(df):
     df = df.sort_values(["currency_pair", "ticker", "date"]).reset_index(drop=True)
 
     df["fx_return"] = df.groupby("currency_pair")["fx_rate"].pct_change()
+
+    for t in ["355.SG","A","AA","AAL","AAT","0A2X.IL","0A2Z.IL"]:
+        tmp = df[df["ticker"] == t]
+
+        print(f"\n===== {t} =====")
+        print(
+            tmp[
+                [
+                    "date",
+                    "fx_rate",
+                    "fx_return"
+                ]
+            ]
+        )
+
     df["fx_volatility_20d"] = df.groupby("currency_pair")["fx_return"].transform(
         lambda x: x.rolling(20).std()
     )
