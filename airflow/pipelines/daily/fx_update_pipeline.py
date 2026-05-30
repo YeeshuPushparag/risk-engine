@@ -404,6 +404,20 @@ def fx_enrichment(df):
         lambda x: x.rolling(30).std()
     )
 
+    pair = df[df["currency_pair"] == "USDGBP"]
+
+    print(
+        pair[
+            [
+                "ticker",
+                "date",
+                "fx_return",
+                "fx_volatility_30d"
+            ]
+        ]
+        .head(50)
+    )
+
     def downside_risk(x, window=20):
         neg = x.copy()
         neg[neg > 0] = 0
