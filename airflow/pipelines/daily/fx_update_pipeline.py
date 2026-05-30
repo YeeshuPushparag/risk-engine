@@ -434,6 +434,23 @@ def fx_enrichment(df):
     )
     df["is_warmup"] = df[["fx_volatility_20d", "fx_volatility_30d"]].isna().any(axis=1)
 
+    print(
+        "\n355.SG BEFORE WARMUP FILTER:",
+        len(df[df["ticker"] == "355.SG"])
+    )
+
+    print(
+        df[
+            df["ticker"] == "355.SG"
+        ][[
+            "date",
+            "fx_return",
+            "fx_volatility_20d",
+            "fx_volatility_30d",
+            "is_warmup"
+        ]]
+    )
+
     # Drop warmup rows — buffer rows always fall here since they lack enough
     # rolling history. This naturally strips the buffer after enrichment.
     return df[~df["is_warmup"]].copy()
@@ -1581,30 +1598,28 @@ def update_fx_snowflake(
         print(tmp["interest_diff"].isna().sum())
         print(tmp["revenue"].isna().sum())
 
+        before = fx_for_enrichment.copy()
+        after = df_enriched.copy()
+
         before_keys = set(
-            zip(
-                before["ticker"],
-                before["date"]
-            )
+            zip(before["ticker"], before["date"])
         )
 
         after_keys = set(
-            zip(
-                after["ticker"],
-                after["date"]
-            )
+            zip(after["ticker"], after["date"])
         )
 
         missing = before_keys - after_keys
 
-        print(
-            before[
-                before.apply(
-                    lambda r: (r["ticker"], r["date"]) in missing,
-                    axis=1
-                )
-            ]
-        )
+        missing_rows = before[
+            before.apply(
+                lambda r: (r["ticker"], r["date"]) in missing,
+                axis=1
+            )
+        ]
+
+        print("\nMISSING ROWS")
+        print(missing_rows[["ticker", "currency_pair", "date"]])
 
         # Add this AFTER fx_enrichment() and BEFORE filtering to window rows
 
