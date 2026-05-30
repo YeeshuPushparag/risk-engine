@@ -1620,6 +1620,16 @@ def update_fx_snowflake(
             available_features = [f for f in feature_cols if f in final_rows.columns]
             X = final_rows[available_features].copy().fillna(0)
 
+            print("\n===== INF CHECK =====")
+
+            numeric_cols = final_rows.select_dtypes(include=[np.number]).columns
+
+            for col in numeric_cols:
+                inf_count = np.isinf(final_rows[col]).sum()
+
+                if inf_count > 0:
+                    print(col, "INF COUNT =", inf_count)
+
             print("  Running FX volatility prediction...")
             try:
                 final_rows["predicted_volatility_21d"] = booster.predict(xgb.DMatrix(X))
