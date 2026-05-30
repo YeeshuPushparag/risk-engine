@@ -394,6 +394,25 @@ def fx_enrichment(df):
 
     vol_20 = df.get("fx_volatility_20d", df.get("fx_volatility", np.nan))
     vol_30 = df.get("fx_volatility_30d", df.get("fx_volatility", np.nan))
+    debug_355 = df[
+        df["ticker"] == "355.SG"
+    ].copy()
+
+    print("\n=== 355.SG FULL DEBUG ===")
+
+    print(
+        debug_355[
+            [
+                "ticker",
+                "currency_pair",
+                "date",
+                "fx_rate",
+                "fx_return",
+                "fx_volatility_20d",
+                "fx_volatility_30d"
+            ]
+        ]
+    )
     df["fx_volatility_blend"] = 0.7 * vol_20.fillna(0) + 0.3 * vol_30.fillna(0)
     df["fx_volatility"] = df.groupby("currency_pair")["fx_volatility_blend"].transform(
         lambda x: x.ewm(span=10, adjust=False).mean()
@@ -1562,6 +1581,55 @@ def update_fx_snowflake(
             ][["ticker","date"]]
             .sort_values("date")
         )
+
+        debug_counts = (
+            fx_for_enrichment
+            .groupby("ticker")
+            .size()
+            .reset_index(name="rows")
+            .sort_values("rows")
+        )
+
+        print("\n=== TICKERS WITH FEWEST ROWS ===")
+        print(debug_counts.head(30))
+
+        for t in ["355.SG","A","AA","AAL","AAT","0A2X.IL","0A2Z.IL"]:
+            ticker_rows = fx_for_enrichment[
+                fx_for_enrichment["ticker"] == t
+            ]
+
+            print(
+                f"{t}: rows={len(ticker_rows)}, "
+                f"min_date={ticker_rows['date'].min()}, "
+                f"max_date={ticker_rows['date'].max()}"
+            )
+
+
+            print("\n=== DROPPED TICKER CURRENCY PAIRS ===")
+
+            for t in ["355.SG","A","AA","AAL","AAT","0A2X.IL","0A2Z.IL"]:
+
+                ticker_df = fx_for_enrichment[
+                    fx_for_enrichment["ticker"] == t
+                ]
+
+                if not ticker_df.empty:
+
+                    pair = ticker_df["currency_pair"].iloc[0]
+
+                    pair_tickers = (
+                        fx_for_enrichment[
+                            fx_for_enrichment["currency_pair"] == pair
+                        ]["ticker"]
+                        .nunique()
+                    )
+
+                    print(
+                        f"{t} | pair={pair} | "
+                        f"tickers_in_pair={pair_tickers}"
+                    )
+
+
         print("  Running FX enrichment...")
         df_enriched = fx_enrichment(fx_for_enrichment)
         print(
@@ -1618,8 +1686,30 @@ def update_fx_snowflake(
             )
         ]
 
-        print("\nMISSING ROWS")
-        print(missing_rows[["ticker", "currency_pair", "date"]])
+        print("\n=== MISSING ROWS SUMMARY ===")
+
+        print(
+            missing_rows
+            .groupby("ticker")
+            .size()
+            .sort_values()
+        )
+
+        for t in ["355.SG","A","AA","AAL","AAT","0A2X.IL","0A2Z.IL"]:
+
+            tmp_missing = missing_rows[
+                missing_rows["ticker"] == t
+            ]
+
+            if not tmp_missing.empty:
+
+                print(f"\nTicker {t} missing rows:")
+                print(
+                    tmp_missing[
+                        ["ticker","currency_pair","date"]
+                    ]
+                    .sort_values("date")
+                )
 
         # Add this AFTER fx_enrichment() and BEFORE filtering to window rows
 
