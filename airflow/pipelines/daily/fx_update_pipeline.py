@@ -1426,9 +1426,11 @@ def update_fx_snowflake(
         print("  Loading FX feature data from S3...")
 
         if mode in ("replay", "backfill"):
-
+            # Load extra buffer days before start_date
+            buffer_start = start_date - timedelta(days=BUFFER_DAYS)
+            
             fx = load_fx_features_from_layer2(
-                start_date=start_date,
+                start_date=buffer_start,
                 end_date=end_date,
                 run_id=run_id,
             )
