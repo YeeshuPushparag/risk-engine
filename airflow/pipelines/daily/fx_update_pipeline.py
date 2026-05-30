@@ -429,8 +429,11 @@ def fx_enrichment(df):
     df["carry_pnl"]         = df["exposure_amount"] * df["carry_daily"]
     df["total_pnl"]         = df["fx_pnl"] + df["carry_pnl"]
     df["expected_pnl"]      = df["total_pnl"]
-    df["sharpe_like_ratio"] = df["total_pnl"] / (
-        df["position_size"] * df["fx_volatility"].replace(0, np.nan)
+    df["sharpe_like_ratio"] = np.where(
+        (df["position_size"] * df["fx_volatility"]).abs() < 1e-8,
+        np.nan,
+        df["total_pnl"] /
+        (df["position_size"] * df["fx_volatility"])
     )
     df["is_warmup"] = df[["fx_volatility_20d", "fx_volatility_30d"]].isna().any(axis=1)
 
