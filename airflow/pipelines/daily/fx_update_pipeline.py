@@ -361,7 +361,7 @@ def fx_enrichment(df):
     P&L metrics. Drops warmup rows (rows where rolling windows are not yet
     fully populated). UNCHANGED from original implementation.
     """
-    df = df.sort_values(["ticker", "date"]).reset_index(drop=True)
+    df = df.sort_values(["currency_pair", "ticker", "date"]).reset_index(drop=True)
 
     df["fx_return"] = df.groupby("currency_pair")["fx_rate"].pct_change()
     df["fx_volatility_20d"] = df.groupby("currency_pair")["fx_return"].transform(
