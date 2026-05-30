@@ -1630,6 +1630,33 @@ def update_fx_snowflake(
                 if inf_count > 0:
                     print(col, "INF COUNT =", inf_count)
 
+            print("\n===== MODEL INPUT CHECK =====")
+
+            X = final_rows[feature_cols]
+
+            print("shape:", X.shape)
+
+            null_counts = X.isna().sum()
+            null_counts = null_counts[null_counts > 0]
+
+            print("\nNULL FEATURES:")
+            print(null_counts)
+
+            for col in X.columns:
+                try:
+                    max_val = X[col].max()
+                    min_val = X[col].min()
+
+                    if pd.notna(max_val) and (
+                        abs(max_val) > 1e12 or
+                        abs(min_val) > 1e12
+                    ):
+                        print(
+                            f"{col}: min={min_val}, max={max_val}"
+                        )
+                except Exception:
+                    pass
+
             print("  Running FX volatility prediction...")
             try:
                 final_rows["predicted_volatility_21d"] = booster.predict(xgb.DMatrix(X))
