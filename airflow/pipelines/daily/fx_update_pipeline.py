@@ -363,59 +363,12 @@ def fx_enrichment(df):
     """
     df = df.sort_values(["currency_pair", "date"]).reset_index(drop=True)
 
-    for pair in [
-        "USDGBP",
-        "USDCHF",
-        "USDAUD",
-        "USDCNY",
-        "USDJPY",
-        "USDCAD",
-        "USDEUR"
-    ]:
-        first_ticker = (
-            df[df["currency_pair"] == pair]
-            ["ticker"]
-            .drop_duplicates()
-            .iloc[0]
-        )
-
-        print(pair, "FIRST TICKER =", first_ticker)
-
     df["fx_return"] = df.groupby("currency_pair")["fx_rate"].pct_change()
-
-    for t in ["355.SG","A","AA","AAL","AAT","0A2X.IL","0A2Z.IL"]:
-        tmp = df[df["ticker"] == t]
-
-        print(f"\n===== {t} =====")
-        print(
-            tmp[
-                [
-                    "date",
-                    "fx_rate",
-                    "fx_return"
-                ]
-            ]
-        )
-
     df["fx_volatility_20d"] = df.groupby("currency_pair")["fx_return"].transform(
         lambda x: x.rolling(20).std()
     )
     df["fx_volatility_30d"] = df.groupby("currency_pair")["fx_return"].transform(
         lambda x: x.rolling(30).std()
-    )
-
-    pair = df[df["currency_pair"] == "USDGBP"]
-
-    print(
-        pair[
-            [
-                "ticker",
-                "date",
-                "fx_return",
-                "fx_volatility_30d"
-            ]
-        ]
-        .head(50)
     )
 
     def downside_risk(x, window=20):
@@ -441,53 +394,6 @@ def fx_enrichment(df):
 
     vol_20 = df.get("fx_volatility_20d", df.get("fx_volatility", np.nan))
     vol_30 = df.get("fx_volatility_30d", df.get("fx_volatility", np.nan))
-
-    print("\nPAIR COUNTS")
-
-    pair_counts = (
-        df.groupby("currency_pair")
-        .agg(
-            rows=("fx_return", "size"),
-            returns=("fx_return", lambda x: x.notna().sum())
-        )
-    )
-
-    print(pair_counts)
-
-    debug_355 = df[
-        df["ticker"] == "355.SG"
-    ].copy()
-
-    print("\n=== 355.SG FULL DEBUG ===")
-
-    print("rows:", len(debug_355))
-    print("non_null_returns:", debug_355["fx_return"].notna().sum())
-    print("non_null_vol20:", debug_355["fx_volatility_20d"].notna().sum())
-    print("non_null_vol30:", debug_355["fx_volatility_30d"].notna().sum())
-
-    print(
-        debug_355[
-            [
-                "ticker",
-                "currency_pair",
-                "date",
-                "fx_rate",
-                "fx_return",
-                "fx_volatility_20d",
-                "fx_volatility_30d"
-            ]
-        ]
-    )
-
-    pair_debug = df[
-        df["currency_pair"] == "USDGBP"
-    ].copy()
-
-    print("\nUSDGBP PAIR DEBUG")
-    print("rows:", len(pair_debug))
-    print("non_null_returns:", pair_debug["fx_return"].notna().sum())
-    print("non_null_vol30:", pair_debug["fx_volatility_30d"].notna().sum())
-
     df["fx_volatility_blend"] = 0.7 * vol_20.fillna(0) + 0.3 * vol_30.fillna(0)
     df["fx_volatility"] = df.groupby("currency_pair")["fx_volatility_blend"].transform(
         lambda x: x.ewm(span=10, adjust=False).mean()
@@ -527,23 +433,6 @@ def fx_enrichment(df):
         df["position_size"] * df["fx_volatility"].replace(0, np.nan)
     )
     df["is_warmup"] = df[["fx_volatility_20d", "fx_volatility_30d"]].isna().any(axis=1)
-
-    print(
-        "\n355.SG BEFORE WARMUP FILTER:",
-        len(df[df["ticker"] == "355.SG"])
-    )
-
-    print(
-        df[
-            df["ticker"] == "355.SG"
-        ][[
-            "date",
-            "fx_return",
-            "fx_volatility_20d",
-            "fx_volatility_30d",
-            "is_warmup"
-        ]]
-    )
 
     # Drop warmup rows — buffer rows always fall here since they lack enough
     # rolling history. This naturally strips the buffer after enrichment.
@@ -1650,178 +1539,8 @@ def update_fx_snowflake(
         # and drops warmup rows via is_warmup. Buffer rows are stripped here
         # automatically — no explicit post-enrichment buffer removal needed.
         # ══════════════════════════════════════════════════════════════
-        print(
-            fx[
-                fx["ticker"] == "355.SG"
-            ][["ticker","date"]]
-            .sort_values("date")
-        )
-
-        debug_counts = (
-            fx_for_enrichment
-            .groupby("ticker")
-            .size()
-            .reset_index(name="rows")
-            .sort_values("rows")
-        )
-
-        print("\n=== TICKERS WITH FEWEST ROWS ===")
-        print(debug_counts.head(30))
-
-        for t in ["355.SG","A","AA","AAL","AAT","0A2X.IL","0A2Z.IL"]:
-            ticker_rows = fx_for_enrichment[
-                fx_for_enrichment["ticker"] == t
-            ]
-
-            print(
-                f"{t}: rows={len(ticker_rows)}, "
-                f"min_date={ticker_rows['date'].min()}, "
-                f"max_date={ticker_rows['date'].max()}"
-            )
-
-
-            print("\n=== DROPPED TICKER CURRENCY PAIRS ===")
-
-            for t in ["355.SG","A","AA","AAL","AAT","0A2X.IL","0A2Z.IL"]:
-
-                ticker_df = fx_for_enrichment[
-                    fx_for_enrichment["ticker"] == t
-                ]
-
-                if not ticker_df.empty:
-
-                    pair = ticker_df["currency_pair"].iloc[0]
-
-                    pair_tickers = (
-                        fx_for_enrichment[
-                            fx_for_enrichment["currency_pair"] == pair
-                        ]["ticker"]
-                        .nunique()
-                    )
-
-                    print(
-                        f"{t} | pair={pair} | "
-                        f"tickers_in_pair={pair_tickers}"
-                    )
-
-
         print("  Running FX enrichment...")
         df_enriched = fx_enrichment(fx_for_enrichment)
-        print(
-            df_enriched[
-                df_enriched["ticker"] == "355.SG"
-            ][["ticker","date"]]
-            .sort_values("date")
-        )
-    
-        tmp = fx[
-            fx["ticker"] == "355.SG"
-        ].copy()
-
-        print(
-            "before:",
-            len(
-                fx[
-                    fx["ticker"] == "355.SG"
-                ]
-            )
-        )
-
-        print(
-            "after:",
-            len(
-                df_enriched[
-                    df_enriched["ticker"] == "355.SG"
-                ]
-            )
-        )
-
-
-        print(tmp["fx_rate"].isna().sum())
-        print(tmp["interest_diff"].isna().sum())
-        print(tmp["revenue"].isna().sum())
-
-        before = fx_for_enrichment.copy()
-        after = df_enriched.copy()
-
-        before_keys = set(
-            zip(before["ticker"], before["date"])
-        )
-
-        after_keys = set(
-            zip(after["ticker"], after["date"])
-        )
-
-        missing = before_keys - after_keys
-
-        missing_rows = before[
-            before.apply(
-                lambda r: (r["ticker"], r["date"]) in missing,
-                axis=1
-            )
-        ]
-
-        print("\n=== MISSING ROWS SUMMARY ===")
-
-        print(
-            missing_rows
-            .groupby("ticker")
-            .size()
-            .sort_values()
-        )
-
-        for t in ["355.SG","A","AA","AAL","AAT","0A2X.IL","0A2Z.IL"]:
-
-            tmp_missing = missing_rows[
-                missing_rows["ticker"] == t
-            ]
-
-            if not tmp_missing.empty:
-
-                print(f"\nTicker {t} missing rows:")
-                print(
-                    tmp_missing[
-                        ["ticker","currency_pair","date"]
-                    ]
-                    .sort_values("date")
-                )
-
-        # Add this AFTER fx_enrichment() and BEFORE filtering to window rows
-
-        print("\n  [DEBUG] === ENRICHMENT DIAGNOSTIC ===")
-
-        # 1. Check rows before and after enrichment
-        print(f"  [DEBUG] Rows before enrichment: {len(fx_for_enrichment):,}")
-        print(f"  [DEBUG] Rows after enrichment: {len(df_enriched):,}")
-
-        # 2. Find which tickers are missing
-        before_tickers = set(fx_for_enrichment['ticker'].unique())
-        after_tickers = set(df_enriched['ticker'].unique())
-        dropped_tickers = before_tickers - after_tickers
-        print(f"  [DEBUG] Dropped tickers ({len(dropped_tickers)}): {list(dropped_tickers)[:20]}")
-
-        # 3. Check dropped rows details
-        dropped_mask = ~fx_for_enrichment['ticker'].isin(after_tickers)
-        dropped_rows = fx_for_enrichment[dropped_mask]
-        if not dropped_rows.empty:
-            print(f"  [DEBUG] Sample of dropped rows:")
-            print(dropped_rows[['ticker', 'currency_pair', 'date', 'fx_rate']].head(10))
-            
-            # Check if dropped rows have null fx_rate
-            null_fx_rate = dropped_rows['fx_rate'].isna().sum()
-            print(f"  [DEBUG] Dropped rows with null fx_rate: {null_fx_rate}")
-
-        # 4. Check is_warmup flag distribution
-        if 'is_warmup' in df_enriched.columns:
-            warmup_count = df_enriched['is_warmup'].sum()
-            print(f"  [DEBUG] Rows marked as warmup after enrichment: {warmup_count}")
-
-        # 5. Check for each currency pair
-        for pair in fx_for_enrichment['currency_pair'].unique():
-            before_count = len(fx_for_enrichment[fx_for_enrichment['currency_pair'] == pair])
-            after_count = len(df_enriched[df_enriched['currency_pair'] == pair])
-            if before_count != after_count:
-                print(f"  [DEBUG] {pair}: before={before_count}, after={after_count}, diff={before_count - after_count}")
 
         # ══════════════════════════════════════════════════════════════
         # STEP 6 — Filter to window-only rows (safety net after enrichment)
