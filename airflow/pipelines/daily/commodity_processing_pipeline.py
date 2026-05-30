@@ -895,7 +895,7 @@ def write_to_snowflake_clean(df, mode, start_date, end_date, run_id=None, chunk_
 _PG_INTEGER_COLS = ["volume", "exposure_amount", "mtm_value"]
 
 
-def write_to_postgres(df, retries=3):
+def write_to_postgres(df, mode, retries=3):
     """
     Write enriched commodity rows to the Postgres serving layer.
 
@@ -1034,11 +1034,35 @@ def write_to_postgres(df, retries=3):
 
                     elif unique_date_count == 1:
 
-                        # INCREMENTAL APPEND
-                        print(
-                            "  [POSTGRES] Incremental append mode "
-                            "(1-day load)"
-                        )
+                        load_date = unique_dates[0]
+
+                        if mode == "incremental":
+
+                            print(
+                                "  [POSTGRES] Incremental append mode "
+                                "(1-day load)"
+                            )
+
+                        else:
+
+                            pg_cur.execute(
+                                """
+                                DELETE FROM public.commodity_data
+                                WHERE date = %s
+                                """,
+                                (load_date,)
+                            )
+
+                            deleted = (
+                                pg_cur.rowcount
+                                if pg_cur.rowcount is not None
+                                else 0
+                            )
+
+                            print(
+                                f"  [POSTGRES] Deleted {deleted:,} existing rows "
+                                f"for {load_date} ({mode} mode)"
+                            )
 
                     else:
 
@@ -1077,7 +1101,10 @@ def write_to_postgres(df, retries=3):
                     # ─────────────────────────────────────────────
                     # Step 5: Trim ONLY for incremental loads
                     # ─────────────────────────────────────────────
-                    if unique_date_count == 1:
+                    if (
+                        unique_date_count == 1
+                        and mode == "incremental"
+                    ):
 
                         pg_cur.execute(
                             """
@@ -1103,8 +1130,7 @@ def write_to_postgres(df, retries=3):
                     else:
 
                         print(
-                            "  [POSTGRES] No trim needed "
-                            "(exactly 2 dates loaded)"
+                            "  [POSTGRES] No trim needed"
                         )
 
                 # Commit transaction
@@ -1667,7 +1693,7 @@ def process_commodities(
         # Failure here -> pipeline FAILS (consistency-first).
         # ══════════════════════════════════════════════════════════════
         print(f"\n  [STEP 14] Writing to Postgres serving layer...")
-        write_to_postgres(final_new)
+        write_to_postgres(final_new, mode=mode)
 
         # ══════════════════════════════════════════════════════════════
         # STEP 15 — Pipeline success

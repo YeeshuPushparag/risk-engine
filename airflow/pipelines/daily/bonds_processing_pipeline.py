@@ -1303,6 +1303,7 @@ def write_to_snowflake_clean(
 # =============================================================
 def write_to_postgres(
     df: pd.DataFrame,
+    mode: str,
     retries: int = 3,
 ) -> None:
     """
@@ -1425,11 +1426,36 @@ def write_to_postgres(
 
                     elif unique_date_count == 1:
 
-                        # INCREMENTAL APPEND
-                        print(
-                            "  [POSTGRES] Incremental append mode "
-                            "(1-day load)"
-                        )
+                        load_date = unique_dates[0]
+
+                        if mode == "incremental":
+
+                            print(
+                                "  [POSTGRES] Incremental append mode "
+                                "(1-day load)"
+                            )
+
+                        else:
+
+                            # replay/backfill
+                            pg_cur.execute(
+                                """
+                                DELETE FROM public.bond_data
+                                WHERE date = %s
+                                """,
+                                (load_date,)
+                            )
+
+                            deleted = (
+                                pg_cur.rowcount
+                                if pg_cur.rowcount is not None
+                                else 0
+                            )
+
+                            print(
+                                f"  [POSTGRES] Deleted {deleted:,} existing rows "
+                                f"for {load_date} ({mode} mode)"
+                            )
 
                     else:
 
@@ -1468,8 +1494,10 @@ def write_to_postgres(
                     # ─────────────────────────────────────────────
                     # Step 5: Trim ONLY for incremental loads
                     # ─────────────────────────────────────────────
-                    if unique_date_count == 1:
-
+                    if (
+                        unique_date_count == 1
+                        and mode == "incremental"
+                    ):
                         pg_cur.execute(
                             """
                             DELETE FROM public.bond_data
@@ -1495,7 +1523,6 @@ def write_to_postgres(
 
                         print(
                             "  [POSTGRES] No trim needed "
-                            "(exactly 2 dates loaded)"
                         )
 
                 # Commit transaction
@@ -1799,7 +1826,7 @@ def process_bonds(
         # Failure here -> pipeline FAILS (consistency-first).
         # ══════════════════════════════════════════════════════════════
         print(f"\n  [STEP 9] Writing to Postgres serving layer...")
-        write_to_postgres(df_to_upload)
+        write_to_postgres(df_to_upload, mode=mode)
 
         # ══════════════════════════════════════════════════════════════
         # STEP 10 — Pipeline success

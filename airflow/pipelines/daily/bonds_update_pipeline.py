@@ -682,6 +682,7 @@ def load_dgs10_history(
             ]
             [["date", "DGS10"]]
             .sort_values("date")
+            .drop_duplicates()
             .tail(n)
             .reset_index(drop=True)
         )

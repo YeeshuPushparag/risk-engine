@@ -832,6 +832,7 @@ def write_to_snowflake_clean(
 # ============================================================
 def write_to_postgres(
     df: pd.DataFrame,
+    mode: str,
     retries: int = 3,
 ):
     """
@@ -960,11 +961,35 @@ def write_to_postgres(
 
                     elif unique_date_count == 1:
 
-                        # INCREMENTAL APPEND
-                        print(
-                            "  [POSTGRES] Incremental append mode "
-                            "(1-day load)"
-                        )
+                        load_date = unique_dates[0]
+
+                        if mode == "incremental":
+
+                            print(
+                                "  [POSTGRES] Incremental append mode "
+                                "(1-day load)"
+                            )
+
+                        else:
+
+                            pg_cur.execute(
+                                f"""
+                                DELETE FROM public.{POSTGRES_TABLE}
+                                WHERE date = %s
+                                """,
+                                (load_date,)
+                            )
+
+                            deleted = (
+                                pg_cur.rowcount
+                                if pg_cur.rowcount is not None
+                                else 0
+                            )
+
+                            print(
+                                f"  [POSTGRES] Deleted {deleted:,} existing rows "
+                                f"for {load_date} ({mode} mode)"
+                            )
 
                     else:
 
@@ -998,7 +1023,10 @@ def write_to_postgres(
                     # ─────────────────────────────────────────────
                     # Step 5: Trim ONLY for incremental loads
                     # ─────────────────────────────────────────────
-                    if unique_date_count == 1:
+                    if (
+                        unique_date_count == 1
+                        and mode == "incremental"
+                    ):
 
                         pg_cur.execute(f"""
                             DELETE FROM public.{POSTGRES_TABLE}
@@ -1022,8 +1050,7 @@ def write_to_postgres(
                     else:
 
                         print(
-                            "  [POSTGRES] No trim needed "
-                            "(exactly 2 dates loaded)"
+                            "  [POSTGRES] No trim needed"
                         )
 
                 # Commit transaction
@@ -1503,7 +1530,7 @@ def run_derivatives_processing(
         # Failure here -> pipeline FAILS (consistency-first).
         # ══════════════════════════════════════════════════════════════
         print(f"\n  [STEP 13] Writing to Postgres ({POSTGRES_TABLE})...")
-        write_to_postgres(merged)
+        write_to_postgres(merged, mode=mode)
 
         # ══════════════════════════════════════════════════════════════
         # STEP 14 — Pipeline success

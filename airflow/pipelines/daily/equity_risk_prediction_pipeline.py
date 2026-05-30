@@ -1338,7 +1338,7 @@ _PG_INTEGER_COLS = [
 ]
 
 
-def write_to_postgres(df, retries=3):
+def write_to_postgres(df, mode, retries=3):
     """
     Write enriched equity rows to the Postgres serving layer.
 
@@ -1463,11 +1463,35 @@ def write_to_postgres(df, retries=3):
 
                     elif unique_date_count == 1:
 
-                        # INCREMENTAL APPEND
-                        print(
-                            "  [POSTGRES] Incremental append mode "
-                            "(1-day load)"
-                        )
+                        load_date = unique_dates[0]
+
+                        if mode == "incremental":
+
+                            print(
+                                "  [POSTGRES] Incremental append mode "
+                                "(1-day load)"
+                            )
+
+                        else:
+
+                            pg_cur.execute(
+                                """
+                                DELETE FROM public.equity_data
+                                WHERE date = %s
+                                """,
+                                (load_date,)
+                            )
+
+                            deleted = (
+                                pg_cur.rowcount
+                                if pg_cur.rowcount is not None
+                                else 0
+                            )
+
+                            print(
+                                f"  [POSTGRES] Deleted {deleted:,} existing rows "
+                                f"for {load_date} ({mode} mode)"
+                            )
 
                     else:
                         raise ValueError(
@@ -1516,7 +1540,10 @@ def write_to_postgres(df, retries=3):
                     # ─────────────────────────────────────────────
                     # Step 6: Trim ONLY for incremental loads
                     # ─────────────────────────────────────────────
-                    if unique_date_count == 1:
+                    if (
+                        unique_date_count == 1
+                        and mode == "incremental"
+                    ):
 
                         pg_cur.execute(
                             """
@@ -1542,7 +1569,6 @@ def write_to_postgres(df, retries=3):
                     else:
                         print(
                             "  [POSTGRES] No trim needed "
-                            "(exactly 2 dates loaded)"
                         )
 
                 # Commit transaction
@@ -1930,7 +1956,7 @@ def run_equity_risk_pipeline(
         # Failure here -> pipeline FAILS (consistency-first).
         # ══════════════════════════════════════════════════════════════
         print(f"\n  Writing to Postgres serving layer...")
-        write_to_postgres(df_merged)
+        write_to_postgres(df_merged, mode=mode)
 
         # ══════════════════════════════════════════════════════════════
         # STEP 12 — Pipeline success

@@ -367,7 +367,7 @@ def get_processed_months_from_clean_table(table_name, months_to_check, run_id=No
 # POSTGRES — SERVING LAYER (consistency-first: RAISES on failure)
 # ============================================================
 
-def write_to_postgres(df, retries=3):
+def write_to_postgres(df, mode, retries=3):
     """
     Write loan rows to the Postgres serving layer.
 
@@ -526,11 +526,33 @@ def write_to_postgres(df, retries=3):
 
                     elif unique_month_count == 1:
 
-                        # INCREMENTAL APPEND
-                        print(
-                            "  [POSTGRES] Incremental append mode "
-                            "(1-month load)"
-                        )
+                        load_month = unique_months[0]
+
+                        if mode == "incremental":
+
+                            print(
+                                "  [POSTGRES] Incremental append mode "
+                                "(1-month load)"
+                            )
+
+                        else:
+
+                            # BACKFILL / REFRESH MODE FOR SINGLE MONTH
+                            pg_cur.execute("""
+                                DELETE FROM public.loan_data
+                                WHERE month = %s
+                            """, (load_month,))
+
+                            deleted = (
+                                pg_cur.rowcount
+                                if pg_cur.rowcount is not None
+                                else 0
+                            )
+
+                            print(
+                                f"  [POSTGRES] Backfill mode: deleted {deleted:,} rows "
+                                f"for month {load_month}"
+                            )
 
                     else:
 
@@ -564,7 +586,10 @@ def write_to_postgres(df, retries=3):
                     # ─────────────────────────────────────────────
                     # Step 5: Trim ONLY for incremental loads
                     # ─────────────────────────────────────────────
-                    if unique_month_count == 1:
+                    if (
+                        unique_month_count == 1
+                        and mode == "incremental"
+                    ):
 
                         pg_cur.execute("""
                             DELETE FROM public.loan_data
@@ -589,7 +614,6 @@ def write_to_postgres(df, retries=3):
 
                         print(
                             "  [POSTGRES] No trim needed "
-                            "(exactly 2 months loaded)"
                         )
 
                 # Commit transaction
@@ -1205,7 +1229,7 @@ def run_loans_model_pipeline(
             df_pg = df_pg.drop(columns=["date"])
 
         # ONE FUNCTION CALL - handles everything (unique months check, trim, delete, insert)
-        write_to_postgres(df_pg)
+        write_to_postgres(df_pg, mode=mode)
         postgres_success = True
         
         # ============================================================

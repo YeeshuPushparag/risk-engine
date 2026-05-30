@@ -1019,6 +1019,7 @@ def write_to_snowflake_clean(
 def write_single_postgres_table(
     df: pd.DataFrame,
     table_name: str,
+    mode: str,
     retries: int = 3
 ) -> None:
     """
@@ -1081,6 +1082,7 @@ def write_single_postgres_table(
         f"final incoming DF has "
         f"{unique_date_count} unique date(s)"
     )
+    
 
     last_error = None
 
@@ -1153,12 +1155,36 @@ def write_single_postgres_table(
 
                     elif unique_date_count == 1:
 
-                        # INCREMENTAL APPEND
-                        print(
-                            f"  [POSTGRES] {table_name}: "
-                            f"incremental append mode "
-                            f"(1-day load)"
-                        )
+                        load_date = unique_dates[0]
+
+                        if mode == "incremental":
+
+                            print(
+                                f"  [POSTGRES] {table_name}: "
+                                f"incremental append mode (1-day load)"
+                            )
+
+                        else:
+
+                            pg_cur.execute(
+                                f"""
+                                DELETE FROM public.{table_name}
+                                WHERE date = %s
+                                """,
+                                (load_date,)
+                            )
+
+                            deleted = (
+                                pg_cur.rowcount
+                                if pg_cur.rowcount is not None
+                                else 0
+                            )
+
+                            print(
+                                f"  [POSTGRES] {table_name}: "
+                                f"deleted {deleted:,} existing rows "
+                                f"for {load_date} ({mode} mode)"
+                            )
 
                     else:
 
@@ -1216,9 +1242,7 @@ def write_single_postgres_table(
                     else:
 
                         print(
-                            f"  [POSTGRES] {table_name}: "
-                            f"no trim needed "
-                            f"(exactly 2 dates loaded)"
+                            f"  [POSTGRES] {table_name}: no trim needed"
                         )
 
                 # Commit transaction
@@ -1576,8 +1600,8 @@ def run_collateral_pipeline(
         # Failure here -> pipeline FAILS (consistency-first).
         # ══════════════════════════════════════════════════════════════
         print(f"\n  [STEP 9] Writing to Postgres serving layer...")
-        write_single_postgres_table(df_detail, POSTGRES_DETAIL_TABLE)
-        write_single_postgres_table(df_model, POSTGRES_MODEL_TABLE)
+        write_single_postgres_table(df_detail, POSTGRES_DETAIL_TABLE, mode=mode)
+        write_single_postgres_table(df_model, POSTGRES_MODEL_TABLE, mode=mode)
 
         # ══════════════════════════════════════════════════════════════
         # STEP 10 — Pipeline success
