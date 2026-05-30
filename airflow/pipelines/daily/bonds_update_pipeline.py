@@ -833,9 +833,28 @@ def fetch_dgs10_from_fred(
                 observation_end=end_date,
             )
             if series is None or series.empty:
-                print(f"  [STAGE 4] FRED returned no data for {start_date} to {end_date}")
-                # Return empty DataFrame - let build_dgs10_series use history only
-                return pd.DataFrame(columns=["date", "DGS10"])
+
+                empty_df = pd.DataFrame(
+                    columns=["date", "DGS10"]
+                )
+
+                raw_key = _raw_fred_key(
+                    end_date,
+                    run_id
+                )
+
+                write_parquet_to_s3(
+                    empty_df,
+                    bucket,
+                    raw_key
+                )
+
+                print(
+                    f"[STAGE 4] Empty FRED raw partition written: "
+                    f"s3://{bucket}/{raw_key}"
+                )
+
+                return empty_df
             df = (
                 series.to_frame("DGS10")
                 .reset_index()
