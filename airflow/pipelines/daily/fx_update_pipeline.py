@@ -1539,8 +1539,54 @@ def update_fx_snowflake(
         # and drops warmup rows via is_warmup. Buffer rows are stripped here
         # automatically — no explicit post-enrichment buffer removal needed.
         # ══════════════════════════════════════════════════════════════
+        print(
+            fx[
+                fx["ticker"] == "355.SG"
+            ][["ticker","date"]]
+            .sort_values("date")
+        )
         print("  Running FX enrichment...")
         df_enriched = fx_enrichment(fx_for_enrichment)
+        print(
+            enriched[
+                enriched["ticker"] == "355.SG"
+            ][["ticker","date"]]
+            .sort_values("date")
+        )
+    
+        tmp = fx[
+            fx["ticker"] == "355.SG"
+        ].copy()
+
+
+        print(tmp["fx_rate"].isna().sum())
+        print(tmp["interest_diff"].isna().sum())
+        print(tmp["revenue"].isna().sum())
+
+        before_keys = set(
+            zip(
+                before["ticker"],
+                before["date"]
+            )
+        )
+
+        after_keys = set(
+            zip(
+                after["ticker"],
+                after["date"]
+            )
+        )
+
+        missing = before_keys - after_keys
+
+        print(
+            before[
+                before.apply(
+                    lambda r: (r["ticker"], r["date"]) in missing,
+                    axis=1
+                )
+            ]
+        )
 
         # Add this AFTER fx_enrichment() and BEFORE filtering to window rows
 
