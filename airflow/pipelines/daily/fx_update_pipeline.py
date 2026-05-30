@@ -1548,8 +1548,8 @@ def update_fx_snowflake(
         print("  Running FX enrichment...")
         df_enriched = fx_enrichment(fx_for_enrichment)
         print(
-            enriched[
-                enriched["ticker"] == "355.SG"
+            df_enriched[
+                df_enriched["ticker"] == "355.SG"
             ][["ticker","date"]]
             .sort_values("date")
         )
@@ -1557,6 +1557,24 @@ def update_fx_snowflake(
         tmp = fx[
             fx["ticker"] == "355.SG"
         ].copy()
+
+        print(
+            "before:",
+            len(
+                fx[
+                    fx["ticker"] == "355.SG"
+                ]
+            )
+        )
+
+        print(
+            "after:",
+            len(
+                df_enriched[
+                    df_enriched["ticker"] == "355.SG"
+                ]
+            )
+        )
 
 
         print(tmp["fx_rate"].isna().sum())
