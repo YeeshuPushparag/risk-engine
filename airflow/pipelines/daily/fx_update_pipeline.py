@@ -1542,6 +1542,43 @@ def update_fx_snowflake(
         print("  Running FX enrichment...")
         df_enriched = fx_enrichment(fx_for_enrichment)
 
+        # Add this AFTER fx_enrichment() and BEFORE filtering to window rows
+
+        print("\n  [DEBUG] === ENRICHMENT DIAGNOSTIC ===")
+
+        # 1. Check rows before and after enrichment
+        print(f"  [DEBUG] Rows before enrichment: {len(fx_for_enrichment):,}")
+        print(f"  [DEBUG] Rows after enrichment: {len(df_enriched):,}")
+
+        # 2. Find which tickers are missing
+        before_tickers = set(fx_for_enrichment['ticker'].unique())
+        after_tickers = set(df_enriched['ticker'].unique())
+        dropped_tickers = before_tickers - after_tickers
+        print(f"  [DEBUG] Dropped tickers ({len(dropped_tickers)}): {list(dropped_tickers)[:20]}")
+
+        # 3. Check dropped rows details
+        dropped_mask = ~fx_for_enrichment['ticker'].isin(after_tickers)
+        dropped_rows = fx_for_enrichment[dropped_mask]
+        if not dropped_rows.empty:
+            print(f"  [DEBUG] Sample of dropped rows:")
+            print(dropped_rows[['ticker', 'currency_pair', 'date', 'fx_rate']].head(10))
+            
+            # Check if dropped rows have null fx_rate
+            null_fx_rate = dropped_rows['fx_rate'].isna().sum()
+            print(f"  [DEBUG] Dropped rows with null fx_rate: {null_fx_rate}")
+
+        # 4. Check is_warmup flag distribution
+        if 'is_warmup' in df_enriched.columns:
+            warmup_count = df_enriched['is_warmup'].sum()
+            print(f"  [DEBUG] Rows marked as warmup after enrichment: {warmup_count}")
+
+        # 5. Check for each currency pair
+        for pair in fx_for_enrichment['currency_pair'].unique():
+            before_count = len(fx_for_enrichment[fx_for_enrichment['currency_pair'] == pair])
+            after_count = len(df_enriched[df_enriched['currency_pair'] == pair])
+            if before_count != after_count:
+                print(f"  [DEBUG] {pair}: before={before_count}, after={after_count}, diff={before_count - after_count}")
+
         # ══════════════════════════════════════════════════════════════
         # STEP 6 — Filter to window-only rows (safety net after enrichment)
         #
