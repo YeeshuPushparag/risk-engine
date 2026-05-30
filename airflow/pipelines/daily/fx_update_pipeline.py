@@ -363,6 +363,24 @@ def fx_enrichment(df):
     """
     df = df.sort_values(["currency_pair", "ticker", "date"]).reset_index(drop=True)
 
+    for pair in [
+        "USDGBP",
+        "USDCHF",
+        "USDAUD",
+        "USDCNY",
+        "USDJPY",
+        "USDCAD",
+        "USDEUR"
+    ]:
+        first_ticker = (
+            df[df["currency_pair"] == pair]
+            ["ticker"]
+            .drop_duplicates()
+            .iloc[0]
+        )
+
+        print(pair, "FIRST TICKER =", first_ticker)
+
     df["fx_return"] = df.groupby("currency_pair")["fx_rate"].pct_change()
 
     for t in ["355.SG","A","AA","AAL","AAT","0A2X.IL","0A2Z.IL"]:
