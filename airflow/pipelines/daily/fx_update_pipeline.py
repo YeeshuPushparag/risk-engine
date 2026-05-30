@@ -409,11 +409,29 @@ def fx_enrichment(df):
 
     vol_20 = df.get("fx_volatility_20d", df.get("fx_volatility", np.nan))
     vol_30 = df.get("fx_volatility_30d", df.get("fx_volatility", np.nan))
+
+    print("\nPAIR COUNTS")
+
+    pair_counts = (
+        df.groupby("currency_pair")
+        .agg(
+            rows=("fx_return", "size"),
+            returns=("fx_return", lambda x: x.notna().sum())
+        )
+    )
+
+    print(pair_counts)
+
     debug_355 = df[
         df["ticker"] == "355.SG"
     ].copy()
 
     print("\n=== 355.SG FULL DEBUG ===")
+
+    print("rows:", len(debug_355))
+    print("non_null_returns:", debug_355["fx_return"].notna().sum())
+    print("non_null_vol20:", debug_355["fx_volatility_20d"].notna().sum())
+    print("non_null_vol30:", debug_355["fx_volatility_30d"].notna().sum())
 
     print(
         debug_355[
@@ -428,6 +446,16 @@ def fx_enrichment(df):
             ]
         ]
     )
+
+    pair_debug = df[
+        df["currency_pair"] == "USDGBP"
+    ].copy()
+
+    print("\nUSDGBP PAIR DEBUG")
+    print("rows:", len(pair_debug))
+    print("non_null_returns:", pair_debug["fx_return"].notna().sum())
+    print("non_null_vol30:", pair_debug["fx_volatility_30d"].notna().sum())
+
     df["fx_volatility_blend"] = 0.7 * vol_20.fillna(0) + 0.3 * vol_30.fillna(0)
     df["fx_volatility"] = df.groupby("currency_pair")["fx_volatility_blend"].transform(
         lambda x: x.ewm(span=10, adjust=False).mean()
