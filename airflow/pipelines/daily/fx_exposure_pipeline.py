@@ -191,7 +191,7 @@ SCHEMA_HASH: str = hashlib.md5(
 # MACRO 
 # =============================================================
 MACRO_BUCKET = "yeeshu-loan-bucket"
-MACRO_KEY   = "macro_data.csv",
+MACRO_KEY   = "macro_data.csv"
 
 
 # =============================================================
