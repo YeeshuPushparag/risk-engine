@@ -1,137 +1,88 @@
 """
 bonds_update_pipeline.py
 =========================
-FIRST PIPELINE — Ingestion + Feature Engineering
+FIRST PIPELINE — Bond Ingestion and Feature Engineering
 
 Responsibilities
 ----------------
-- Load static base bond universe from S3
+- Load the static synthetic bond universe from S3
 - Generate one row per bond per NYSE market day
-- Fetch FRED DGS10 (live API for incremental/backfill; raw layer for replay)
-- Load DGS10 warm-up history from raw DGS10 partitions (all modes)
-- Build DGS10 rolling features (DGS10_ma, dgs10_anom, fill_method_flag)
-- Merge macro data (GDP, UNRATE, FEDFUNDS, CPI)
+- Fetch FRED DGS10 for incremental and backfill modes; read raw partitions
+  for replay
+- Build DGS10 rolling features: DGS10_ma, dgs10_anom, fill_method_flag
 - Write Layer 2 feature partitions (one parquet per date per run_id)
-- Maintain 30-day rolling serving parquet
+- Maintain the 30-day rolling serving parquet
 - Save run metadata for observability
+- NO macro data (GDP, CPI, UNRATE, FEDFUNDS)
 - NO ML predictions
 - NO Snowflake writes
 - NO Postgres writes
 
 S3 storage layout
 -----------------
-RAW DGS10 (single source of truth, immutable, append-only, partitioned by date):
-    s3://<bucket>/historical-bonds/raw/dgs10/
-        year=Y/month=MM/day=DD/run_id=<id>/data.parquet
+RAW (immutable, append-only, partitioned by date):
+    s3://<bucket>/historical-bonds/raw/
+        year=YYYY/month=MM/day=DD/run_id=<run_id>/data.parquet
 
     One file per market day per run_id.
-    Replay always reads the LATEST file for each date (by S3 LastModified).
-    No run_id lookup needed.  No separate dgs10_history layer.
-    Warm-up rows for rolling windows are reconstructed directly from these
-    partitions by reading dates before the processing window start.
+    Replay selects the latest file per date by S3 LastModified — no
+    run_id lookup is ever required.
 
-LAYER 2 FEATURES (versioned per run_id, partitioned by date):
+FEATURE LAYER (versioned per run_id, partitioned by date):
     s3://<bucket>/historical-bonds/features/
-        year=Y/month=MM/day=DD/run_id=<id>/data.parquet
+        year=YYYY/month=MM/day=DD/run_id=<run_id>/data.parquet
     s3://<bucket>/historical-bonds/features/latest.json
 
 ROLLING SERVING LAYER (mutable, last 30 market days):
     s3://<bucket>/historical-bonds/rolling/bonds_features_30d.parquet
 
-RUN METADATA (observability only — NOT used for replay resolution):
+RUN METADATA (observability only — never used for replay resolution):
     s3://<bucket>/historical-bonds/run_metadata/<run_id>.json
-
-REMOVED (replaced by raw/dgs10):
-    historical-bonds/raw/fred/           <- GONE
-    historical-bonds/raw/dgs10_history/  <- GONE
 
 Mode detection
 --------------
 Derived exclusively from function parameters — never from data columns.
     replay_from_raw=True          -> mode = "replay"
     start_date_override provided  -> mode = "backfill"
-    default                       -> mode = "incremental"
+    default (neither)             -> mode = "incremental"
 
 Mode behaviour
 --------------
 incremental:
-    - Watermark = max(date) from rolling parquet (or today-30d if absent)
-    - Fetch fresh FRED DGS10 and generate rows from watermark+1 -> today
-    - Write one raw DGS10 partition per market day under current run_id
-    - Load warm-up from raw DGS10 partitions before the window
-    - Write Layer 2 partitions + update rolling parquet
+    - Watermark = max(date) from rolling parquet; if absent, today - window_days
+    - Warm-up rows sourced from the rolling parquet tail
+    - Fetch fresh FRED DGS10 for watermark+1 -> today
+    - Write raw partitions, Layer 2 partitions, update rolling parquet
 
 backfill:
-    - Use start_date_override as window start
-    - Fetch fresh FRED DGS10 for the full window
-    - Write one raw DGS10 partition per market day under current run_id
-    - Load warm-up from raw DGS10 partitions before the window
-    - Write Layer 2 partitions + update rolling parquet (safe deduplication)
+    - start_date = start_date_override
+    - Warm-up rows sourced from the rolling parquet tail
+    - Fetch fresh FRED DGS10 for the full backfill window
+    - Write raw partitions, Layer 2 partitions, update rolling parquet
 
 replay:
-    - Load the LATEST raw DGS10 partition for each requested market day
-      (latest = highest S3 LastModified — same strategy as commodity pipeline)
-    - NO live FRED API calls — fully deterministic
-    - Load warm-up from raw DGS10 partitions before the window (same layer)
-    - Write a NEW Layer 2 partition under a new run_id
-    - Update rolling parquet (safe deduplication)
-    - Original raw partitions are never modified
-    - Missing date partitions are skipped with a warning, NOT a pipeline abort
-      (mirrors commodity pipeline behaviour exactly)
+    - Load the LATEST raw partition for each market day by S3 LastModified
+    - Warm-up reconstructed from raw partitions strictly before start_date
+    - NO FRED API calls — fully deterministic and reproducible
+    - Write a new Layer 2 partition under a new run_id
+    - Update rolling parquet with safe key-based deduplication
+    - Missing date partitions are logged and skipped — replay never aborts
+      solely because a subset of partitions is absent
 
 DGS10 warm-up
 -------------
-Rolling(20) for DGS10_ma requires 20 prior rows.  The pipeline:
-  1. Scans raw/dgs10 partitions for dates before start_date.
-  2. Loads the latest file per date, takes the last N rows.
-  3. Prepends them as explicit rows BEFORE the window spine.
-  4. Computes rolling(20) over the combined (warmup + window) series.
-  5. Strips warm-up rows before writing (build_dgs10_series does this).
-  This works for ALL modes — incremental, backfill, and replay.
-
-Bug fixes in this revision (vs prior version)
----------------------------------------------
-FIX 1  build_dgs10_series: warmup rows now prepended as actual spine rows
-       before rolling calculation so they genuinely contribute to DGS10_ma
-       and dgs10_anom.  Previously the spine was built from window dates only
-       and warmup values entered only via a left-merge, meaning rolling(20)
-       saw at most 1 "prior" row (the merged-in value) instead of N rows.
-
-FIX 2  Replay no longer aborts when some date partitions are missing.
-       Mirrors commodity pipeline: load all available dates, log missing
-       dates as warnings, continue processing on whatever data exists.
-
-FIX 3  combined_fred deduplication in build_dgs10_series changed to
-       keep="last" so new window observations win over warmup rows on
-       identical dates (e.g. today's date present in both).
-
-FIX 4  merge_macro_data changed from how="inner" to how="left" so bond
-       rows are never silently dropped due to macro coverage gaps.
-       Missing macro columns are filled with NaN and logged.
-
-FIX 5  load_dgs10_warmup lookback multiplier increased from 3x to 4x
-       (80 calendar days) to reliably cover any holiday cluster.
-
-FIX 6  _read_raw_dgs10_layer now deduplicates by date after concatenating
-       all partition frames, preventing duplicate date rows from flowing
-       into build_dgs10_series.
-
-FIX 7  update_rolling_layer: date column normalised to datetime64 on both
-       sides before concat+dedup so type mismatches do not silently produce
-       duplicate rows.
-
-FIX 8  STARTED metadata sentinel no longer crashes when start_str is empty;
-       the sentinel is now written after start_str is resolved.
-
-FIX 9  Market-holiday skip no longer fires send_critical_alert (INFO level
-       only, matching commodity pipeline behaviour).
+rolling(20) for DGS10_ma requires up to 20 prior market-day observations.
+The pipeline builds a combined spine of [warmup_dates + window_dates],
+computes rolling statistics over the full spine, then strips the warmup
+rows before writing.  This guarantees that the first rows of any window
+have the same DGS10_ma value regardless of mode.
 
 Airflow notes
 -------------
-- Entry point: update_bonds_pipeline(start_date_override, replay_from_raw)
-- Recommended: retries=2, retry_delay=timedelta(minutes=5)
-- max_active_runs=1 (S3 rolling write is not concurrent-safe)
-- DAG order: run_bonds_update >> run_bonds_processing
+- Entry point : update_bonds_pipeline(start_date_override, replay_from_raw)
+- Retries     : retries=2, retry_delay=timedelta(minutes=5)
+- Concurrency : max_active_runs=1  (rolling parquet write is not concurrent-safe)
+- DAG order   : run_bonds_update >> run_bonds_processing
 """
 
 import os
@@ -150,54 +101,50 @@ import pendulum
 import pandas_market_calendars as mcal
 
 # =============================================================
-# CONFIG  —  single source of truth.  No magic numbers in code.
+# CONFIG  —  single source of truth
 # =============================================================
 
 CONFIG: dict = {
     # FRED fetch
-    "max_retries":          3,
-    "retry_backoff_s":      5,         # seconds; multiplied by attempt number
+    "max_retries":     3,
+    "retry_backoff_s": 5,   # base seconds; multiplied by attempt index
 
     # DGS10 rolling warm-up
-    # FIX 5: lookback multiplier increased from 3 to 4 (80 cal-days)
-    # to reliably cover any holiday cluster when hunting for 20 market days.
-    "dgs10_history_rows":   20,        # rows loaded to warm rolling(20)
-    "dgs10_warmup_lookback_multiplier": 4,   # calendar-day multiplier
-    "dgs10_rolling_window": 20,        # window for DGS10_ma
+    "dgs10_history_rows":              20,  # market-day rows prepended before rolling
+    "dgs10_warmup_lookback_multiplier": 4,  # calendar-day multiplier: 4 * 20 = 80 days
+    "dgs10_rolling_window":            20,  # window size for DGS10_ma
 
     # Rolling serving layer
-    "window_days":          30,        # market days retained in rolling parquet
+    "window_days": 30,   # market days retained in bonds_features_30d.parquet
 
     # S3 bucket
     "s3_bucket": "yeeshu-bond-bucket",
 
-    # S3 reference file paths (at bucket root)
+    # S3 reference files
     "base_bond_key": "synthetic_bond.csv",
-    "macro_key":     "macro_data.csv",
 
-    # S3 partitioned path prefixes
-    # SINGLE raw DGS10 layer — replaces raw/fred + raw/dgs10_history
-    "raw_dgs10_prefix":    "historical-bonds/raw/dgs10/",
+    # S3 path prefixes
+    "raw_prefix":          "historical-bonds/raw/",
     "features_prefix":     "historical-bonds/features/",
     "rolling_key":         "historical-bonds/rolling/bonds_features_30d.parquet",
     "run_metadata_prefix": "historical-bonds/run_metadata/",
 
     # Data quality thresholds
-    "max_null_pct":       0.02,
-    "max_negative_pct":   0.01,
+    "max_null_pct":     0.02,
+    "max_negative_pct": 0.01,
 
-    # Anomaly thresholds
+    # Anomaly detection thresholds
     "dgs10_zscore_limit":  4.0,
     "spread_zscore_limit": 4.0,
 
-    # Lineage — bump transformation when feature engineering logic changes
+    # Lineage — increment transformation version when feature logic changes
     "pipeline_name":  "bonds_update_pipeline",
-    "data_source":    "fred+synthetic+macro",
-    "input_source":   "synthetic_bond+fred+macro",
+    "data_source":    "fred+synthetic",
+    "input_source":   "synthetic_bond+fred",
     "transformation": "bond_features_v1",
 }
 
-# Volatility mapping by credit rating — unchanged from original pipeline
+# Volatility basis points by credit rating, expressed as a decimal fraction
 VOL_MAP: dict[str, int] = {
     "AAA":  2,  "AA+":  3, "AA":  4, "A+":  5,
     "A":    6,  "A-":   8,
@@ -205,9 +152,8 @@ VOL_MAP: dict[str, int] = {
     "BB+":  20, "BB":  25, "B":   35, "CCC": 50,
 }
 
-# Layer 2 output columns — contract between first and second pipelines.
-# run_mode is written here for replay traceability. The second pipeline
-# will rename pipeline_* to source_* and add its own lineage columns.
+# Output column contract between this pipeline and the downstream processing
+# pipeline.  The downstream pipeline renames pipeline_* columns to source_*.
 LAYER2_OUTPUT_COLS: list[str] = [
     "bond_id", "ticker", "sector", "industry", "credit_rating",
     "coupon_rate", "issue_date", "maturity_date", "maturity_years",
@@ -216,17 +162,12 @@ LAYER2_OUTPUT_COLS: list[str] = [
     "bond_price", "yield_to_maturity", "implied_hazard",
     "implied_pd_annual", "implied_pd_multi_year", "implied_rating",
     "market_synthetic_score",
-    "issue_size",
-    "units_issued",
-    "units_outstanding",
-    "market_value",
-    "outstanding_pct",
+    "issue_size", "units_issued", "units_outstanding",
+    "market_value", "outstanding_pct",
     "DGS10", "DGS10_ma", "dgs10_anom", "fill_method_flag",
-    "gdp", "unrate", "fedfunds", "cpi",
-    # First pipeline lineage (second pipeline renames these to source_*)
     "pipeline_name", "pipeline_run_id", "data_source",
     "input_source", "transformation", "record_created_at",
-    "run_mode",   # informational; second pipeline knows which mode produced this
+    "run_mode",
 ]
 
 
@@ -235,210 +176,92 @@ LAYER2_OUTPUT_COLS: list[str] = [
 # =============================================================
 
 class BondPipelineError(Exception):
-    """Raised for unrecoverable first-pipeline failures."""
+    """Raised for unrecoverable pipeline failures."""
 
 
 class DataValidationError(Exception):
-    """Raised when data validation checks fail."""
+    """Raised when output data fails quality or schema checks."""
 
 
 # =============================================================
-# PRODUCTION-GRADE ALERTING (CRITICAL ONLY)
+# ALERTING
 # =============================================================
 
-def send_critical_alert(message: str, context: dict = None) -> None:
+def send_alert(message: str, level: str = "INFO", context: dict = None) -> None:
     """
-    Send CRITICAL alert to Slack only for unrecoverable pipeline failures.
+    Structured alert dispatcher.
 
-    Triggers for:
-    - FRED fetch failure (after all retries)
-    - S3 write failure for Layer 2 partitions or rolling parquet
-    - Data validation failure
-    - Any unhandled pipeline exception
+    Levels: INFO | WARNING | CRITICAL
 
-    Does NOT trigger for:
-    - Individual retry attempts (only on final exhaustion)
-    - Rolling parquet not existing on first run (expected initial state)
-    - Market holiday skips  (FIX 9: INFO-level only, not CRITICAL)
+    INFO and WARNING are written to stdout only.
+    CRITICAL additionally posts to the Slack webhook configured in the
+    SLACK_WEBHOOK_URL environment variable, if present.  Webhook failures
+    are non-fatal — the pipeline continues.
     """
     payload = {
-        "level":     "CRITICAL",
-        "pipeline":  CONFIG["pipeline_name"],
-        "message":   message,
-        "context":   context or {},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "level":    level,
+        "pipeline": CONFIG["pipeline_name"],
+        "message":  message,
+        "context":  context or {},
+        "ts":       datetime.now(timezone.utc).isoformat(),
     }
-    print(f"[CRITICAL] {message} | context={payload['context']}")
+    print(f"[{level}] {message} | context={json.dumps(payload['context'], default=str)}")
 
-    webhook = os.getenv("SLACK_WEBHOOK_URL")
-    if webhook:
-        try:
-            truncated = message[:500] + "..." if len(message) > 500 else message
-            run_id    = context.get("run_id", "unknown") if context else "unknown"
-            text = (
-                f"*[CRITICAL]* {CONFIG['pipeline_name']}\n"
-                f"{truncated}\n"
-                f"run_id: {run_id}"
-            )
-            requests.post(webhook, json={"text": text}, timeout=3)
-        except Exception as e:
-            print(f"[ALERT ERROR] Slack notification failed: {e}")
-
-
-def send_info_alert(message: str, context: dict = None) -> None:
-    """
-    Send INFO-level alert (stdout only; no Slack page).
-    Used for expected operational events like market-holiday skips
-    and missing-partition warnings during replay.
-    Matches commodity pipeline INFO-level alerting philosophy.
-    """
-    payload = {
-        "level":     "INFO",
-        "pipeline":  CONFIG["pipeline_name"],
-        "message":   message,
-        "context":   context or {},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    print(f"[INFO] {message} | context={payload['context']}")
-
-
-def send_warning_alert(message: str, context: dict = None) -> None:
-    """
-    Send WARNING-level alert (stdout + optional Slack).
-    Used for recoverable issues: missing replay partitions, macro merge
-    failures, partial warmup history, etc.
-    """
-    payload = {
-        "level":     "WARNING",
-        "pipeline":  CONFIG["pipeline_name"],
-        "message":   message,
-        "context":   context or {},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    print(f"[WARNING] {message} | context={payload['context']}")
-
-    webhook = os.getenv("SLACK_WEBHOOK_URL")
-    if webhook:
-        try:
-            text = (
-                f"*[WARNING]* {CONFIG['pipeline_name']}\n"
-                f"{message}\n"
-                f"context: {json.dumps(payload['context'], default=str)}"
-            )
-            requests.post(webhook, json={"text": text}, timeout=3)
-        except Exception as e:
-            print(f"[ALERT ERROR] Slack notification failed: {e}")
+    if level == "CRITICAL":
+        webhook = os.getenv("SLACK_WEBHOOK_URL")
+        if webhook:
+            try:
+                run_id    = (context or {}).get("run_id", "unknown")
+                truncated = message[:500] + "..." if len(message) > 500 else message
+                requests.post(
+                    webhook,
+                    json={"text": f"*[CRITICAL]* {CONFIG['pipeline_name']}\n{truncated}\nrun_id: {run_id}"},
+                    timeout=3,
+                )
+            except Exception as exc:
+                print(f"[ALERT ERROR] Slack notification failed: {exc}")
 
 
 # =============================================================
-# MARKET DATE HELPERS
+# MARKET CALENDAR HELPERS
 # =============================================================
 
 NYSE_CALENDAR = mcal.get_calendar("NYSE")
 
 
 def get_valid_market_days(start_date, end_date) -> set:
-    """Return the set of NYSE trading dates (as date objects) in [start_date, end_date]."""
+    """Return NYSE trading dates (as Python date objects) in [start_date, end_date]."""
     return set(
         pd.to_datetime(
-            NYSE_CALENDAR.valid_days(
-                start_date=start_date,
-                end_date=end_date,
-            )
+            NYSE_CALENDAR.valid_days(start_date=start_date, end_date=end_date)
         ).date
     )
 
 
 def is_market_holiday(check_date: date_type) -> bool:
-    """
-    Return True if check_date is NOT a valid NYSE trading day.
-    Covers weekends, national holidays, and exchange holidays.
-    """
-    schedule = NYSE_CALENDAR.schedule(
-        start_date=check_date,
-        end_date=check_date,
-    )
-    return schedule.empty
+    """Return True when check_date is not a valid NYSE trading session."""
+    return NYSE_CALENDAR.schedule(start_date=check_date, end_date=check_date).empty
 
 
 def get_market_end_date() -> date_type:
     """
-    Determine the appropriate end date for market data processing.
+    Return the appropriate processing end date relative to NYSE market close.
 
-    - Before 4:00 PM ET  -> use yesterday
-    - At or after 4:00 PM ET -> use today
-
-    This prevents pulling incomplete intraday data before market close.
+    Before 4:00 PM ET  — returns yesterday (avoid pulling incomplete session data).
+    At or after 4:00 PM ET — returns today.
     """
     eastern      = pendulum.timezone("America/New_York")
     now_et       = datetime.now(eastern)
-    current_date = now_et.date()
     market_close = datetime.strptime("16:00", "%H:%M").time()
 
     if now_et.time() < market_close:
-        end_date = current_date - timedelta(days=1)
-        print(f"  [MARKET] Before 4:00 PM ET — using yesterday as end_date: {end_date}")
+        end_date = now_et.date() - timedelta(days=1)
+        print(f"  [MARKET] Before 4:00 PM ET — end_date={end_date}")
     else:
-        end_date = current_date
-        print(f"  [MARKET] After 4:00 PM ET — using today as end_date: {end_date}")
+        end_date = now_et.date()
+        print(f"  [MARKET] After 4:00 PM ET — end_date={end_date}")
 
     return end_date
-
-
-# =============================================================
-# RETRY WITH EXPONENTIAL BACKOFF
-# =============================================================
-
-def retry_with_backoff(
-    func,
-    retries=3,
-    backoff_factor=2,
-    exceptions=(Exception,),
-    critical_name=None,
-    run_id=None,
-):
-    """
-    Retry a callable with exponential backoff.
-
-    Sends CRITICAL alert only when all retries are exhausted AND
-    critical_name is provided. Individual retry attempts log to stdout only.
-
-    Args:
-        func:           Zero-argument callable to retry.
-        retries:        Maximum number of retry attempts (not counting first).
-        backoff_factor: Wait = backoff_factor ** attempt.
-        exceptions:     Exception types to catch and retry.
-        critical_name:  Human-readable operation name for alert messages.
-                        Pass None for non-critical / soft-fail operations.
-        run_id:         Pipeline run identifier for alert context.
-
-    Returns:
-        Return value of func() on success.
-
-    Raises:
-        Last caught exception when all retries are exhausted.
-    """
-    last_exception = None
-
-    for attempt in range(retries + 1):
-        try:
-            return func()
-        except exceptions as e:
-            last_exception = e
-            if attempt < retries:
-                wait_time = backoff_factor ** attempt
-                print(f"  Retry {attempt + 1}/{retries} after {wait_time}s: {e}")
-                time.sleep(wait_time)
-            else:
-                print(f"  All {retries} retries exhausted: {e}")
-
-    if critical_name:
-        send_critical_alert(
-            f"{critical_name} failed after {retries} retries",
-            context={"run_id": run_id, "error": str(last_exception)},
-        )
-
-    raise last_exception
 
 
 # =============================================================
@@ -446,7 +269,7 @@ def retry_with_backoff(
 # =============================================================
 
 def utc_now() -> datetime:
-    """Current datetime as a tz-aware UTC object."""
+    """Current datetime, tz-aware UTC."""
     return datetime.now(timezone.utc)
 
 
@@ -456,16 +279,71 @@ def today_utc() -> date_type:
 
 
 # =============================================================
-# S3 HELPERS  —  basic I/O
+# RETRY WITH EXPONENTIAL BACKOFF
+# =============================================================
+
+def retry_with_backoff(
+    func,
+    retries:        int   = 3,
+    backoff_factor: int   = 2,
+    exceptions:     tuple = (Exception,),
+    critical_name:  str   = None,
+    run_id:         str   = None,
+):
+    """
+    Execute func() with exponential backoff on failure.
+
+    A CRITICAL alert is sent only when all retries are exhausted and
+    critical_name is provided.  Individual retry attempts are logged to
+    stdout only so on-call noise is minimised.
+
+    Args:
+        func:           Zero-argument callable to execute.
+        retries:        Maximum number of additional attempts after the first.
+        backoff_factor: Wait seconds = backoff_factor ** attempt_index.
+        exceptions:     Exception types that trigger a retry.
+        critical_name:  Operation label used in the final-failure alert.
+        run_id:         Pipeline run identifier for alert context.
+
+    Returns:
+        The return value of func() on success.
+
+    Raises:
+        The last caught exception after all retries are exhausted.
+    """
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            return func()
+        except exceptions as exc:
+            last_exc = exc
+            if attempt < retries:
+                wait = backoff_factor ** attempt
+                print(f"  Retry {attempt + 1}/{retries} in {wait}s: {exc}")
+                time.sleep(wait)
+            else:
+                print(f"  All {retries} retries exhausted: {exc}")
+
+    if critical_name:
+        send_alert(
+            f"{critical_name} failed after {retries} retries",
+            level="CRITICAL",
+            context={"run_id": run_id, "error": str(last_exc)},
+        )
+    raise last_exc
+
+
+# =============================================================
+# S3 HELPERS — basic I/O
 # =============================================================
 
 def get_s3():
-    """Return a boto3 S3 client per-call to avoid stale sessions."""
+    """Return a boto3 S3 client.  Called per-operation to avoid stale sessions."""
     return boto3.client("s3")
 
 
 def s3_key_exists(bucket: str, key: str) -> bool:
-    """Return True if the S3 key exists, False otherwise."""
+    """Return True if the S3 key exists."""
     try:
         get_s3().head_object(Bucket=bucket, Key=key)
         return True
@@ -474,7 +352,7 @@ def s3_key_exists(bucket: str, key: str) -> bool:
 
 
 def read_csv_from_s3(bucket: str, key: str) -> pd.DataFrame:
-    """Read a CSV from S3. Raises BondPipelineError on failure."""
+    """Read a CSV file from S3. Raises BondPipelineError on failure."""
     try:
         print(f"  [S3 READ CSV]     s3://{bucket}/{key}")
         obj = get_s3().get_object(Bucket=bucket, Key=key)
@@ -484,7 +362,7 @@ def read_csv_from_s3(bucket: str, key: str) -> pd.DataFrame:
 
 
 def read_parquet_from_s3(bucket: str, key: str) -> pd.DataFrame:
-    """Read a Parquet from S3. Raises BondPipelineError on failure."""
+    """Read a Parquet file from S3. Raises BondPipelineError on failure."""
     try:
         print(f"  [S3 READ PARQUET] s3://{bucket}/{key}")
         obj = get_s3().get_object(Bucket=bucket, Key=key)
@@ -506,22 +384,18 @@ def write_parquet_to_s3(df: pd.DataFrame, bucket: str, key: str) -> None:
 
 
 # =============================================================
-# S3 PARTITION PATH HELPERS  —  deterministic key construction
+# S3 PARTITION PATH BUILDERS
 # =============================================================
 
-def _raw_dgs10_key(target_date, run_id: str) -> str:
+def _raw_partition_key(target_date, run_id: str) -> str:
     """
-    Construct the S3 key for a raw DGS10 partition.
+    Return the S3 key for a raw bond data partition.
 
-    Partitioned by market date, versioned by run_id.
-    One file per market day per pipeline run.
-
-    Example:
-        historical-bonds/raw/dgs10/year=2024/month=01/day=15/run_id=<id>/data.parquet
+    Layout:  historical-bonds/raw/year=YYYY/month=MM/day=DD/run_id=<id>/data.parquet
     """
     d = pd.Timestamp(target_date)
     return (
-        f"{CONFIG['raw_dgs10_prefix']}"
+        f"{CONFIG['raw_prefix']}"
         f"year={d.year}/month={d.month:02d}/day={d.day:02d}/"
         f"run_id={run_id}/data.parquet"
     )
@@ -529,12 +403,9 @@ def _raw_dgs10_key(target_date, run_id: str) -> str:
 
 def _feature_partition_key(target_date, run_id: str) -> str:
     """
-    Construct the S3 key for a Layer 2 feature partition.
+    Return the S3 key for a Layer 2 feature partition.
 
-    One file per date per run_id.
-
-    Example:
-        historical-bonds/features/year=2024/month=01/day=15/run_id=<id>/data.parquet
+    Layout:  historical-bonds/features/year=YYYY/month=MM/day=DD/run_id=<id>/data.parquet
     """
     d = pd.Timestamp(target_date)
     return (
@@ -545,49 +416,45 @@ def _feature_partition_key(target_date, run_id: str) -> str:
 
 
 # =============================================================
-# RAW DGS10 LAYER HELPERS
+# RAW LAYER PARTITION DISCOVERY
 # =============================================================
 
-def _get_latest_dgs10_keys(
+def _get_latest_raw_keys(
     bucket:     str,
     start_date: date_type,
     end_date:   date_type,
 ) -> dict[date_type, str]:
     """
-    Scan raw/dgs10 partitions and return the most recent S3 key for each
-    market day in [start_date, end_date].
+    Scan raw partitions under historical-bonds/raw/ and return the most
+    recently written S3 key for each NYSE market day in [start_date, end_date].
 
-    Selection rule: highest S3 LastModified timestamp within each date
-    prefix — identical to the commodity pipeline's get_latest_raw_keys().
-    No run_id lookup required.
+    Selection rule: highest S3 LastModified within each date prefix.
+    No run_id lookup is performed.  Dates with no partition are omitted
+    from the result; callers decide whether absence is acceptable.
 
     Args:
         bucket:     S3 bucket name.
-        start_date: Inclusive window start.
-        end_date:   Inclusive window end.
+        start_date: Inclusive scan start.
+        end_date:   Inclusive scan end.
 
     Returns:
-        Dict mapping date -> S3 key (latest file for that date).
-        Dates with no partition at all are omitted (not an error).
+        Dict mapping date -> latest S3 key for that date.
     """
     s3_client = get_s3()
     paginator = s3_client.get_paginator("list_objects_v2")
     result:   dict[date_type, str] = {}
 
-    valid_days = get_valid_market_days(start_date, end_date)
-
-    for market_day in valid_days:
-        date_prefix = (
-            f"{CONFIG['raw_dgs10_prefix']}"
+    for market_day in get_valid_market_days(start_date, end_date):
+        prefix = (
+            f"{CONFIG['raw_prefix']}"
             f"year={market_day.year}/"
             f"month={market_day.month:02d}/"
             f"day={market_day.day:02d}/"
         )
-
         latest_key:      str | None      = None
         latest_modified: datetime | None = None
 
-        for page in paginator.paginate(Bucket=bucket, Prefix=date_prefix):
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
             for obj in page.get("Contents", []):
                 key = obj["Key"]
                 if not key.endswith("data.parquet"):
@@ -602,60 +469,56 @@ def _get_latest_dgs10_keys(
     return result
 
 
-def _read_raw_dgs10_layer(
+def _read_raw_layer(
     bucket:     str,
     start_date: date_type,
     end_date:   date_type,
 ) -> pd.DataFrame:
     """
-    Load the latest raw DGS10 file for every market day in [start_date, end_date].
+    Load the latest raw partition for every NYSE market day in
+    [start_date, end_date].
 
-    Used by:
-    - Replay mode    : loads the window to be reprocessed.
-    - All modes      : loads warm-up history (dates before the window start).
+    Called by:
+    - Replay mode  : loads the window to be reprocessed.
+    - All modes    : loads DGS10 warm-up history before the window start.
 
-    Missing date partitions are logged as INFO and skipped — NOT an error.
-    This mirrors commodity pipeline behaviour exactly.
+    Missing date partitions are logged as WARNING and skipped; processing
+    continues on whatever data is available.  The caller receives an empty
+    DataFrame only when no partitions exist at all for the requested range.
 
-    FIX 6: After concatenating all partition frames, deduplicates by date
-    (keep="last") to prevent duplicate rows when a single FRED response
-    covered multiple days and was stored in one partition file.
+    After loading, the result is deduplicated by date (keep="last") so that
+    a partition file storing a multi-day FRED response contributes at most
+    one row per date into downstream calculations.
 
-    Returns a DataFrame with columns [date, DGS10], sorted ascending.
-    Returns an empty DataFrame if no partitions exist.
+    Returns:
+        DataFrame with at minimum columns [date, DGS10], sorted ascending.
+        Returns an empty DataFrame when no partitions are found.
     """
     valid_days  = get_valid_market_days(start_date, end_date)
-    latest_keys = _get_latest_dgs10_keys(bucket, start_date, end_date)
+    latest_keys = _get_latest_raw_keys(bucket, start_date, end_date)
 
-    # Log any market days that have no partition (not an error)
-    missing_days = sorted(d for d in valid_days if d not in latest_keys)
-    if missing_days:
-        send_info_alert(
-            f"[RAW DGS10] {len(missing_days)} market day(s) have no raw partition "
-            f"in [{start_date}, {end_date}] — skipped.",
-            context={"missing_days": [str(d) for d in missing_days[:10]]},
+    missing = sorted(d for d in valid_days if d not in latest_keys)
+    if missing:
+        send_alert(
+            f"{len(missing)} market day(s) have no raw partition in "
+            f"[{start_date}, {end_date}] — those dates are skipped.",
+            level="WARNING",
+            context={"missing_dates": [str(d) for d in missing[:10]]},
         )
 
     if not latest_keys:
-        print(
-            f"  [RAW DGS10] No partitions found for window "
-            f"[{start_date}, {end_date}]."
-        )
+        print(f"  [RAW] No partitions found for [{start_date}, {end_date}].")
         return pd.DataFrame(columns=["date", "DGS10"])
 
     frames: list[pd.DataFrame] = []
     for market_day, key in sorted(latest_keys.items()):
-        print(f"  [RAW DGS10] Loading latest for {market_day}: {key}")
-        part = read_parquet_from_s3(bucket, key)
-        frames.append(part)
+        print(f"  [RAW] Loading latest partition for {market_day}: {key}")
+        frames.append(read_parquet_from_s3(bucket, key))
 
     combined          = pd.concat(frames, ignore_index=True)
     combined["date"]  = pd.to_datetime(combined["date"])
     combined["DGS10"] = pd.to_numeric(combined["DGS10"], errors="coerce")
 
-    # FIX 6: deduplicate by date — keep last row per date so that if a
-    # partition file stored a multi-day FRED response, only one row per
-    # date survives into warmup and window computations.
     combined = (
         combined
         .sort_values("date")
@@ -664,58 +527,48 @@ def _read_raw_dgs10_layer(
     )
 
     print(
-        f"  [RAW DGS10] {len(latest_keys)} partition(s) loaded, "
+        f"  [RAW] {len(latest_keys)} partition(s) loaded — "
         f"{len(combined):,} unique date rows."
     )
     return combined
 
 
-def _write_raw_dgs10_partitions(
+def _write_raw_partitions(
     dgs10_df: pd.DataFrame,
     bucket:   str,
     run_id:   str,
 ) -> dict[str, str]:
     """
-    Write one raw DGS10 parquet per market day under the current run_id.
+    Write one raw parquet per market day under the current run_id.
 
-    Called after every successful live FRED fetch (incremental and backfill).
-    Creates the immutable audit trail that replay reads later.
+    Called after every successful live FRED fetch (incremental and backfill
+    modes only).  Each file becomes part of the immutable audit trail that
+    replay reads in future runs.
 
     Args:
         dgs10_df: DataFrame with columns [date, DGS10].
-                  May contain non-market-day rows; they are written as-is
-                  since FRED occasionally reports on non-NYSE days (e.g.
-                  Columbus Day). Replay reads by market-day prefix so these
-                  rows are harmlessly stored but never loaded by replay.
         bucket:   S3 bucket name.
         run_id:   Current pipeline run identifier.
 
     Returns:
-        Dict mapping date_str -> S3 key for every partition written.
+        Dict mapping date string -> S3 key for each partition written.
     """
     df          = dgs10_df.copy()
     df["date"]  = pd.to_datetime(df["date"])
     df["_date"] = df["date"].dt.date
-    partition_log: dict[str, str] = {}
+    written:    dict[str, str] = {}
 
     for market_day, group in df.groupby("_date"):
-        key = _raw_dgs10_key(market_day, run_id)
-        write_parquet_to_s3(
-            group.drop(columns=["_date"], errors="ignore"),
-            bucket,
-            key,
-        )
-        partition_log[str(market_day)] = key
+        key = _raw_partition_key(market_day, run_id)
+        write_parquet_to_s3(group.drop(columns=["_date"], errors="ignore"), bucket, key)
+        written[str(market_day)] = key
 
-    print(
-        f"  [RAW DGS10] Wrote {len(partition_log)} raw partition(s) "
-        f"for run_id={run_id}."
-    )
-    return partition_log
+    print(f"  [RAW] Wrote {len(written)} partition(s) for run_id={run_id}.")
+    return written
 
 
 # =============================================================
-# RUN METADATA  —  observability only (NOT used for replay)
+# RUN METADATA — observability only
 # =============================================================
 
 def _save_run_metadata(
@@ -728,26 +581,24 @@ def _save_run_metadata(
     run_ts:            datetime,
     airflow_metadata:  dict  = None,
     status:            str   = "SUCCESS",
-    processing_time_s: float = 0,
+    processing_time_s: float = 0.0,
     partition_count:   int   = 0,
     rolling_updated:   bool  = False,
     error:             str   = "",
 ) -> None:
     """
-    Persist run metadata to S3 for observability and audit trail.
+    Persist run summary JSON to S3 for observability and audit purposes.
 
-    This file is written on every run regardless of outcome.  It is
-    intentionally NOT used for replay data resolution — replay reads
-    raw DGS10 partitions directly using LastModified ordering, so there
-    is no dependency on this metadata at replay time.
+    This file is written on every run — including failures — and is never
+    read back by the pipeline itself.  Replay resolution uses raw partition
+    LastModified ordering, not metadata files.
 
-    Non-fatal on failure — never blocks the pipeline.
+    Non-fatal: a write failure here is logged and ignored.
 
-    start_date accepts None (used for the STARTED sentinel written before
-    the window is fully resolved) or any date-like value.
+    start_date may be None when this function is called before the
+    processing window has been fully resolved.
     """
     key = f"{CONFIG['run_metadata_prefix']}{run_id}.json"
-
     payload = {
         "run_id":            run_id,
         "status":            status,
@@ -762,40 +613,41 @@ def _save_run_metadata(
         "error":             error,
         "airflow":           airflow_metadata,
     }
-
     try:
         get_s3().put_object(
             Bucket=bucket,
             Key=key,
             Body=json.dumps(payload, indent=2, default=str).encode("utf-8"),
         )
-        print(f"  [METADATA] {status} metadata written: s3://{bucket}/{key}")
+        print(f"  [METADATA] {status} written: s3://{bucket}/{key}")
     except Exception as exc:
-        print(f"  [METADATA][WARN] Could not save metadata: {exc}")
+        print(f"  [METADATA][WARN] Could not write metadata: {exc}")
 
 
 # =============================================================
-# STAGE 1 — load_base_bond_data
+# STAGE 1 — Base bond universe
 # =============================================================
 
 def load_base_bond_data(bucket: str) -> pd.DataFrame:
     """
-    Load the static synthetic bond universe from S3.
-    This is the base dataset expanded to one row per market day.
+    Load the static synthetic bond universe CSV from S3.
+
+    This file defines the set of bonds whose daily rows are generated by
+    generate_daily_rows().  It is loaded once per pipeline run.
+
+    Raises:
+        DataValidationError: when the file is empty.
+        BondPipelineError:   when the S3 read fails.
     """
     base = read_csv_from_s3(bucket, CONFIG["base_bond_key"])
-
     if base.empty:
-        raise DataValidationError(
-            "Base bond file is empty — cannot generate daily rows."
-        )
-
-    print(f"  [STAGE 1] Loaded {len(base):,} base bond records.")
+        raise DataValidationError("Base bond file is empty — cannot generate daily rows.")
+    print(f"  [STAGE 1] Loaded {len(base):,} bond universe records.")
     return base
 
 
 # =============================================================
-# STAGE 2 — generate_daily_rows
+# STAGE 2 — Daily row expansion
 # =============================================================
 
 def generate_daily_rows(
@@ -804,13 +656,24 @@ def generate_daily_rows(
     end_date:   str,
 ) -> pd.DataFrame:
     """
-    Expand the base bond universe to one row per bond per NYSE market day.
-    Excludes weekends AND NYSE holidays.
+    Cross-join the bond universe with every NYSE trading day in
+    [start_date, end_date] to produce one row per bond per market day.
+
+    Weekend and NYSE holiday dates are excluded.  The vol column is derived
+    from the credit_rating -> VOL_MAP lookup, scaled to a decimal fraction.
+
+    Args:
+        base:       Bond universe DataFrame from load_base_bond_data().
+        start_date: Inclusive window start as "YYYY-MM-DD".
+        end_date:   Inclusive window end as "YYYY-MM-DD".
+
+    Returns:
+        DataFrame with one row per (bond, market_day).  Empty when no
+        trading days exist in the window.
     """
     valid_days = get_valid_market_days(start_date, end_date)
-
     if not valid_days:
-        print(f"  [STAGE 2] No market days in range [{start_date}, {end_date}] — returning empty.")
+        print(f"  [STAGE 2] No market days in [{start_date}, {end_date}] — returning empty.")
         return pd.DataFrame()
 
     dates  = pd.DatetimeIndex(sorted(valid_days))
@@ -825,55 +688,105 @@ def generate_daily_rows(
 
 
 # =============================================================
-# STAGE 3 — load_dgs10_warmup
+# STAGE 3 — DGS10 warm-up history
 # =============================================================
 
-def load_dgs10_warmup(
+def load_dgs10_warmup_from_rolling(
+    rolling_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """
+    Extract the last N DGS10 observations from the rolling serving parquet
+    for use as rolling-window warm-up in incremental and backfill modes.
+
+    Rolling parquet is the warm-up source for incremental and backfill because
+    it is always available, already deduplicated, and already sorted.  Raw
+    partition scanning is reserved for replay where the rolling parquet must
+    not be consulted.
+
+    Args:
+        rolling_df: The current rolling parquet DataFrame, or None on first run.
+
+    Returns:
+        DataFrame with columns [date, DGS10], containing at most
+        dgs10_history_rows rows sorted ascending.
+        Returns an empty DataFrame when rolling_df is None or has no DGS10 data.
+    """
+    n = CONFIG["dgs10_history_rows"]
+
+    if rolling_df is None or rolling_df.empty:
+        send_alert(
+            "Rolling parquet unavailable — proceeding without DGS10 warm-up. "
+            "DGS10_ma will use min_periods=1 for the first window.",
+            level="WARNING",
+        )
+        return pd.DataFrame(columns=["date", "DGS10"])
+
+    if "DGS10" not in rolling_df.columns:
+        send_alert(
+            "Rolling parquet does not contain a DGS10 column — "
+            "warm-up skipped.",
+            level="WARNING",
+        )
+        return pd.DataFrame(columns=["date", "DGS10"])
+
+    hist = (
+        rolling_df[["date", "DGS10"]]
+        .copy()
+        .assign(date=lambda df: pd.to_datetime(df["date"]))
+        .drop_duplicates(subset=["date"])
+        .sort_values("date")
+        .tail(n)
+        .reset_index(drop=True)
+    )
+
+    if hist.empty:
+        return pd.DataFrame(columns=["date", "DGS10"])
+
+    print(
+        f"  [STAGE 3] {len(hist)} DGS10 warm-up row(s) from rolling parquet "
+        f"({hist['date'].min().date()} -> {hist['date'].max().date()})."
+    )
+    return hist
+
+
+def load_dgs10_warmup_from_raw(
     bucket:     str,
     start_date: date_type,
 ) -> pd.DataFrame:
     """
-    Load the last N DGS10 rows strictly before start_date for rolling warm-up.
+    Load the last N DGS10 observations strictly before start_date from raw
+    partitions for use as rolling-window warm-up in replay mode.
 
-    Source: raw/dgs10 partitions — the SINGLE source of truth for ALL modes.
-
-    Strategy:
-      1. Look back up to (N * MULTIPLIER) calendar days before start_date.
-         FIX 5: multiplier is now 4 (was 3) — 80 calendar days to find
-         20 market days, safely covering any extended holiday cluster.
-      2. Load the latest partition for each found date.
-      3. Return the last N rows sorted ascending.
-
-    Empty DataFrame is valid (rolling computation uses min_periods=1).
+    Scans up to (dgs10_history_rows * dgs10_warmup_lookback_multiplier)
+    calendar days before start_date, which is 80 days by default.  This
+    window safely covers any extended holiday cluster while remaining bounded.
 
     Args:
         bucket:     S3 bucket name.
-        start_date: Processing window start — warm-up rows must be BEFORE this.
+        start_date: Processing window start — warm-up rows must precede this.
 
     Returns:
-        DataFrame with columns [date, DGS10] sorted ascending.
+        DataFrame with columns [date, DGS10] sorted ascending, at most N rows.
+        Returns an empty DataFrame when no prior raw partitions exist.
     """
     n            = CONFIG["dgs10_history_rows"]
     multiplier   = CONFIG["dgs10_warmup_lookback_multiplier"]
-    lookback     = n * multiplier
     warmup_end   = pd.Timestamp(start_date).date() - timedelta(days=1)
-    warmup_start = warmup_end - timedelta(days=lookback)
+    warmup_start = warmup_end - timedelta(days=n * multiplier)
 
-    warmup_df = _read_raw_dgs10_layer(bucket, warmup_start, warmup_end)
+    raw_df = _read_raw_layer(bucket, warmup_start, warmup_end)
 
-    if warmup_df.empty:
-        send_warning_alert(
-            "[STAGE 3] No DGS10 warm-up history found in raw layer — "
-            "proceeding without warm-up. DGS10_ma will use min_periods=1.",
-            context={"start_date": str(start_date), "lookback_days": lookback},
+    if raw_df.empty:
+        send_alert(
+            "No DGS10 raw partitions found before the replay window — "
+            "proceeding without warm-up.  DGS10_ma will use min_periods=1.",
+            level="WARNING",
+            context={"start_date": str(start_date), "lookback_days": n * multiplier},
         )
         return pd.DataFrame(columns=["date", "DGS10"])
 
-    # Keep only [date, DGS10], deduplicate, take last N rows.
-    # _read_raw_dgs10_layer already deduplicates by date (FIX 6) but we
-    # sort+tail here for safety.
     hist = (
-        warmup_df[["date", "DGS10"]]
+        raw_df[["date", "DGS10"]]
         .drop_duplicates(subset=["date"])
         .sort_values("date")
         .tail(n)
@@ -881,14 +794,14 @@ def load_dgs10_warmup(
     )
 
     print(
-        f"  [STAGE 3] Loaded {len(hist)} DGS10 warm-up row(s) from raw layer "
+        f"  [STAGE 3] {len(hist)} DGS10 warm-up row(s) from raw partitions "
         f"({hist['date'].min().date()} -> {hist['date'].max().date()})."
     )
     return hist
 
 
 # =============================================================
-# STAGE 4 — fetch_dgs10_from_fred  (incremental / backfill only)
+# STAGE 4 — FRED fetch  (incremental and backfill only)
 # =============================================================
 
 def fetch_dgs10_from_fred(
@@ -898,31 +811,37 @@ def fetch_dgs10_from_fred(
     bucket:     str,
 ) -> pd.DataFrame:
     """
-    Fetch DGS10 (10-year Treasury yield) from the live FRED API.
+    Fetch the DGS10 (10-year Treasury yield) time series from the live FRED
+    API for the requested date range and immediately persist the result as
+    immutable raw partitions.
 
-    Called ONLY for incremental and backfill modes.
-    Replay mode reads directly from the raw DGS10 layer — this function
-    is never called during replay.
+    Called only during incremental and backfill runs.  Replay mode reads
+    existing raw partitions and never invokes this function.
 
-    After a successful fetch:
-      - Writes one raw DGS10 parquet per market day under run_id.
-      - Returns the full fetched DataFrame for the window.
+    When FRED returns no observations for the range, one empty partition is
+    written per expected market day so that replay has a consistent partition
+    structure to scan.
 
-    If FRED returns empty data for the range, writes empty partitions
-    so replay has a consistent partition structure.
+    Args:
+        start_date: Inclusive fetch start as "YYYY-MM-DD".
+        end_date:   Inclusive fetch end as "YYYY-MM-DD".
+        run_id:     Current pipeline run identifier, used for partition naming.
+        bucket:     S3 bucket name.
 
-    Raises BondPipelineError if the FRED fetch fails after all retries.
+    Returns:
+        DataFrame with columns [date, DGS10] covering the fetched range.
+
+    Raises:
+        BondPipelineError: when FRED_API_KEY is not set or all fetch
+                           attempts are exhausted.
     """
     fred_api_key = os.getenv("FRED_API_KEY")
     if not fred_api_key:
-        send_critical_alert(
-            "FRED_API_KEY environment variable not set",
-            context={"run_id": run_id},
-        )
+        send_alert("FRED_API_KEY environment variable is not set.", level="CRITICAL",
+                   context={"run_id": run_id})
         raise BondPipelineError("FRED_API_KEY not configured.")
 
     last_exc = None
-
     for attempt in range(1, CONFIG["max_retries"] + 1):
         try:
             fred   = Fred(api_key=fred_api_key)
@@ -933,56 +852,39 @@ def fetch_dgs10_from_fred(
             )
 
             if series is None or series.empty:
-                # No data for this range — write empty partition per market day
-                # so replay has a consistent (empty) partition to load.
                 empty_df   = pd.DataFrame(columns=["date", "DGS10"])
                 valid_days = get_valid_market_days(start_date, end_date)
                 for market_day in valid_days:
-                    write_parquet_to_s3(
-                        empty_df,
-                        bucket,
-                        _raw_dgs10_key(market_day, run_id),
-                    )
+                    write_parquet_to_s3(empty_df, bucket,
+                                        _raw_partition_key(market_day, run_id))
                 print(
-                    f"  [STAGE 4] FRED returned empty series — "
-                    f"wrote {len(valid_days)} empty raw partition(s)."
+                    f"  [STAGE 4] FRED returned no observations — "
+                    f"wrote {len(valid_days)} empty partition(s)."
                 )
                 return empty_df
 
-            df          = (
-                series.to_frame("DGS10")
-                .reset_index()
-                .rename(columns={"index": "date"})
-            )
+            df          = series.to_frame("DGS10").reset_index().rename(columns={"index": "date"})
             df["date"]  = pd.to_datetime(df["date"])
             df["DGS10"] = pd.to_numeric(df["DGS10"], errors="coerce")
 
-            # Write one raw partition per market day
-            written = _write_raw_dgs10_partitions(df, bucket, run_id)
-
+            written = _write_raw_partitions(df, bucket, run_id)
             print(
-                f"  [STAGE 4] Fetched {len(df)} DGS10 observation(s) from FRED "
-                f"and wrote {len(written)} raw partition(s)."
+                f"  [STAGE 4] Fetched {len(df)} observation(s) from FRED, "
+                f"wrote {len(written)} raw partition(s)."
             )
             return df
 
         except Exception as exc:
             last_exc = exc
-            print(
-                f"  [STAGE 4] FRED fetch attempt {attempt}/{CONFIG['max_retries']} "
-                f"failed: {exc}"
-            )
+            print(f"  [STAGE 4] FRED attempt {attempt}/{CONFIG['max_retries']} failed: {exc}")
             if attempt < CONFIG["max_retries"]:
                 time.sleep(CONFIG["retry_backoff_s"] * attempt)
 
-    send_critical_alert(
-        f"FRED DGS10 fetch failed after {CONFIG['max_retries']} attempts",
-        context={
-            "run_id":     run_id,
-            "start_date": start_date,
-            "end_date":   end_date,
-            "error":      str(last_exc),
-        },
+    send_alert(
+        f"FRED DGS10 fetch failed after {CONFIG['max_retries']} attempts.",
+        level="CRITICAL",
+        context={"run_id": run_id, "start": start_date, "end": end_date,
+                 "error": str(last_exc)},
     )
     raise BondPipelineError(
         f"FRED DGS10 fetch failed after {CONFIG['max_retries']} attempts: {last_exc}"
@@ -990,7 +892,7 @@ def fetch_dgs10_from_fred(
 
 
 # =============================================================
-# STAGE 5 — build_dgs10_series
+# STAGE 5 — DGS10 series construction
 # =============================================================
 
 def build_dgs10_series(
@@ -1000,302 +902,249 @@ def build_dgs10_series(
     end_date:    str,
 ) -> pd.DataFrame:
     """
-    Combine warm-up history with new DGS10 data, align to NYSE market days,
-    apply forward/backward fill with fill_method_flag tracking, and compute
-    DGS10_ma (rolling 20-day mean) and dgs10_anom.
+    Produce a complete, gap-filled DGS10 time series aligned to NYSE market
+    days for [start_date, end_date], with rolling statistics attached.
 
-    Uses NYSE calendar to exclude market holidays as well as weekends,
-    matching the bond row generation logic exactly.
+    Approach
+    --------
+    A combined spine is built from two sets of dates:
 
-    fill_method_flag values:
-      "REAL"            — FRED observed value for that market day
-      "FORWARD_FILLED"  — no FRED value; filled forward from prior observation
-      "BACKWARD_FILLED" — no FRED value and no prior; filled backward
+    1. Warm-up dates  — the dates present in history_df (strictly before
+       start_date).  These rows participate in the rolling calculation but
+       are stripped from the return value so they never appear in output.
 
-    Returns DataFrame with columns:
-        date, DGS10, fill_method_flag, DGS10_ma, dgs10_anom
-    (new-date rows only — warm-up history rows are stripped after rolling)
+    2. Window dates   — all valid NYSE market days in [start_date, end_date].
+       These are the rows returned to the caller.
 
-    -----------------------------------------------------------------------
-    FIX 1 — WARMUP ROWS NOW ACTUALLY CONTRIBUTE TO ROLLING CALCULATIONS
-    -----------------------------------------------------------------------
-    Previous bug: the spine was built from valid_market_days (window dates
-    only).  history_df values entered only via a left-merge, giving rolling(20)
-    at most 1 "prior" row per window date instead of N warmup rows.  This
-    caused DGS10_ma to be wrong for the first ~20 days of every window and
-    made incremental != replay for those rows.
+    FRED observations from history_df and new_fred_df are merged onto this
+    combined spine.  When the same date appears in both, the new observation
+    (from new_fred_df) takes precedence (keep="last" after sort).
 
-    Fix: build a combined spine that includes BOTH the warmup rows (dates
-    strictly before start_date) AND the window rows (dates >= start_date),
-    then compute rolling over the full combined spine, then strip the warmup
-    rows before returning.  This is identical to the commodity pipeline's
-    buffer_days approach in generate_commodity_features().
+    Gap filling
+    -----------
+    After merging, any market day with no FRED observation is filled:
+      - Forward fill first (carry the most recent prior observation).
+      - Backward fill for any remaining leading nulls.
+      - Whole-spine null fallback: use the last known value from history_df,
+        or 0.0 if history is also empty.
 
-    FIX 3 — DEDUPLICATION KEEPS LAST (NEW WINDOW WINS OVER WARMUP)
-    -----------------------------------------------------------------------
-    If the same date appears in both history_df and new_fred_df (e.g. today
-    is at the boundary), keep="last" ensures the new observation wins.
-    -----------------------------------------------------------------------
+    Each row is assigned a fill_method_flag:
+      "REAL"            — FRED observation present for that market day.
+      "FORWARD_FILLED"  — no direct observation; filled from a prior date.
+      "BACKWARD_FILLED" — no prior observation available; filled backward.
+
+    Rolling statistics
+    ------------------
+    DGS10_ma   = rolling(20).mean() with min_periods=1.
+    dgs10_anom = DGS10 - DGS10_ma.
+
+    Both are computed over the full combined spine (warm-up + window) so that
+    the first window rows benefit from up to 20 prior observations.
+
+    Args:
+        history_df:  Warm-up DataFrame with columns [date, DGS10].
+        new_fred_df: New observations with columns [date, DGS10].
+        start_date:  Inclusive window start as "YYYY-MM-DD".
+        end_date:    Inclusive window end as "YYYY-MM-DD".
+
+    Returns:
+        DataFrame with columns [date, DGS10, fill_method_flag, DGS10_ma,
+        dgs10_anom] covering only the window dates.
     """
     valid_window_days = get_valid_market_days(start_date, end_date)
+    empty_result = pd.DataFrame(
+        columns=["date", "DGS10", "fill_method_flag", "DGS10_ma", "dgs10_anom"]
+    )
 
     if not valid_window_days:
-        print(f"  [STAGE 5] No market days in range [{start_date}, {end_date}] — returning empty.")
-        return pd.DataFrame(columns=["date", "DGS10", "fill_method_flag", "DGS10_ma", "dgs10_anom"])
+        print(f"  [STAGE 5] No market days in [{start_date}, {end_date}] — returning empty.")
+        return empty_result
 
     start_ts = pd.Timestamp(start_date)
 
-    # ── Step 1: Build complete observation set (warmup + window) ────────
-    # FIX 3: keep="last" so new window observations beat warmup rows on
-    # duplicate dates (boundary case).
-    combined_obs = pd.DataFrame(columns=["date", "DGS10"])
-
+    # ── Build unified observation set ───────────────────────────────────
+    # new_fred_df is appended after history_df so keep="last" retains the
+    # fresh observation when both cover the same date.
+    parts = []
     if not history_df.empty and "DGS10" in history_df.columns:
-        combined_obs = pd.concat(
-            [combined_obs, history_df[["date", "DGS10"]]],
-            ignore_index=True,
-        )
-
+        parts.append(history_df[["date", "DGS10"]])
     if not new_fred_df.empty and "DGS10" in new_fred_df.columns:
-        combined_obs = pd.concat(
-            [combined_obs, new_fred_df[["date", "DGS10"]]],
-            ignore_index=True,
-        )
+        parts.append(new_fred_df[["date", "DGS10"]])
 
-    combined_obs["date"]  = pd.to_datetime(combined_obs["date"])
-    combined_obs["DGS10"] = pd.to_numeric(combined_obs["DGS10"], errors="coerce")
+    if parts:
+        obs = pd.concat(parts, ignore_index=True)
+    else:
+        obs = pd.DataFrame(columns=["date", "DGS10"])
 
-    # FIX 3: keep="last" — new window data wins over warmup on same date
-    combined_obs = (
-        combined_obs
-        .sort_values("date")
-        .drop_duplicates(subset=["date"], keep="last")
-        .reset_index(drop=True)
+    obs["date"]  = pd.to_datetime(obs["date"])
+    obs["DGS10"] = pd.to_numeric(obs["DGS10"], errors="coerce")
+    obs = (
+        obs.sort_values("date")
+           .drop_duplicates(subset=["date"], keep="last")
+           .reset_index(drop=True)
     )
 
-    # ── Step 2: Build the spine covering warmup dates + window dates ─────
-    # Warmup dates: all dates in history_df that are before start_ts
+    # ── Build combined spine: warmup dates + window dates ───────────────
     warmup_dates: list[pd.Timestamp] = []
     if not history_df.empty:
-        history_df_copy = history_df.copy()
-        history_df_copy["date"] = pd.to_datetime(history_df_copy["date"])
-        warmup_dates = sorted(
-            history_df_copy.loc[history_df_copy["date"] < start_ts, "date"].tolist()
-        )
+        h = history_df.copy()
+        h["date"] = pd.to_datetime(h["date"])
+        warmup_dates = sorted(h.loc[h["date"] < start_ts, "date"].tolist())
 
-    # Window dates: the valid NYSE market days for the requested window
     window_dates = sorted(pd.Timestamp(d) for d in valid_window_days)
+    all_dates    = sorted(set(warmup_dates) | set(window_dates))
 
-    # Combined spine: warmup first, then window, no duplicates
-    all_spine_dates = sorted(set(warmup_dates) | set(window_dates))
-    spine = pd.DataFrame({"date": pd.DatetimeIndex(all_spine_dates)})
+    spine = pd.DataFrame({"date": pd.DatetimeIndex(all_dates)})
+    spine = spine.merge(obs, on="date", how="left")
 
-    # ── Step 3: Merge observations onto the full spine ───────────────────
-    spine = spine.merge(combined_obs, on="date", how="left")
+    # ── Gap filling with fill_method_flag ────────────────────────────────
+    spine["fill_method_flag"] = np.where(spine["DGS10"].notna(), "REAL", pd.NA)
 
-    # ── Step 4: Fill method tracking ────────────────────────────────────
-    real_mask                    = spine["DGS10"].notna()
-    spine["fill_method_flag"]    = np.where(real_mask, "REAL", pd.NA)
-
-    # Forward fill
-    spine["_dgs10_before_ffill"] = spine["DGS10"].copy()
-    spine["DGS10"]               = spine["DGS10"].ffill()
-    ffill_mask = spine["_dgs10_before_ffill"].isna() & spine["DGS10"].notna()
+    spine["_before_ffill"] = spine["DGS10"].copy()
+    spine["DGS10"]         = spine["DGS10"].ffill()
+    ffill_mask = spine["_before_ffill"].isna() & spine["DGS10"].notna()
     spine.loc[ffill_mask, "fill_method_flag"] = "FORWARD_FILLED"
 
-    # Backward fill
-    spine["_dgs10_before_bfill"] = spine["DGS10"].copy()
-    spine["DGS10"]               = spine["DGS10"].bfill()
-    bfill_mask = spine["_dgs10_before_bfill"].isna() & spine["DGS10"].notna()
+    spine["_before_bfill"] = spine["DGS10"].copy()
+    spine["DGS10"]         = spine["DGS10"].bfill()
+    bfill_mask = spine["_before_bfill"].isna() & spine["DGS10"].notna()
     spine.loc[bfill_mask, "fill_method_flag"] = "BACKWARD_FILLED"
 
-    # Final fill flag cleanup
     spine["fill_method_flag"] = spine["fill_method_flag"].fillna("BACKWARD_FILLED")
-    spine = spine.drop(columns=["_dgs10_before_ffill", "_dgs10_before_bfill"])
+    spine = spine.drop(columns=["_before_ffill", "_before_bfill"])
 
-    # ── Step 5: Ultimate fallback — entire spine still null ──────────────
+    # ── Whole-spine null fallback ────────────────────────────────────────
     if spine["DGS10"].isna().all():
         if not history_df.empty and history_df["DGS10"].notna().any():
-            last_known = history_df["DGS10"].dropna().iloc[-1]
-            spine["DGS10"]            = last_known
+            last_val = history_df["DGS10"].dropna().iloc[-1]
+            spine["DGS10"]            = last_val
             spine["fill_method_flag"] = "BACKWARD_FILLED"
-            print(f"  [STAGE 5] No DGS10 in window — using last known value {last_known}")
+            print(f"  [STAGE 5] Entire window has no FRED data — using last known value {last_val}.")
         else:
             spine["DGS10"]            = 0.0
             spine["fill_method_flag"] = "BACKWARD_FILLED"
-            print("  [STAGE 5] No DGS10 in history — using 0 as fallback")
+            print("  [STAGE 5] No FRED history available — DGS10 set to 0.0 as emergency fallback.")
 
-    # ── Step 6: Rolling features over the FULL spine (warmup + window) ───
-    # FIX 1: rolling(20) is now computed over the complete spine which
-    # includes the warmup rows, so the first window date benefits from up
-    # to N prior rows.  This makes DGS10_ma identical across incremental,
-    # backfill, and replay for the same date range.
-    spine["DGS10_ma"]   = spine["DGS10"].rolling(
-        CONFIG["dgs10_rolling_window"], min_periods=1
-    ).mean()
+    # ── Rolling statistics over full spine (warmup + window) ────────────
+    spine["DGS10_ma"]   = spine["DGS10"].rolling(CONFIG["dgs10_rolling_window"], min_periods=1).mean()
     spine["dgs10_anom"] = spine["DGS10"] - spine["DGS10_ma"]
 
-    # ── Step 7: Strip warmup rows — return only the requested window ─────
-    spine = spine[spine["date"] >= start_ts].reset_index(drop=True)
+    # ── Strip warm-up rows, return window only ───────────────────────────
+    result = spine[spine["date"] >= start_ts].reset_index(drop=True)
 
-    real_count  = int((spine["fill_method_flag"] == "REAL").sum())
-    ffill_count = int((spine["fill_method_flag"] == "FORWARD_FILLED").sum())
-    bfill_count = int((spine["fill_method_flag"] == "BACKWARD_FILLED").sum())
-
+    real  = int((result["fill_method_flag"] == "REAL").sum())
+    fwd   = int((result["fill_method_flag"] == "FORWARD_FILLED").sum())
+    bwd   = int((result["fill_method_flag"] == "BACKWARD_FILLED").sum())
     print(
-        f"  [STAGE 5] DGS10 series built — "
-        f"REAL={real_count}, FORWARD_FILLED={ffill_count}, "
-        f"BACKWARD_FILLED={bfill_count}  ({len(spine)} total rows in window)."
+        f"  [STAGE 5] DGS10 series built: REAL={real}, "
+        f"FORWARD_FILLED={fwd}, BACKWARD_FILLED={bwd} "
+        f"({len(result)} window rows)."
     )
-    return spine
+    return result
 
 
 # =============================================================
-# STAGE 6 — validate_data
+# STAGE 6 — Data validation
 # =============================================================
 
 def validate_data(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Hard data-quality validation.
+    Apply hard data-quality rules to the output DataFrame.
 
-    Removes invalid rows. Critical threshold breaches raise DataValidationError.
+    Rows with null values in required columns or structurally invalid numeric
+    values are dropped.  When the proportion of bad rows exceeds the configured
+    thresholds, DataValidationError is raised so the pipeline fails loudly
+    rather than writing corrupt feature partitions.
+
+    Args:
+        df: Output DataFrame prior to writing.
 
     Returns:
-        Cleaned DataFrame (bad rows are discarded, not returned).
+        Cleaned DataFrame with invalid rows removed.
+
+    Raises:
+        DataValidationError: when missing-column or threshold checks fail.
     """
     original_rows = len(df)
-
     required_cols = ["bond_id", "ticker", "date", "bond_price", "DGS10"]
 
     missing_cols = [c for c in required_cols if c not in df.columns]
     if missing_cols:
         raise DataValidationError(f"Missing required columns: {missing_cols}")
 
-    # Null filtering
-    null_mask = df[required_cols].isnull().any(axis=1)
-    null_rows = int(null_mask.sum())
-    null_pct  = null_rows / len(df) if len(df) else 0
+    null_mask    = df[required_cols].isnull().any(axis=1)
+    null_pct     = null_mask.sum() / len(df) if len(df) else 0.0
 
-    # Invalid numeric filtering
     invalid_mask = (
         (df["coupon_rate"]    < 0) |
         (df["maturity_years"] < 0) |
         (df["bond_price"]     <= 0) |
         (df["DGS10"]          <= 0)
     )
-    invalid_rows = int(invalid_mask.sum())
-    invalid_pct  = invalid_rows / len(df) if len(df) else 0
+    invalid_pct = invalid_mask.sum() / len(df) if len(df) else 0.0
 
-    # Threshold enforcement
     if null_pct > CONFIG["max_null_pct"]:
-        raise DataValidationError(f"Null percentage too high: {null_pct:.2%}")
-
+        raise DataValidationError(
+            f"Null rate {null_pct:.2%} exceeds threshold {CONFIG['max_null_pct']:.2%}."
+        )
     if invalid_pct > CONFIG["max_negative_pct"]:
-        raise DataValidationError(f"Invalid numeric percentage too high: {invalid_pct:.2%}")
+        raise DataValidationError(
+            f"Invalid numeric rate {invalid_pct:.2%} exceeds threshold "
+            f"{CONFIG['max_negative_pct']:.2%}."
+        )
 
-    # Remove bad rows
-    bad_mask = null_mask | invalid_mask
-    cleaned  = df[~bad_mask].copy().reset_index(drop=True)
-
+    cleaned = df[~(null_mask | invalid_mask)].copy().reset_index(drop=True)
     print(
-        f"  [VALIDATE] "
-        f"rows_before={original_rows:,} "
-        f"rows_after={len(cleaned):,} "
-        f"rows_dropped={bad_mask.sum():,}"
+        f"  [VALIDATE] rows_before={original_rows:,}  "
+        f"rows_after={len(cleaned):,}  "
+        f"rows_dropped={(original_rows - len(cleaned)):,}"
     )
     return cleaned
 
 
 # =============================================================
-# STAGE 7 — detect_anomalies
+# STAGE 7 — Anomaly detection
 # =============================================================
 
 def detect_anomalies(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Soft statistical anomaly detection.
-    Flags suspicious values but does NOT fail the pipeline.
+    Flag statistically unusual values without dropping rows.
+
+    Two soft anomaly flags are computed per row:
+      dgs10_anomaly_flag  — DGS10 z-score exceeds dgs10_zscore_limit.
+      spread_anomaly_flag — credit_spread z-score exceeds spread_zscore_limit.
+
+    These flags are informational.  The pipeline always continues regardless
+    of flag counts.  Downstream consumers decide whether to exclude flagged rows.
     """
     df = df.copy()
 
-    # DGS10 anomaly
     dgs10_std = df["DGS10"].std()
     if dgs10_std and not pd.isna(dgs10_std):
         dgs10_z = (df["DGS10"] - df["DGS10"].mean()) / dgs10_std
-        df["dgs10_anomaly_flag"] = (dgs10_z.abs() > CONFIG["dgs10_zscore_limit"])
+        df["dgs10_anomaly_flag"] = dgs10_z.abs() > CONFIG["dgs10_zscore_limit"]
     else:
         df["dgs10_anomaly_flag"] = False
 
-    # Credit spread anomaly
-    spread_std = df["credit_spread"].std() if "credit_spread" in df.columns else None
-    if spread_std and not pd.isna(spread_std):
-        spread_z = (df["credit_spread"] - df["credit_spread"].mean()) / spread_std
-        df["spread_anomaly_flag"] = (spread_z.abs() > CONFIG["spread_zscore_limit"])
+    if "credit_spread" in df.columns:
+        spread_std = df["credit_spread"].std()
+        if spread_std and not pd.isna(spread_std):
+            spread_z = (df["credit_spread"] - df["credit_spread"].mean()) / spread_std
+            df["spread_anomaly_flag"] = spread_z.abs() > CONFIG["spread_zscore_limit"]
+        else:
+            df["spread_anomaly_flag"] = False
     else:
         df["spread_anomaly_flag"] = False
 
-    dgs10_flags  = int(df["dgs10_anomaly_flag"].sum())
-    spread_flags = int(df["spread_anomaly_flag"].sum())
-
     print(
-        f"  [ANOMALIES] "
-        f"dgs10_flags={dgs10_flags:,} "
-        f"spread_flags={spread_flags:,}"
+        f"  [ANOMALY] dgs10_flags={int(df['dgs10_anomaly_flag'].sum()):,}  "
+        f"spread_flags={int(df['spread_anomaly_flag'].sum()):,}"
     )
     return df
 
 
 # =============================================================
-# STAGE 8 — merge_macro_data
-# =============================================================
-
-def merge_macro_data(daily: pd.DataFrame, bucket: str) -> pd.DataFrame:
-    """
-    Merge macro features (GDP, UNRATE, FEDFUNDS, CPI) by month-year key.
-
-    FIX 4: Changed from how="inner" to how="left" so bond rows are NEVER
-    silently dropped due to macro coverage gaps.  Rows without a matching
-    macro month receive NaN for macro columns and a warning is issued.
-    This matches the commodity pipeline's non-fatal merge pattern.
-    """
-    try:
-        macro          = read_csv_from_s3(bucket, CONFIG["macro_key"])
-        macro          = macro.copy()
-        macro["date"]  = pd.to_datetime(macro["date"])
-        macro["mm_yy"] = macro["date"].dt.strftime("%m-%y")
-
-        daily          = daily.copy()
-        daily["mm_yy"] = pd.to_datetime(daily["date"]).dt.strftime("%m-%y")
-
-        # FIX 4: how="left" instead of how="inner" — never drop bond rows
-        merged = daily.merge(
-            macro.drop(columns=["date"]),
-            on="mm_yy",
-            how="left",
-        ).drop(columns=["mm_yy"])
-
-        # Warn if macro was missing for any bond rows
-        macro_cols = [c for c in ["gdp", "unrate", "fedfunds", "cpi"] if c in merged.columns]
-        if macro_cols:
-            null_macro = merged[macro_cols].isnull().any(axis=1).sum()
-            if null_macro > 0:
-                send_warning_alert(
-                    f"[STAGE 8] {null_macro:,} bond row(s) have no matching macro month — "
-                    "macro columns are NaN for those rows.",
-                    context={"null_macro_rows": int(null_macro)},
-                )
-
-        print(f"  [STAGE 8] Macro merge (left): {len(daily):,} bond rows -> {len(merged):,} rows.")
-        return merged
-
-    except Exception as exc:
-        send_warning_alert(
-            f"[STAGE 8] Macro merge failed — proceeding without macro: {exc}"
-        )
-        return daily.drop(columns=["mm_yy"], errors="ignore")
-
-
-# =============================================================
-# LAYER 2 — write_layer2_features
+# LAYER 2 — Feature partition writer
 # =============================================================
 
 def write_layer2_features(
@@ -1304,71 +1153,75 @@ def write_layer2_features(
     run_id: str,
 ) -> dict:
     """
-    Write one Parquet per calendar date to the Layer 2 feature store.
-    Also updates features/latest.json pointer.
+    Write one Parquet file per calendar date to the Layer 2 feature store,
+    versioned under the current run_id.  Also updates the features/latest.json
+    pointer so downstream consumers can discover the most recent run.
+
+    Args:
+        df:     Output DataFrame; must contain a date column.
+        bucket: S3 bucket name.
+        run_id: Current pipeline run identifier.
+
+    Returns:
+        Dict mapping date string -> {"key": s3_key, "rows": row_count}.
     """
     df_copy           = df.copy()
     df_copy["_date_"] = pd.to_datetime(df_copy["date"]).dt.date
     partition_log     = {}
 
     for date_val, group in df_copy.groupby("_date_"):
-        clean_group = group.drop(columns=["_date_"])
-        key         = _feature_partition_key(date_val, run_id)
-        write_parquet_to_s3(clean_group, bucket, key)
-        partition_log[str(date_val)] = {"key": key, "rows": len(clean_group)}
+        key = _feature_partition_key(date_val, run_id)
+        write_parquet_to_s3(group.drop(columns=["_date_"]), bucket, key)
+        partition_log[str(date_val)] = {"key": key, "rows": len(group)}
 
-    # Update latest.json pointer
-    latest_key     = f"{CONFIG['features_prefix']}latest.json"
-    latest_payload = {
-        "run_id":          run_id,
-        "updated_at":      utc_now().isoformat(),
-        "feature_version": "v1",
-        "schema_version":  "1.0",
-        "dates_written":   list(partition_log.keys()),
-    }
+    latest_key = f"{CONFIG['features_prefix']}latest.json"
     try:
         get_s3().put_object(
             Bucket=bucket,
             Key=latest_key,
-            Body=json.dumps(latest_payload, default=str, indent=2),
+            Body=json.dumps(
+                {
+                    "run_id":          run_id,
+                    "updated_at":      utc_now().isoformat(),
+                    "feature_version": "v1",
+                    "schema_version":  "1.0",
+                    "dates_written":   list(partition_log.keys()),
+                },
+                default=str,
+                indent=2,
+            ),
         )
-        print(f"  [LAYER 2] Updated latest.json: {latest_key}")
+        print(f"  [LAYER 2] Updated latest.json: s3://{bucket}/{latest_key}")
     except Exception as exc:
-        print(f"  [LAYER 2][WARN] Could not write latest.json: {exc}")
+        print(f"  [LAYER 2][WARN] Could not update latest.json: {exc}")
 
-    print(
-        f"  [LAYER 2] Written {len(partition_log)} date partition(s) "
-        f"for run_id={run_id}."
-    )
+    print(f"  [LAYER 2] {len(partition_log)} partition(s) written for run_id={run_id}.")
     return partition_log
 
 
 # =============================================================
-# ROLLING LAYER — load + update
+# ROLLING LAYER — load and update
 # =============================================================
 
 def load_rolling_layer(bucket: str) -> pd.DataFrame | None:
     """
-    Load the current 30-day rolling serving parquet.
+    Load the 30-day rolling serving parquet from S3.
 
-    Returns None if the file does not exist (expected on first ever run).
-    Raises BondPipelineError if the key exists but cannot be read.
+    Returns None when the file does not yet exist (expected on the first
+    pipeline run).  Raises BondPipelineError when the key exists but cannot
+    be read.  The date column is normalised to datetime64 on load.
     """
     key = CONFIG["rolling_key"]
     if not s3_key_exists(bucket, key):
-        print(
-            f"  [ROLLING] Rolling parquet not found: s3://{bucket}/{key} "
-            "(expected on first run)."
-        )
+        print(f"  [ROLLING] Rolling parquet not found at s3://{bucket}/{key} "
+              "(expected on first run).")
         return None
 
     df         = read_parquet_from_s3(bucket, key)
-    # FIX 7: normalise date to datetime64 immediately on load so downstream
-    # comparisons are always type-consistent.
     df["date"] = pd.to_datetime(df["date"])
     print(
-        f"  [ROLLING] Loaded {len(df):,} rows from rolling parquet "
-        f"(date range: {df['date'].min().date()} -> {df['date'].max().date()})."
+        f"  [ROLLING] Loaded {len(df):,} rows "
+        f"({df['date'].min().date()} -> {df['date'].max().date()})."
     )
     return df
 
@@ -1380,19 +1233,28 @@ def update_rolling_layer(
     window_days:    int = 30,
 ) -> pd.DataFrame:
     """
-    Merge new features into the rolling serving parquet.
+    Merge new feature rows into the rolling serving parquet and trim to the
+    last window_days NYSE trading days.
 
     Merge semantics:
-    - New rows take precedence over old rows for the same (bond_id, date).
-    - Keeps only the last N NYSE market days.
-    - Safe for replay and backfill — dedup is key-based, not positional.
+    - When the same (bond_id, date) appears in both old and new data,
+      the new row takes precedence (keep="last" after sort+concat).
+    - Window trimming is based on NYSE trading days only; calendar weekends
+      and exchange holidays are not counted toward the window.
 
-    FIX 7: Both sides are normalised to datetime64 before concat+dedup to
-    prevent silent type-mismatch duplicates when one side has Python date
-    objects and the other has datetime64.
+    Both sides are normalised to datetime64 before concat to prevent silent
+    type-mismatch duplicates when one side carries Python date objects.
+
+    Args:
+        new_features:   Feature DataFrame from the current run.
+        old_rolling_df: Existing rolling parquet, or None on first run.
+        bucket:         S3 bucket name.
+        window_days:    Number of NYSE market days to retain.
+
+    Returns:
+        The updated rolling DataFrame after writing to S3.
     """
-    # FIX 7: normalise date columns on both sides before any operation
-    new_df = new_features.copy()
+    new_df         = new_features.copy()
     new_df["date"] = pd.to_datetime(new_df["date"])
 
     if old_rolling_df is not None and not old_rolling_df.empty:
@@ -1400,11 +1262,9 @@ def update_rolling_layer(
         old_df["date"] = pd.to_datetime(old_df["date"])
         combined       = pd.concat([old_df, new_df], ignore_index=True)
     else:
-        combined = new_df
+        combined = new_df.copy()
 
     combined["date"] = pd.to_datetime(combined["date"])
-
-    # Deduplicate — new run takes precedence (new rows were appended last)
     combined = (
         combined
         .sort_values(["bond_id", "date"])
@@ -1412,26 +1272,26 @@ def update_rolling_layer(
         .reset_index(drop=True)
     )
 
-    # Keep last N market days (NYSE trading days only)
-    unique_dates      = combined["date"].drop_duplicates().sort_values()
-    market_day_dates  = [
+    # Retain only the last window_days NYSE trading days
+    unique_dates     = combined["date"].drop_duplicates().sort_values()
+    market_days      = [
         d for d in unique_dates
         if not is_market_holiday(d.date() if hasattr(d, "date") else d)
     ]
-    last_market_dates = pd.Series(market_day_dates).tail(window_days)
-    rolling           = combined[combined["date"].isin(last_market_dates)]
-    rolling           = rolling.sort_values(["bond_id", "date"]).reset_index(drop=True)
+    tail_dates = pd.Series(market_days).tail(window_days)
+    rolling    = combined[combined["date"].isin(tail_dates)]
+    rolling    = rolling.sort_values(["bond_id", "date"]).reset_index(drop=True)
 
     write_parquet_to_s3(rolling, bucket, CONFIG["rolling_key"])
     print(
-        f"  [ROLLING] Updated rolling layer: {len(rolling):,} rows "
-        f"(market_days_retained={len(last_market_dates)})."
+        f"  [ROLLING] Updated: {len(rolling):,} rows, "
+        f"{len(tail_dates)} market days retained."
     )
     return rolling
 
 
 # =============================================================
-# LINEAGE — first pipeline metadata stamp
+# LINEAGE — pipeline metadata stamp
 # =============================================================
 
 def _add_pipeline_metadata(
@@ -1441,11 +1301,14 @@ def _add_pipeline_metadata(
     mode:   str,
 ) -> pd.DataFrame:
     """
-    Stamp every output row with first-pipeline lineage.
+    Stamp every output row with first-pipeline lineage columns.
 
-    These columns are renamed to source_* by the second pipeline so
-    both pipeline lineage sets coexist in the final Snowflake/Postgres output.
-    run_mode is informational for Layer 2 consumers.
+    The downstream processing pipeline renames these pipeline_* columns
+    to source_* so that both pipeline lineage sets coexist in the final
+    output without collision.
+
+    run_mode carries the execution mode string so downstream consumers can
+    distinguish live-ingested rows from replayed rows.
     """
     df = df.copy()
     df["pipeline_name"]     = CONFIG["pipeline_name"]
@@ -1459,7 +1322,7 @@ def _add_pipeline_metadata(
 
 
 # =============================================================
-# MAIN PIPELINE  —  update_bonds_pipeline  (FIRST PIPELINE)
+# MAIN PIPELINE — update_bonds_pipeline
 # =============================================================
 
 def update_bonds_pipeline(
@@ -1468,61 +1331,58 @@ def update_bonds_pipeline(
     airflow_metadata:    dict = None,
 ) -> str:
     """
-    FIRST PIPELINE — Bond ingestion and feature engineering.
+    First pipeline entry point: bond ingestion and feature engineering.
 
-    Mode detection (derived from parameters ONLY — never from data columns):
-    ┌──────────────────────────────────┬──────────────┐
-    │ Condition                        │ mode         │
-    ├──────────────────────────────────┼──────────────┤
-    │ replay_from_raw = True           │ "replay"     │
-    │ start_date_override provided     │ "backfill"   │
-    │ default (neither)                │ "incremental"│
-    └──────────────────────────────────┴──────────────┘
+    Mode selection (derived from parameters only — never from data):
+    ┌────────────────────────────────────┬──────────────┐
+    │ Condition                          │ mode         │
+    ├────────────────────────────────────┼──────────────┤
+    │ replay_from_raw = True             │ "replay"     │
+    │ start_date_override provided       │ "backfill"   │
+    │ neither                            │ "incremental"│
+    └────────────────────────────────────┴──────────────┘
 
-    Raw DGS10 layer:
-        historical-bonds/raw/dgs10/year=Y/month=MM/day=DD/run_id=<id>/data.parquet
-        One file per market day per run_id.
-        Incremental + backfill: write after every successful FRED fetch.
-        Replay: read latest file per date (by S3 LastModified) — no run_id lookup.
-        Warm-up: read dates before start_date from the same layer, all modes.
+    Incremental and backfill:
+    - Warm-up sourced from the rolling parquet tail.
+    - New DGS10 data fetched from FRED and written as raw partitions.
+    - Layer 2 partitions and rolling parquet updated.
 
-    Replay missing-partition behaviour (FIX 2):
-        If some market-day partitions are absent in the raw DGS10 layer,
-        replay loads all available dates, logs a WARNING for each missing
-        date, and continues processing.  It does NOT abort.  This mirrors
-        the commodity pipeline exactly.  Replay only aborts if ZERO
-        partitions are found for the entire requested window.
+    Replay:
+    - Warm-up and window data sourced exclusively from raw partitions.
+    - Latest raw partition per date selected by S3 LastModified — no
+      run_id lookup.
+    - Missing date partitions are logged and skipped; replay never aborts
+      unless the entire requested window has zero raw partitions.
+    - Layer 2 partitions written under a new run_id.
+    - Rolling parquet updated with safe key-based deduplication.
 
-    Outputs (S3 only — NO Snowflake or Postgres writes):
-    - Raw DGS10 partitions     (incremental / backfill only)
-    - Layer 2 feature partitions (one per date per run_id)
-    - Updated 30-day rolling serving parquet
-    - Run metadata JSON (observability only)
+    Window start resolution (incremental):
+    - If the rolling parquet exists: start = max(date) in rolling parquet.
+    - If the rolling parquet does not exist:
+      start = today - timedelta(days=window_days).
 
     Args:
-        start_date_override: "YYYY-MM-DD" string. Required for replay mode.
-                             If provided without replay_from_raw=True -> backfill.
-        replay_from_raw:     True -> replay mode. Reads raw DGS10 partitions
-                             instead of calling FRED — deterministic.
-        airflow_metadata:    Airflow execution context passed for observability.
+        start_date_override: "YYYY-MM-DD" start for backfill or replay.
+                             Required when replay_from_raw=True.
+        replay_from_raw:     When True, reads raw partitions instead of FRED.
+        airflow_metadata:    Airflow execution context for observability.
 
     Returns:
-        str: Status string for Airflow XCom
-             ("SKIPPED_MARKET_HOLIDAY" | "ALREADY_CURRENT" | "NO_NEW_ROWS" |
-              "SUCCESS_<n>_ROWS")
+        Status string for Airflow XCom:
+            "ALREADY_CURRENT"  — rolling parquet already covers today.
+            "NO_NEW_ROWS"      — window contains no NYSE trading days.
+            "SUCCESS_<n>_ROWS" — pipeline completed; n feature rows written.
 
     Raises:
-        BondPipelineError:   For unrecoverable pipeline failures.
-        DataValidationError: For output data contract violations.
+        BondPipelineError:   Unrecoverable infrastructure failure.
+        DataValidationError: Output data fails quality or schema checks.
     """
     pipeline_start = time.time()
     run_ts         = utc_now()
     today          = today_utc()
     bucket         = CONFIG["s3_bucket"]
 
-    # ─────────────────────────────────────────────────────────
-    # MODE DETECTION — single, explicit decision
-    # ─────────────────────────────────────────────────────────
+    # ── Mode resolution ──────────────────────────────────────────────────
     if replay_from_raw:
         mode = "replay"
     elif start_date_override:
@@ -1535,73 +1395,47 @@ def update_bonds_pipeline(
 
     end_date = get_market_end_date()
 
-    # FIX 9: Market holiday skip uses INFO-level alert, not CRITICAL.
-    # A closed market is a normal operational event, not a pipeline failure.
-    if is_market_holiday(end_date):
-        run_id = f"skipped_{run_ts.strftime('%Y%m%d_%H%M%S')}"
-        msg    = f"NYSE closed on {end_date} (holiday/weekend). Skipping pipeline."
-        print(f"  [MARKET CLOSED] {msg}")
-        send_info_alert(msg, context={"run_id": run_id, "date": str(end_date)})
-        _save_run_metadata(
-            bucket=bucket, run_id=run_id, mode="skipped",
-            start_date=end_date, end_date=end_date, nrows=0,
-            run_ts=run_ts, airflow_metadata=airflow_metadata,
-            status="SKIPPED", error="market_holiday",
-        )
-        return "SKIPPED_MARKET_HOLIDAY"
-
     print(f"\n{'=' * 66}")
-    print(f"  BOND UPDATE PIPELINE (FIRST) START")
+    print(f"  BOND UPDATE PIPELINE START")
     print(f"  mode                : {mode}")
     print(f"  start_date_override : {start_date_override}")
     print(f"  replay_from_raw     : {replay_from_raw}")
     print(f"  end_date            : {end_date}")
     print(f"{'=' * 66}\n")
 
-    # run_id initialised here so it is always available in the except block.
     run_id    = f"run_{run_ts.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-    start_str = ""   # resolved in STEP 2; guarded in except block
+    start_str = ""   # resolved in STEP 2; used in the except block
 
     try:
-        # ══════════════════════════════════════════════════════════════
-        # STEP 1 — Load rolling layer (watermark source for incremental)
-        # Non-critical: None is acceptable on first ever run.
-        # ══════════════════════════════════════════════════════════════
-        print("  [STEP 1] Loading rolling layer...")
+        # ── STEP 1 : Load rolling layer ──────────────────────────────────
+        print("  [STEP 1] Loading rolling serving layer...")
         old_rolling_df = load_rolling_layer(bucket)
 
-        # ══════════════════════════════════════════════════════════════
-        # STEP 2 — Determine processing window
-        # ══════════════════════════════════════════════════════════════
-        print("\n  [STEP 2] Determining processing window...")
+        # ── STEP 2 : Resolve processing window ──────────────────────────
+        print("\n  [STEP 2] Resolving processing window...")
 
         if mode in ("replay", "backfill"):
             start_date = pd.Timestamp(start_date_override).date()
-            print(
-                f"  [{mode.upper()}] Processing window: "
-                f"{start_date} -> {end_date}"
-            )
 
         else:  # incremental
             if old_rolling_df is not None and not old_rolling_df.empty:
-                last_date = pd.to_datetime(old_rolling_df["date"]).dt.date.max()
+                start_date = pd.to_datetime(old_rolling_df["date"]).dt.date.max()
             else:
-                last_date = today - timedelta(days=CONFIG["window_days"])
+                start_date = today - timedelta(days=CONFIG["window_days"])
                 print(
                     f"  [INCREMENTAL] No rolling parquet found — "
-                    f"defaulting start to {last_date} ({CONFIG['window_days']} days ago)."
+                    f"defaulting start_date to today - {CONFIG['window_days']}d = {start_date}."
                 )
 
-            print(f"  [INCREMENTAL] Last processed date: {last_date}")
-            print(f"  [INCREMENTAL] Today              : {today}")
+            print(f"  [INCREMENTAL] last processed date : {start_date}")
+            print(f"  [INCREMENTAL] today               : {today}")
 
-            if last_date >= today:
-                print("  [INCREMENTAL] Rolling parquet is current — nothing to process.")
+            if start_date >= today:
+                print("  [INCREMENTAL] Rolling parquet is already current — nothing to process.")
                 return "ALREADY_CURRENT"
 
-            start_date = last_date
-
-        # String forms used for FRED API, generate_daily_rows, build_dgs10_series
+        # For incremental mode, start_str advances one day past the last
+        # processed date.  For backfill and replay, start_str equals start_date.
         start_str = (
             pd.Timestamp(start_date + timedelta(days=1)).strftime("%Y-%m-%d")
             if mode == "incremental"
@@ -1609,11 +1443,11 @@ def update_bonds_pipeline(
         )
         end_str = end_date.strftime("%Y-%m-%d")
 
-        print(f"  output_run_id      : {run_id}")
+        print(f"  run_id             : {run_id}")
         print(f"  processing window  : {start_str} -> {end_str}")
 
-        # FIX 8: Write STARTED sentinel AFTER start_str is resolved so
-        # pd.Timestamp(start_str).date() is always valid (non-empty string).
+        # STARTED sentinel — written after start_str is resolved so the
+        # date field is always a valid ISO string.
         _save_run_metadata(
             bucket=bucket, run_id=run_id, mode=mode,
             start_date=pd.Timestamp(start_str).date(), end_date=end_date,
@@ -1621,74 +1455,48 @@ def update_bonds_pipeline(
             status="STARTED",
         )
 
-        # ══════════════════════════════════════════════════════════════
-        # STEP 3 — Load base bond data from S3
-        # ══════════════════════════════════════════════════════════════
-        print("\n  [STEP 3] Loading base bond data from S3...")
+        # ── STEP 3 : Load bond universe ──────────────────────────────────
+        print("\n  [STEP 3] Loading bond universe...")
         base = load_base_bond_data(bucket)
 
-        # ══════════════════════════════════════════════════════════════
-        # STEP 4 — Generate daily bond rows (market day expansion)
-        # ══════════════════════════════════════════════════════════════
+        # ── STEP 4 : Generate daily bond rows ────────────────────────────
         print("\n  [STEP 4] Generating daily bond rows...")
         daily = generate_daily_rows(base, start_str, end_str)
-
         if daily.empty:
-            print("  No market days in processing window — pipeline complete.")
+            print("  No market days in the processing window — pipeline complete.")
             return "NO_NEW_ROWS"
 
-        print(f"  Generated {len(daily):,} rows for window [{start_str}, {end_str}]")
+        print(f"  Generated {len(daily):,} rows for [{start_str}, {end_str}].")
 
-        # ══════════════════════════════════════════════════════════════
-        # STEP 5 — Fetch / load DGS10 observations for the window
-        #
-        # Incremental / Backfill:
-        #   Call live FRED API, then write one raw partition per market day.
-        #
-        # Replay (FIX 2):
-        #   Read the latest raw DGS10 partition for each market day directly
-        #   from the raw/dgs10 layer — no FRED call, fully deterministic.
-        #   If some date partitions are missing, log a WARNING and continue
-        #   with whatever data is available.  Only abort if ZERO partitions
-        #   exist for the entire requested window.
-        # ══════════════════════════════════════════════════════════════
+        # ── STEP 5 : Obtain DGS10 observations for the window ────────────
+        # Incremental / backfill: fetch from live FRED, persist raw partitions.
+        # Replay: load latest raw partition per date, never call FRED.
         if mode == "replay":
-            print("\n  [STEP 5] Loading DGS10 from raw layer (replay mode)...")
-            replay_start_date = pd.Timestamp(start_str).date()
-            dgs10_new = _read_raw_dgs10_layer(bucket, replay_start_date, end_date)
+            print("\n  [STEP 5] Loading DGS10 from raw partitions (replay)...")
+            replay_start = pd.Timestamp(start_str).date()
+            dgs10_new    = _read_raw_layer(bucket, replay_start, end_date)
 
-            # FIX 2: Only abort if NO partitions at all were found for the
-            # entire window.  Partial availability (some dates missing) is
-            # a WARNING, not a fatal error — mirrors commodity pipeline.
             if dgs10_new.empty:
                 raise BondPipelineError(
-                    f"Replay aborted — no raw DGS10 partitions found for "
-                    f"the entire window [{start_str}, {end_str}]. "
-                    "Ensure at least one incremental/backfill run has been "
-                    "executed for this date range first."
+                    f"Replay aborted: no raw partitions found for the entire "
+                    f"window [{start_str}, {end_str}].  Run an incremental or "
+                    "backfill pipeline for this range first."
                 )
 
-            # Check for partially missing dates and warn (non-fatal)
-            valid_days_in_window = get_valid_market_days(start_str, end_str)
+            # Log partially missing dates as a warning — replay continues
+            valid_window = get_valid_market_days(start_str, end_str)
             loaded_dates = set(dgs10_new["date"].dt.date.tolist())
-            missing_window_dates = sorted(
-                d for d in valid_days_in_window if d not in loaded_dates
-            )
-            if missing_window_dates:
-                send_warning_alert(
-                    f"[STEP 5] Replay: {len(missing_window_dates)} market day(s) "
-                    f"have no raw DGS10 partition — those dates will have "
-                    "FORWARD_FILLED or BACKWARD_FILLED DGS10 values.",
-                    context={
-                        "missing_count": len(missing_window_dates),
-                        "missing_dates": [str(d) for d in missing_window_dates[:10]],
-                    },
+            missing      = sorted(d for d in valid_window if d not in loaded_dates)
+            if missing:
+                send_alert(
+                    f"{len(missing)} market day(s) have no raw partition in the replay "
+                    "window — those dates will receive FORWARD_FILLED or BACKWARD_FILLED "
+                    "DGS10 values.",
+                    level="WARNING",
+                    context={"missing_count": len(missing),
+                             "examples": [str(d) for d in missing[:10]]},
                 )
-
-            print(
-                f"  [STEP 5] Loaded {len(dgs10_new):,} DGS10 row(s) "
-                f"from raw layer for replay."
-            )
+            print(f"  [STEP 5] Loaded {len(dgs10_new):,} DGS10 rows from raw layer.")
         else:
             print("\n  [STEP 5] Fetching DGS10 from FRED...")
             dgs10_new = fetch_dgs10_from_fred(
@@ -1698,26 +1506,21 @@ def update_bonds_pipeline(
                 bucket=bucket,
             )
 
-        # ══════════════════════════════════════════════════════════════
-        # STEP 6 — Load DGS10 warm-up history from raw layer
-        #
-        # All modes use the SAME raw/dgs10 layer as the source.
-        # Warm-up rows are the latest raw partitions strictly before
-        # start_str.  Empty is valid — rolling uses min_periods=1.
-        # ══════════════════════════════════════════════════════════════
-        print("\n  [STEP 6] Loading DGS10 warm-up history from raw layer...")
-        dgs10_history = load_dgs10_warmup(
-            bucket=bucket,
-            start_date=pd.Timestamp(start_str).date(),
-        )
+        # ── STEP 6 : Load DGS10 warm-up history ─────────────────────────
+        # Incremental and backfill source warm-up from the rolling parquet.
+        # Replay reconstructs warm-up from raw partitions to remain
+        # independent of the rolling parquet state.
+        print("\n  [STEP 6] Loading DGS10 warm-up history...")
+        if mode == "replay":
+            dgs10_history = load_dgs10_warmup_from_raw(
+                bucket=bucket,
+                start_date=pd.Timestamp(start_str).date(),
+            )
+        else:
+            dgs10_history = load_dgs10_warmup_from_rolling(old_rolling_df)
 
-        # ══════════════════════════════════════════════════════════════
-        # STEP 7 — Build DGS10 series with fill flags + rolling features
-        #
-        # FIX 1 (in build_dgs10_series): warmup rows are now prepended as
-        # actual spine rows so rolling(20) genuinely sees N prior values.
-        # ══════════════════════════════════════════════════════════════
-        print("\n  [STEP 7] Building DGS10 series with fill method flags...")
+        # ── STEP 7 : Build DGS10 series with rolling statistics ──────────
+        print("\n  [STEP 7] Building DGS10 series...")
         dgs10_series = build_dgs10_series(
             history_df  = dgs10_history,
             new_fred_df = dgs10_new,
@@ -1725,66 +1528,40 @@ def update_bonds_pipeline(
             end_date    = end_str,
         )
 
-        # Compute derived bond columns
+        # ── STEP 8 : Compute derived bond columns ────────────────────────
         daily["market_value"] = daily["bond_price"] * daily["units_outstanding"]
         daily["outstanding_pct"] = np.where(
             daily["units_issued"] > 0,
             (daily["units_outstanding"] / daily["units_issued"]) * 100,
             np.nan,
         )
-
-        # Normalise daily["date"] to datetime64 for the merge
         daily["date"] = pd.to_datetime(daily["date"])
-
-        # Merge DGS10 enrichment into daily bond rows
-        daily = daily.merge(dgs10_series, on="date", how="left")
-
-        # ══════════════════════════════════════════════════════════════
-        # STEP 8 — Merge macro data
-        # FIX 4: left join — never drops bond rows on macro coverage gap
-        # ══════════════════════════════════════════════════════════════
-        print("\n  [STEP 8] Merging macro data...")
-        daily = merge_macro_data(daily, bucket)
+        daily         = daily.merge(dgs10_series, on="date", how="left")
 
         if daily.empty:
             raise DataValidationError(
-                "DataFrame is empty after macro merge — "
-                "check macro_data.csv date coverage."
+                "DataFrame is empty after DGS10 merge — "
+                "check that the DGS10 series covers the processing window."
             )
 
-        # ══════════════════════════════════════════════════════════════
-        # STEP 9 — Stamp first-pipeline lineage metadata
-        # ══════════════════════════════════════════════════════════════
-        print("\n  [STEP 9] Stamping first-pipeline lineage metadata...")
+        # ── STEP 9 : Stamp pipeline lineage ─────────────────────────────
+        print("\n  [STEP 9] Stamping pipeline lineage...")
         daily = _add_pipeline_metadata(daily, run_id, run_ts, mode)
 
-        # Convert date to Python date for consistent partition logic
         daily["date"] = pd.to_datetime(daily["date"]).dt.date
-
-        # Select output columns — only those present in the DataFrame
         df_output = daily[
             [c for c in LAYER2_OUTPUT_COLS if c in daily.columns]
         ].copy()
 
-        # ══════════════════════════════════════════════════════════════
-        # DATA VALIDATION
-        # ══════════════════════════════════════════════════════════════
+        # ── STEP 10 : Validate output ────────────────────────────────────
         df_output = validate_data(df_output)
-
-        # ══════════════════════════════════════════════════════════════
-        # ANOMALY DETECTION
-        # ══════════════════════════════════════════════════════════════
         df_output = detect_anomalies(df_output)
 
         output_rows = len(df_output)
         print(f"\n  Output rows: {output_rows:,}")
 
-        # ══════════════════════════════════════════════════════════════
-        # STEP 10 — Write Layer 2 feature partitions
-        # One parquet per date per run_id.
-        # Raises BondPipelineError on S3 write failure.
-        # ══════════════════════════════════════════════════════════════
-        print(f"\n  [STEP 10] Writing Layer 2 feature partitions...")
+        # ── STEP 11 : Write Layer 2 feature partitions ───────────────────
+        print("\n  [STEP 11] Writing Layer 2 feature partitions...")
         partition_log = retry_with_backoff(
             lambda: write_layer2_features(df_output, bucket, run_id),
             retries=3,
@@ -1792,11 +1569,10 @@ def update_bonds_pipeline(
             run_id=run_id,
         )
 
-        # ══════════════════════════════════════════════════════════════
-        # STEP 11 — Update 30-day rolling serving parquet
-        # Safe deduplication ensures replay/backfill does not corrupt it.
-        # ══════════════════════════════════════════════════════════════
-        print("\n  [STEP 11] Updating rolling serving layer...")
+        # ── STEP 12 : Update rolling serving parquet ─────────────────────
+        # Replay also updates the rolling parquet so that the serving layer
+        # reflects the recomputed feature values.
+        print("\n  [STEP 12] Updating rolling serving layer...")
         df_for_rolling         = df_output.copy()
         df_for_rolling["date"] = pd.to_datetime(df_for_rolling["date"])
 
@@ -1812,29 +1588,16 @@ def update_bonds_pipeline(
             run_id=run_id,
         )
 
-        # ══════════════════════════════════════════════════════════════
-        # STEP 12 — Save SUCCESS run metadata
-        # ══════════════════════════════════════════════════════════════
+        # ── STEP 13 : Persist SUCCESS run metadata ───────────────────────
         processing_time = round(time.time() - pipeline_start, 2)
-
         _save_run_metadata(
-            bucket=bucket,
-            run_id=run_id,
-            mode=mode,
-            start_date=pd.Timestamp(start_str).date(),
-            end_date=end_date,
-            nrows=output_rows,
-            run_ts=run_ts,
-            airflow_metadata=airflow_metadata,
-            status="SUCCESS",
-            processing_time_s=processing_time,
-            partition_count=len(partition_log),
-            rolling_updated=True,
+            bucket=bucket, run_id=run_id, mode=mode,
+            start_date=pd.Timestamp(start_str).date(), end_date=end_date,
+            nrows=output_rows, run_ts=run_ts, airflow_metadata=airflow_metadata,
+            status="SUCCESS", processing_time_s=processing_time,
+            partition_count=len(partition_log), rolling_updated=True,
         )
 
-        # ══════════════════════════════════════════════════════════════
-        # STEP 13 — Pipeline success summary
-        # ══════════════════════════════════════════════════════════════
         fill_summary = (
             df_output["fill_method_flag"].value_counts().to_dict()
             if "fill_method_flag" in df_output.columns else {}
@@ -1842,15 +1605,13 @@ def update_bonds_pipeline(
 
         print(f"\n{'=' * 66}")
         print(f"  BOND UPDATE PIPELINE SUCCESS")
-        print(f"  run_id             : {run_id}")
-        print(f"  mode               : {mode}")
-        print(f"  rows produced      : {output_rows:,}")
-        print(f"  date partitions    : {len(partition_log)}")
-        print(f"  window             : {start_str} -> {end_str}")
-        print(f"  duration           : {processing_time}s")
-        print(f"  fill_flags         : {fill_summary}")
-        print(f"  Layer 2            : OK")
-        print(f"  Rolling parquet    : OK")
+        print(f"  run_id          : {run_id}")
+        print(f"  mode            : {mode}")
+        print(f"  rows produced   : {output_rows:,}")
+        print(f"  date partitions : {len(partition_log)}")
+        print(f"  window          : {start_str} -> {end_str}")
+        print(f"  duration        : {processing_time}s")
+        print(f"  fill_flags      : {fill_summary}")
         print(f"{'=' * 66}\n")
 
         return f"SUCCESS_{output_rows}_ROWS"
@@ -1858,8 +1619,9 @@ def update_bonds_pipeline(
     except Exception as exc:
         processing_time = round(time.time() - pipeline_start, 2)
 
-        send_critical_alert(
+        send_alert(
             "Bond update pipeline failed with unhandled exception",
+            level="CRITICAL",
             context={
                 "run_id":   run_id,
                 "mode":     mode,
@@ -1876,20 +1638,11 @@ def update_bonds_pipeline(
         print(f"  duration : {processing_time}s")
         print(f"{'=' * 66}\n")
 
-        # Best-effort FAILED metadata overwrite
-        # start_str may be "" if failure happened before STEP 2 completed
         _save_run_metadata(
-            bucket=bucket,
-            run_id=run_id,
-            mode=mode,
+            bucket=bucket, run_id=run_id, mode=mode,
             start_date=pd.Timestamp(start_str).date() if start_str else None,
-            end_date=end_date,
-            nrows=0,
-            run_ts=run_ts,
+            end_date=end_date, nrows=0, run_ts=run_ts,
             airflow_metadata=airflow_metadata,
-            status="FAILED",
-            processing_time_s=processing_time,
-            error=str(exc),
+            status="FAILED", processing_time_s=processing_time, error=str(exc),
         )
-
         raise

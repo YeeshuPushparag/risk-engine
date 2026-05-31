@@ -93,6 +93,11 @@ CONFIG: dict = {
     # S3 bucket
     "s3_bucket": "yeeshu-bond-bucket",
 
+    # Macro Data Source
+    "macro_bucket": "yeeshu-loan-bucket",
+    "macro_key":    "macro_data.csv",
+
+
     # S3 path prefixes (mirrors first pipeline CONFIG)
     "features_prefix": "historical-bonds/features/",
     "rolling_key":     "historical-bonds/rolling/bonds_features_30d.parquet",
@@ -390,6 +395,20 @@ def _read_bytes_from_s3(bucket: str, key: str) -> bytes:
     except ClientError as exc:
         raise BondProcessingError(f"Failed to read s3://{bucket}/{key}: {exc}") from exc
 
+
+
+
+# =============================================================
+# MACRO DATA LOADER 
+# =============================================================
+def load_macro_data(run_id: str) -> pd.DataFrame:
+    """Load macro data from S3 using CONFIG macro_bucket and macro_key."""
+    return retry_with_backoff(
+        lambda: read_csv_from_s3(CONFIG["macro_bucket"], CONFIG["macro_key"]),
+        retries=3,
+        critical_name="Macro data load",
+        run_id=run_id,
+    )
 
 # =============================================================
 # LAYER 2 FEATURE LOADING — latest-partition-per-date strategy
@@ -1756,14 +1775,38 @@ def process_bonds(
         print("\n  [STEP 3] Renaming source lineage columns...")
         features_df = rename_source_lineage(features_df)
 
+
         # ══════════════════════════════════════════════════════════════
-        # STEP 4 — Run ML predictions (soft-fail on model load failure)
+        # STEP 4 — Load and merge macro data
         # ══════════════════════════════════════════════════════════════
-        print("\n  [STEP 4] Running ML model predictions...")
+        print("\n  [STEP 4] Loading and merging macro data...")
+        
+        macro_df = load_macro_data(run_id)
+        
+        # Ensure date columns are datetime
+        features_df["date"] = pd.to_datetime(features_df["date"])
+        macro_df["date"] = pd.to_datetime(macro_df["date"])
+        
+        # Create month-year keys for merging (macro data is monthly)
+        features_df["mm_yy"] = features_df["date"].dt.strftime("%m-%y")
+        macro_df["mm_yy"] = macro_df["date"].dt.strftime("%m-%y")
+        
+        # Drop original date from macro to avoid conflicts
+        macro_for_merge = macro_df.drop(columns=["date"])
+        
+        # Left join macro data
+        features_df = features_df.merge(macro_for_merge, on="mm_yy", how="left").drop(columns=["mm_yy"])
+        
+        print(f"  Macro columns added: {[c for c in ['gdp', 'unrate', 'fedfunds', 'cpi'] if c in features_df.columns]}")
+
+        # ══════════════════════════════════════════════════════════════
+        # STEP 5 — Run ML predictions (soft-fail on model load failure)
+        # ══════════════════════════════════════════════════════════════
+        print("\n  [STEP 5] Running ML model predictions...")
         features_df = run_predictions(features_df, bucket)
 
         # ══════════════════════════════════════════════════════════════
-        # STEP 5 — Stamp second-pipeline lineage metadata
+        # STEP 6 — Stamp second-pipeline lineage metadata
         # ══════════════════════════════════════════════════════════════
         print("\n  [STEP 5] Stamping second-pipeline lineage metadata...")
         features_df = _add_pipeline_metadata(features_df, run_id, run_ts)
@@ -1780,7 +1823,7 @@ def process_bonds(
         print(f"\n  Final rows for DB writes: {snowflake_rows:,}")
 
         # ══════════════════════════════════════════════════════════════
-        # STEP 6 — Validate output before any DB write
+        # STEP 7 — Validate output before any DB write
         # ══════════════════════════════════════════════════════════════
         market_end = get_market_end_date()
         validate_output(df_to_upload, market_end, run_id=run_id)
@@ -1790,7 +1833,7 @@ def process_bonds(
         snowflake_end   = pd.Timestamp(end_date)
 
         # ══════════════════════════════════════════════════════════════
-        # STEP 7 — Write to Snowflake HISTORY (append-only, always INSERT)
+        # STEP 8 — Write to Snowflake HISTORY (append-only, always INSERT)
         # Failure here <- pipeline FAILS.
         # ══════════════════════════════════════════════════════════════
         print(
@@ -1800,7 +1843,7 @@ def process_bonds(
         write_to_snowflake_history(df_to_upload, run_mode=mode, run_id=run_id)
 
         # ══════════════════════════════════════════════════════════════
-        # STEP 8 — Write to Snowflake CLEAN (deterministic latest state)
+        # STEP 9 — Write to Snowflake CLEAN (deterministic latest state)
         # replay/backfill <- DELETE window + INSERT (atomic transaction)
         # incremental     <- MERGE latest-state rows using(bond_id, ticker, date)
         # Failure here <- pipeline FAILS.
@@ -1818,7 +1861,7 @@ def process_bonds(
         )
 
         # ══════════════════════════════════════════════════════════════
-        # STEP 9 — Write to Postgres serving layer
+        # STEP 10 — Write to Postgres serving layer
         # Rules based on unique dates in DataFrame:
         #   - 1 date:  Append + trim to last 2 days
         #   - 2 dates: Replace entire table (no trim needed)

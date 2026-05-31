@@ -1580,36 +1580,6 @@ def update_commodity_pipeline(
     meta_key     = f"{prefix}metadata/run_id={run_id}/run_summary.json"
     input_source = "yfinance"
 
-    # Skip if market closed
-    if is_market_holiday(end_date):
-
-        msg = f"NYSE closed on {end_date} (holiday/weekend). Skipping pipeline."
-
-        print(f"  [MARKET CLOSED] {msg}")
-
-        send_alert(
-            msg,
-            level="INFO",
-            context={
-                "run_id": run_id,
-                "date": str(end_date)
-            }
-        )
-
-        write_json_to_s3(
-            {
-                "run_id": run_id,
-                "status": "SKIPPED",
-                "reason": "market_holiday",
-                "date": str(end_date)
-            },
-            bucket,
-            meta_key,
-        )
-
-        return None, msg
-
-
     mode_label = (
         "replay_from_raw" if replay_from_raw
         else "backfill"    if start_date_override
