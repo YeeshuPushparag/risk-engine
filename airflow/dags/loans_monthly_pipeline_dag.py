@@ -73,12 +73,13 @@ def get_airflow_metadata(context):
 # ============================================================
 # MACRO PIPELINE
 # ============================================================
-
 def run_macro_pipeline_task(**context):
 
     from pipelines.monthly.macro_pipeline import run_macro_pipeline
 
-    return run_macro_pipeline(**context) or "OK"
+    run_macro_pipeline(**context)
+
+    return "OK"
 
 
 # ============================================================
