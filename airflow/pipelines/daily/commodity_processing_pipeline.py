@@ -77,7 +77,9 @@ MODEL_PREFIX   = "models/"
 
 INPUT_COMMOD = ROLLING_PREFIX + "commodities_70d.parquet"
 SYM          = BASE_PREFIX + "unique_tickers_sector.csv"
-MACRO        = BASE_PREFIX + "macro_data.csv"
+
+MACRO_BUCKET   = "yeeshu-loan-bucket"
+MACRO_KEY        = "macro_data.csv"
 
 MODEL_FILE   = MODEL_PREFIX + "commodities_model_vol21_xgb.json"
 FEATURE_FILE = MODEL_PREFIX + "commodities_features_vol21.pkl"
@@ -1300,7 +1302,7 @@ def process_commodities(
             S3_BUCKET, SYM, dayfirst=True, retries=3, run_id=run_id
         )
         macro = load_csv_from_s3_with_retry(
-            S3_BUCKET, MACRO, parse_dates=["date"], dayfirst=True, retries=3, run_id=run_id
+            MACRO_BUCKET, MACRO_KEY, parse_dates=["date"], dayfirst=True, retries=3, run_id=run_id
         )
 
         print(f"  Companies loaded : {len(companies):,}")

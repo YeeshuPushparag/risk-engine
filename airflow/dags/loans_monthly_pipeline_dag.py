@@ -70,6 +70,16 @@ def get_airflow_metadata(context):
         "triggered_by": "manual" if context["dag_run"].run_type == "manual" else "scheduled",
     }
 
+# ============================================================
+# MACRO PIPELINE
+# ============================================================
+
+def run_macro_pipeline_task(**context):
+
+    from pipelines.monthly.macro_pipeline import run_macro_pipeline
+
+    return run_macro_pipeline(**context) or "OK"
+
 
 # ============================================================
 # LOAN ENRICHMENT PIPELINE
@@ -151,6 +161,16 @@ with DAG(
 ) as dag:
 
     # ========================================================
+    # MACRO PIPELINE (NEW TASK)
+    # ========================================================
+    macro_pipeline = PythonOperator(
+        task_id="run_macro_pipeline",
+        python_callable=run_macro_pipeline_task,
+        execution_timeout=timedelta(hours=2),
+        do_xcom_push=False,
+    )
+
+    # ========================================================
     # ENRICHMENT
     # ========================================================
 
@@ -172,8 +192,9 @@ with DAG(
         do_xcom_push=False,
     )
 
+
+
     # ========================================================
     # FLOW
     # ========================================================
-
-    enrich_loans >> loans_model
+    macro_pipeline >> enrich_loans >> loans_model  

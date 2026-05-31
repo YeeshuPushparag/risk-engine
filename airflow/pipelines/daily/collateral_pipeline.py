@@ -84,7 +84,8 @@ from snowflake.connector.pandas_tools import write_pandas
 # CONSTANTS
 # ============================================================
 COLLATERAL_BUCKET = "yeeshu-collateral-bucket"
-MACRO_KEY    = "macro_data.csv"
+MACRO_BUCKET      = "yeeshu-loan-bucket"
+MACRO_KEY         = "macro_data.csv"
 
 s3 = boto3.client("s3")
 
@@ -449,7 +450,7 @@ def load_source_table(table: str, where_clause: str, run_id: str) -> pd.DataFram
 def load_macro_data() -> pd.DataFrame:
     """Load macro CSV from S3. Pipeline continues without it on failure."""
     def _load():
-        obj = s3.get_object(Bucket=COLLATERAL_BUCKET, Key=MACRO_KEY)
+        obj = s3.get_object(Bucket=MACRO_BUCKET, Key=MACRO_KEY)
         df  = pd.read_csv(BytesIO(obj["Body"].read()))
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         return df[df["date"].notna()]

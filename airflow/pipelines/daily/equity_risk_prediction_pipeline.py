@@ -74,6 +74,7 @@ MIN_CVaR_95    = 0.007
 MIN_CVaR_99    = 0.015
 
 S3_BUCKET = "yeeshu-equity-bucket"
+MACRO_BUCKET = "yeeshu-loan-bucket"
 s3 = boto3.client("s3")
 
 # Snowflake table names — single source of truth for table identifiers
@@ -1855,8 +1856,8 @@ def run_equity_risk_pipeline(
         # ══════════════════════════════════════════════════════════════
         def load_macro_data():
             macro_obj = s3.get_object(
-                Bucket=S3_BUCKET,
-                Key="historical-equity/macro_data.csv",
+                Bucket=MACRO_BUCKET,
+                Key="macro_data.csv",
             )
             macro         = pd.read_csv(
                 StringIO(macro_obj["Body"].read().decode("utf-8"))

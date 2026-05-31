@@ -185,6 +185,15 @@ SCHEMA_HASH: str = hashlib.md5(
     json.dumps(RAW_SCHEMA, sort_keys=True).encode()
 ).hexdigest()
 
+
+
+# =============================================================
+# MACRO 
+# =============================================================
+MACRO_BUCKET = "yeeshu-loan-bucket"
+MACRO_KEY   = "macro_data.csv",
+
+
 # =============================================================
 # CUSTOM EXCEPTIONS
 # =============================================================
@@ -1462,7 +1471,6 @@ def update_fx_pipeline(
     bucket:              str       = "yeeshu-fx-bucket",
     prefix:              str       = "historical-fx/",
     input_key:           str       = "historical-fx/final_merged.parquet",
-    macro_key:           str       = "historical-fx/macro_data.csv",
     airflow_metadata:    dict      = None,
     start_date_override: str       = None,   # "YYYY-MM-DD" -> backfill mode
     replay_from_raw:     bool      = False,  # True -> skip yfinance+FRED, read Layer 1
@@ -1808,7 +1816,7 @@ def update_fx_pipeline(
         print("\n[ STAGE 7 ] Feature engineering")
         feat_start = time.time()
 
-        macro_df = read_csv_from_s3(bucket, macro_key)
+        macro_df = read_csv_from_s3(MACRO_BUCKET, MACRO_KEY)
 
         new_features = build_fx_features(
             clean_raw_df  = clean_raw_df,
