@@ -1,82 +1,130 @@
 import os
 import time
-import pandas as pd
+import json
 import boto3
-import fredapi
-from fredapi import Fred
+import pandas as pd
+import requests
+
 from io import StringIO
+from datetime import datetime
+from fredapi import Fred
+
 
 # ============================================================
 # CONFIG
 # ============================================================
+
 S3_BUCKET = "yeeshu-loan-bucket"
 S3_KEY = "macro_data.csv"
 
 s3 = boto3.client("s3")
 
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
+
+
+# ============================================================
+# SLACK ALERTS
+# ============================================================
+
+def send_slack_alert(
+    message: str,
+    status: str,
+    context: dict = None,
+):
+
+    if not SLACK_WEBHOOK_URL:
+        return
+
+    emoji = (
+        "✅"
+        if status == "SUCCESS"
+        else "❌"
+    )
+
+    text = (
+        f"{emoji} "
+        f"*[{status}]* macro_pipeline\n"
+        f"message: {message}\n"
+    )
+
+    if context:
+        text += (
+            f"context: "
+            f"{json.dumps(context, default=str)}\n"
+        )
+
+    text += (
+        f"time: "
+        f"{datetime.utcnow().isoformat()}"
+    )
+
+    try:
+
+        requests.post(
+            SLACK_WEBHOOK_URL,
+            json={"text": text},
+            timeout=5,
+        )
+
+    except Exception:
+        pass
+
 
 # ============================================================
 # DATE WINDOW
 # ============================================================
+
 def get_window(years=2):
+
     today = pd.Timestamp.today().normalize()
 
-    end_date = today + pd.offsets.MonthEnd(0)
-    start_date = end_date - pd.DateOffset(years=years)
+    end_date = (
+        today
+        + pd.offsets.MonthEnd(0)
+    )
 
-    return start_date.date(), end_date.date()
+    start_date = (
+        end_date
+        - pd.DateOffset(years=years)
+    )
+
+    return (
+        start_date.date(),
+        end_date.date(),
+    )
 
 
 # ============================================================
 # FRED RETRY WRAPPER
 # ============================================================
+
 def get_series_safe(
     fred,
     series_id,
     start_date,
     end_date,
-    max_retries=5
+    max_retries=5,
 ):
 
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(max_retries):
 
         try:
 
-            print(
-                f"[FRED] {series_id} "
-                f"attempt={attempt} "
-                f"window={start_date}->{end_date}"
-            )
-
-            data = fred.get_series(
+            return fred.get_series(
                 series_id,
                 start=start_date,
-                end=end_date
+                end=end_date,
             )
-
-            print(
-                f"[FRED SUCCESS] {series_id} "
-                f"rows={len(data)}"
-            )
-
-            return data
 
         except Exception as e:
 
-            print(
-                f"[FRED ERROR] {series_id} "
-                f"attempt={attempt}"
-            )
+            if (
+                "429" in str(e)
+                or
+                "Too Many Requests" in str(e)
+            ):
 
-            print(repr(e))
-
-            if "429" in str(e) or "Too Many Requests" in str(e):
-
-                wait = attempt * 15
-
-                print(
-                    f"[RATE LIMIT] sleeping {wait}s"
-                )
+                wait = 15 * (attempt + 1)
 
                 time.sleep(wait)
 
@@ -85,113 +133,93 @@ def get_series_safe(
             raise
 
     raise RuntimeError(
-        f"Failed fetching {series_id} after {max_retries} retries"
+        f"Failed fetching "
+        f"{series_id}"
     )
 
 
 # ============================================================
 # MAIN PIPELINE
 # ============================================================
+
 def fetch_macro_data():
+
+    pipeline_start = time.time()
 
     start_date, end_date = get_window(2)
 
-    print(
-        f"[MACRO PIPELINE] "
-        f"{start_date} -> {end_date}"
+    fred = Fred(
+        api_key=os.getenv("FRED_API_KEY")
     )
 
     # --------------------------------------------------------
-    # DEBUG
+    # FETCH FRED SERIES
     # --------------------------------------------------------
-    key = os.getenv("FRED_API_KEY")
 
-    print(
-        f"[DEBUG] fredapi={fredapi.__version__}"
-    )
-
-    print(
-        f"[DEBUG] key_present={key is not None}"
-    )
-
-    if key:
-        print(
-            f"[DEBUG] key_prefix={key[:8]}"
-        )
-
-    fred = Fred(api_key=key)
-
-    # --------------------------------------------------------
-    # SIMPLE CONNECTIVITY TEST
-    # --------------------------------------------------------
     try:
 
-        print("[TEST] GDP no filters")
+        gdp = get_series_safe(
+            fred,
+            "GDP",
+            start_date,
+            end_date,
+        )
 
-        test = fred.get_series("GDP")
+        unrate = get_series_safe(
+            fred,
+            "UNRATE",
+            start_date,
+            end_date,
+        )
 
-        print(
-            f"[TEST SUCCESS] rows={len(test)}"
+        cpi = get_series_safe(
+            fred,
+            "CPIAUCSL",
+            start_date,
+            end_date,
+        )
+
+        fedfunds = get_series_safe(
+            fred,
+            "FEDFUNDS",
+            start_date,
+            end_date,
         )
 
     except Exception as e:
 
-        print(
-            "[TEST FAILED]"
+        send_slack_alert(
+            message="FRED fetch failed",
+            status="FAILURE",
+            context={
+                "error": str(e),
+                "start_date": str(start_date),
+                "end_date": str(end_date),
+            },
         )
-
-        print(repr(e))
 
         raise
 
     # --------------------------------------------------------
-    # FETCH SERIES
-    # --------------------------------------------------------
-    gdp = get_series_safe(
-        fred,
-        "GDP",
-        start_date,
-        end_date
-    )
-
-    unrate = get_series_safe(
-        fred,
-        "UNRATE",
-        start_date,
-        end_date
-    )
-
-    cpi = get_series_safe(
-        fred,
-        "CPIAUCSL",
-        start_date,
-        end_date
-    )
-
-    fedfunds = get_series_safe(
-        fred,
-        "FEDFUNDS",
-        start_date,
-        end_date
-    )
-
-    # --------------------------------------------------------
     # MONTHLY INDEX
     # --------------------------------------------------------
+
     monthly_index = pd.date_range(
         start=start_date,
         end=end_date,
-        freq="ME"
+        freq="ME",
     )
 
     # --------------------------------------------------------
-    # GDP
+    # GDP QUARTERLY -> MONTHLY
     # --------------------------------------------------------
+
     gdp = gdp.to_frame("gdp")
     gdp.index = pd.to_datetime(gdp.index)
 
     gdp_m = (
-        gdp.resample("ME").ffill()
+        gdp.resample("ME")
+        .ffill()
         .reindex(monthly_index)
         .ffill()
         .bfill()
@@ -200,59 +228,121 @@ def fetch_macro_data():
     # --------------------------------------------------------
     # MONTHLY SERIES
     # --------------------------------------------------------
+
     unrate_m = (
-        unrate.resample("ME").last()
+        unrate.resample("ME")
+        .last()
         .reindex(monthly_index)
         .ffill()
         .bfill()
     )
 
     cpi_m = (
-        cpi.resample("ME").last()
+        cpi.resample("ME")
+        .last()
         .reindex(monthly_index)
         .ffill()
         .bfill()
     )
 
     fedfunds_m = (
-        fedfunds.resample("ME").last()
+        fedfunds.resample("ME")
+        .last()
         .reindex(monthly_index)
         .ffill()
         .bfill()
     )
 
     # --------------------------------------------------------
-    # FINAL DF
+    # FINAL DATAFRAME
     # --------------------------------------------------------
+
     df = pd.DataFrame({
         "date": monthly_index,
         "gdp": gdp_m["gdp"].values,
         "unrate": unrate_m.values,
         "cpi": cpi_m.values,
-        "fedfunds": fedfunds_m.values
+        "fedfunds": fedfunds_m.values,
     })
 
     # --------------------------------------------------------
-    # S3 WRITE
+    # ATOMIC S3 WRITE
     # --------------------------------------------------------
-    buffer = StringIO()
 
-    df.to_csv(
-        buffer,
-        index=False
+    try:
+
+        buffer = StringIO()
+
+        df.to_csv(
+            buffer,
+            index=False,
+        )
+
+        buffer.seek(0)
+
+        temp_key = (
+            f"_temp/"
+            f"{S3_KEY}."
+            f"{int(time.time())}"
+        )
+
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=temp_key,
+            Body=buffer.getvalue(),
+        )
+
+        s3.copy_object(
+            Bucket=S3_BUCKET,
+            CopySource={
+                "Bucket": S3_BUCKET,
+                "Key": temp_key,
+            },
+            Key=S3_KEY,
+        )
+
+        s3.delete_object(
+            Bucket=S3_BUCKET,
+            Key=temp_key,
+        )
+
+    except Exception as e:
+
+        send_slack_alert(
+            message="S3 write failed",
+            status="FAILURE",
+            context={
+                "error": str(e),
+                "bucket": S3_BUCKET,
+                "key": S3_KEY,
+            },
+        )
+
+        raise
+
+    # --------------------------------------------------------
+    # SUCCESS ALERT
+    # --------------------------------------------------------
+
+    duration = round(
+        time.time() - pipeline_start,
+        2,
     )
 
-    buffer.seek(0)
-
-    s3.put_object(
-        Bucket=S3_BUCKET,
-        Key=S3_KEY,
-        Body=buffer.getvalue()
-    )
-
-    print(
-        f"[SUCCESS] "
-        f"s3://{S3_BUCKET}/{S3_KEY}"
+    send_slack_alert(
+        message=(
+            "Macro data pipeline "
+            "completed successfully"
+        ),
+        status="SUCCESS",
+        context={
+            "rows": len(df),
+            "date_range":
+                f"{start_date} -> {end_date}",
+            "s3_path":
+                f"s3://{S3_BUCKET}/{S3_KEY}",
+            "duration_s": duration,
+        },
     )
 
     return df
@@ -261,5 +351,6 @@ def fetch_macro_data():
 # ============================================================
 # AIRFLOW ENTRYPOINT
 # ============================================================
+
 def run_macro_pipeline(**context):
     return fetch_macro_data()

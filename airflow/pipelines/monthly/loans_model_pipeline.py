@@ -1224,9 +1224,7 @@ def run_loans_model_pipeline(
             if c in df_pg.columns:
                 df_pg[c] = df_pg[c].fillna(0).astype(float).round().astype(int)
 
-        # Drop Snowflake-only column
-        if "date" in df_pg.columns:
-            df_pg = df_pg.drop(columns=["date"])
+  
 
         # ONE FUNCTION CALL - handles everything (unique months check, trim, delete, insert)
         write_to_postgres(df_pg, mode=mode)
