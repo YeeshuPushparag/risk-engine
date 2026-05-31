@@ -1503,6 +1503,8 @@ def update_bonds_pipeline(
                 print(f"  [STEP 5] No raw partitions found for window [{start_str}, {end_str}] — "
                     f"will use forward/backward fill only.")
                 dgs10_new = pd.DataFrame(columns=["date", "DGS10"])
+                dgs10_new["date"] = pd.Series(dtype="datetime64[ns]") 
+                dgs10_new["DGS10"] = pd.Series(dtype="float64")
 
             # Log partially missing dates as a warning — replay continues
             valid_window = get_valid_market_days(start_str, end_str)
