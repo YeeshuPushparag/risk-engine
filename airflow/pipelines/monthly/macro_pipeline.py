@@ -148,6 +148,11 @@ def fetch_macro_data():
 
     start_date, end_date = get_window(2)
 
+    print(f"\n{'='*66}")
+    print(f"  MACRO PIPELINE START")
+    print(f"  Date range: {start_date} -> {end_date}")
+    print(f"{'='*66}\n")
+
     fred = Fred(
         api_key=os.getenv("FRED_API_KEY")
     )
@@ -155,6 +160,7 @@ def fetch_macro_data():
     # --------------------------------------------------------
     # FETCH FRED SERIES
     # --------------------------------------------------------
+    print("[STEP 1] Fetching FRED data...")
 
     try:
 
@@ -164,6 +170,7 @@ def fetch_macro_data():
             start_date,
             end_date,
         )
+        print(f"  GDP fetched: {len(gdp)} observations")
 
         unrate = get_series_safe(
             fred,
@@ -171,6 +178,7 @@ def fetch_macro_data():
             start_date,
             end_date,
         )
+        print(f"  UNRATE fetched: {len(unrate)} observations")
 
         cpi = get_series_safe(
             fred,
@@ -178,6 +186,7 @@ def fetch_macro_data():
             start_date,
             end_date,
         )
+        print(f"  CPI fetched: {len(cpi)} observations")
 
         fedfunds = get_series_safe(
             fred,
@@ -185,9 +194,11 @@ def fetch_macro_data():
             start_date,
             end_date,
         )
+        print(f"  FEDFUNDS fetched: {len(fedfunds)} observations")
 
     except Exception as e:
 
+        print(f"[FAILED] FRED fetch failed: {e}")
         send_slack_alert(
             message="FRED fetch failed",
             status="FAILURE",
@@ -197,18 +208,19 @@ def fetch_macro_data():
                 "end_date": str(end_date),
             },
         )
-
         raise
 
     # --------------------------------------------------------
     # MONTHLY INDEX
     # --------------------------------------------------------
+    print("\n[STEP 2] Processing data to monthly frequency...")
 
     monthly_index = pd.date_range(
         start=start_date,
         end=end_date,
         freq="ME",
     )
+    print(f"  Monthly index created: {len(monthly_index)} months")
 
     # --------------------------------------------------------
     # GDP QUARTERLY -> MONTHLY
@@ -224,6 +236,7 @@ def fetch_macro_data():
         .ffill()
         .bfill()
     )
+    print(f"  GDP processed: quarterly -> monthly")
 
     # --------------------------------------------------------
     # MONTHLY SERIES
@@ -236,6 +249,7 @@ def fetch_macro_data():
         .ffill()
         .bfill()
     )
+    print(f"  UNRATE processed")
 
     cpi_m = (
         cpi.resample("ME")
@@ -244,6 +258,7 @@ def fetch_macro_data():
         .ffill()
         .bfill()
     )
+    print(f"  CPI processed")
 
     fedfunds_m = (
         fedfunds.resample("ME")
@@ -252,6 +267,7 @@ def fetch_macro_data():
         .ffill()
         .bfill()
     )
+    print(f"  FEDFUNDS processed")
 
     # --------------------------------------------------------
     # FINAL DATAFRAME
@@ -265,9 +281,15 @@ def fetch_macro_data():
         "fedfunds": fedfunds_m.values,
     })
 
+    print(f"\n  Final DataFrame:")
+    print(f"    Rows: {len(df)}")
+    print(f"    Date range: {df['date'].min().date()} -> {df['date'].max().date()}")
+    print(f"    Columns: {list(df.columns)}")
+
     # --------------------------------------------------------
     # ATOMIC S3 WRITE
     # --------------------------------------------------------
+    print("\n[STEP 3] Writing to S3 (atomic write)...")
 
     try:
 
@@ -291,6 +313,7 @@ def fetch_macro_data():
             Key=temp_key,
             Body=buffer.getvalue(),
         )
+        print(f"  Temp file written: {temp_key}")
 
         s3.copy_object(
             Bucket=S3_BUCKET,
@@ -300,14 +323,19 @@ def fetch_macro_data():
             },
             Key=S3_KEY,
         )
+        print(f"  Copied to final: {S3_KEY}")
 
         s3.delete_object(
             Bucket=S3_BUCKET,
             Key=temp_key,
         )
+        print(f"  Temp file deleted")
+
+        print(f"  Successfully written to s3://{S3_BUCKET}/{S3_KEY}")
 
     except Exception as e:
 
+        print(f"[FAILED] S3 write failed: {e}")
         send_slack_alert(
             message="S3 write failed",
             status="FAILURE",
@@ -317,7 +345,6 @@ def fetch_macro_data():
                 "key": S3_KEY,
             },
         )
-
         raise
 
     # --------------------------------------------------------
@@ -328,6 +355,14 @@ def fetch_macro_data():
         time.time() - pipeline_start,
         2,
     )
+
+    print(f"\n{'='*66}")
+    print(f"  MACRO PIPELINE SUCCESS")
+    print(f"  Date range: {start_date} -> {end_date}")
+    print(f"  Rows written: {len(df)}")
+    print(f"  S3 path: s3://{S3_BUCKET}/{S3_KEY}")
+    print(f"  Duration: {duration}s")
+    print(f"{'='*66}\n")
 
     send_slack_alert(
         message=(
