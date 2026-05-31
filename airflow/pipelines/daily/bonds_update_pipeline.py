@@ -812,15 +812,18 @@ def fetch_dgs10_from_fred(
 ) -> pd.DataFrame:
     """
     Fetch the DGS10 (10-year Treasury yield) time series from the live FRED
-    API for the requested date range and immediately persist the result as
-    immutable raw partitions.
+    API for the requested date range and persist raw partitions ONLY for
+    NYSE market days that have real FRED data.
+
+    CRITICAL BEHAVIOR:
+    - FRED API returns data for ALL calendar dates (including weekends/holidays)
+    - Raw partitions are written ONLY for NYSE market days (trading days)
+    - Non-market days (weekends, NYSE holidays) NEVER receive raw partitions
+    - NO empty partitions are ever written - missing data is handled by forward/backward fill
+    - All dates are handled as naive datetime (no timezone) to match the rest of the pipeline
 
     Called only during incremental and backfill runs.  Replay mode reads
     existing raw partitions and never invokes this function.
-
-    When FRED returns no observations for the range, one empty partition is
-    written per expected market day so that replay has a consistent partition
-    structure to scan.
 
     Args:
         start_date: Inclusive fetch start as "YYYY-MM-DD".
@@ -829,7 +832,8 @@ def fetch_dgs10_from_fred(
         bucket:     S3 bucket name.
 
     Returns:
-        DataFrame with columns [date, DGS10] covering the fetched range.
+        DataFrame with columns [date, DGS10] covering ONLY NYSE market days
+        in the requested range (weekends/holidays are filtered out).
 
     Raises:
         BondPipelineError: when FRED_API_KEY is not set or all fetch
@@ -844,35 +848,53 @@ def fetch_dgs10_from_fred(
     last_exc = None
     for attempt in range(1, CONFIG["max_retries"] + 1):
         try:
-            fred   = Fred(api_key=fred_api_key)
+            fred = Fred(api_key=fred_api_key)
             series = fred.get_series(
                 "DGS10",
                 observation_start=start_date,
                 observation_end=end_date,
             )
 
-            if series is None or series.empty:
-                empty_df   = pd.DataFrame(columns=["date", "DGS10"])
-                valid_days = get_valid_market_days(start_date, end_date)
-                for market_day in valid_days:
-                    write_parquet_to_s3(empty_df, bucket,
-                                        _raw_partition_key(market_day, run_id))
-                print(
-                    f"  [STAGE 4] FRED returned no observations — "
-                    f"wrote {len(valid_days)} empty partition(s)."
-                )
-                return empty_df
+            # Get valid NYSE market days (excludes weekends and holidays)
+            valid_market_days = get_valid_market_days(start_date, end_date)
 
-            df          = series.to_frame("DGS10").reset_index().rename(columns={"index": "date"})
-            df["date"]  = pd.to_datetime(df["date"])
+            if series is None or series.empty:
+                # FRED returned no data - write nothing to raw
+                # Feature layer will fill missing dates via forward/backward fill
+                print(
+                    f"  [STAGE 4] FRED returned no observations for [{start_date}, {end_date}] — "
+                    f"no raw partitions written. Feature layer will handle missing dates."
+                )
+                return pd.DataFrame(columns=["date", "DGS10"])
+
+            # Convert FRED series to DataFrame
+            df = series.to_frame("DGS10").reset_index().rename(columns={"index": "date"})
+            df["date"] = pd.to_datetime(df["date"])
             df["DGS10"] = pd.to_numeric(df["DGS10"], errors="coerce")
 
-            written = _write_raw_partitions(df, bucket, run_id)
+            # Filter to market days ONLY (remove weekends and holidays like Memorial Day)
+            # Use .date() comparison without timezone - all dates are naive
+            df_market_only = df[df["date"].dt.date.isin(valid_market_days)].copy()
+
+            if df_market_only.empty:
+                # FRED has data but only for non-market days (holidays/weekends)
+                # Write nothing to raw - feature layer will handle filling
+                print(
+                    f"  [STAGE 4] FRED returned data only for non-market days — "
+                    f"no raw partitions written. Feature layer will handle market days."
+                )
+                return pd.DataFrame(columns=["date", "DGS10"])
+
+            # Write raw partitions ONLY for market days that have real FRED data
+            written = _write_raw_partitions(df_market_only, bucket, run_id)
+
             print(
-                f"  [STAGE 4] Fetched {len(df)} observation(s) from FRED, "
+                f"  [STAGE 4] Fetched {len(df)} FRED observation(s), "
+                f"filtered to {len(df_market_only)} market day(s), "
                 f"wrote {len(written)} raw partition(s)."
             )
-            return df
+
+            return df_market_only
 
         except Exception as exc:
             last_exc = exc
@@ -890,7 +912,7 @@ def fetch_dgs10_from_fred(
         f"FRED DGS10 fetch failed after {CONFIG['max_retries']} attempts: {last_exc}"
     )
 
-
+    
 # =============================================================
 # STAGE 5 — DGS10 series construction
 # =============================================================
@@ -1421,7 +1443,8 @@ def update_bonds_pipeline(
             if old_rolling_df is not None and not old_rolling_df.empty:
                 start_date = pd.to_datetime(old_rolling_df["date"]).dt.date.max()
             else:
-                start_date = today - timedelta(days=CONFIG["window_days"])
+                extra_days = 15
+                start_date = today - timedelta(days=CONFIG["window_days"] + extra_days)
                 print(
                     f"  [INCREMENTAL] No rolling parquet found — "
                     f"defaulting start_date to today - {CONFIG['window_days']}d = {start_date}."

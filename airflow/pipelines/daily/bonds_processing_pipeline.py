@@ -377,6 +377,16 @@ def s3_key_exists(bucket: str, key: str) -> bool:
         return False
 
 
+def read_csv_from_s3(bucket: str, key: str) -> pd.DataFrame:
+    """Read a CSV from S3. Raises BondProcessingError on failure."""
+    try:
+        print(f"  [S3 READ CSV]     s3://{bucket}/{key}")
+        obj = get_s3().get_object(Bucket=bucket, Key=key)
+        return pd.read_csv(BytesIO(obj["Body"].read()))
+    except ClientError as exc:
+        raise BondProcessingError(f"Failed to read s3://{bucket}/{key}: {exc}") from exc
+
+
 def _read_parquet_from_s3(bucket: str, key: str) -> pd.DataFrame:
     """Read a Parquet from S3. Raises BondProcessingError on failure."""
     try:
