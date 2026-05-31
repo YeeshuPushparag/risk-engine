@@ -564,11 +564,8 @@ def write_to_postgres(df, mode, retries=3):
                     # ─────────────────────────────────────────────
                     # Step 4: Bulk INSERT via COPY
                     # ─────────────────────────────────────────────
-                    copy_sql = (
-                        f"COPY public.loan_data "
-                        f"({', '.join(pg_cols)}) "
-                        f"FROM STDIN WITH CSV"
-                    )
+                    quoted = [f'"{c}"' for c in pg_cols_order]
+                    copy_sql = f"COPY public.loan_data ({','.join(quoted)}) FROM STDIN WITH CSV"
 
                     buf = StringIO()
 
