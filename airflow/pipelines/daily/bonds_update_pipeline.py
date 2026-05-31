@@ -1500,11 +1500,9 @@ def update_bonds_pipeline(
             dgs10_new    = _read_raw_layer(bucket, replay_start, end_date)
 
             if dgs10_new.empty:
-                raise BondPipelineError(
-                    f"Replay aborted: no raw partitions found for the entire "
-                    f"window [{start_str}, {end_str}].  Run an incremental or "
-                    "backfill pipeline for this range first."
-                )
+                print(f"  [STEP 5] No raw partitions found for window [{start_str}, {end_str}] — "
+                    f"will use forward/backward fill only.")
+                dgs10_new = pd.DataFrame(columns=["date", "DGS10"])
 
             # Log partially missing dates as a warning — replay continues
             valid_window = get_valid_market_days(start_str, end_str)
