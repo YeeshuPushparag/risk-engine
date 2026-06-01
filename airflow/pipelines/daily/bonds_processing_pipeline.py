@@ -865,6 +865,7 @@ def write_to_snowflake_history(df: pd.DataFrame, run_mode: str, run_id: str) -> 
                 SNOWFLAKE_HISTORY_TABLE,
                 chunk_size        = CONFIG["snowflake_chunk"],
                 quote_identifiers = True,
+                use_logical_type  = True,
             )
             if not success:
                 raise RuntimeError(
@@ -1013,6 +1014,7 @@ def _snowflake_clean_delete_insert(
                     chunk_size=CONFIG["snowflake_chunk"],
                     quote_identifiers=True,
                     auto_create_table=False,
+                    use_logical_type=True,
                 )
 
                 # =====================================================
@@ -1187,6 +1189,7 @@ def _snowflake_clean_merge(
                     chunk_size=CONFIG["snowflake_chunk"],
                     quote_identifiers=True,
                     auto_create_table=False,
+                    use_logical_type=True,
                 )
 
                 if not success:

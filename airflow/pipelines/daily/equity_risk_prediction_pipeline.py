@@ -965,6 +965,7 @@ def write_to_snowflake_history(df, run_mode, run_id=None, chunk_size=20_000):
                 SNOWFLAKE_HISTORY_TABLE,
                 chunk_size=chunk_size,
                 quote_identifiers=True,
+                use_logical_type=True,
             )
             if not success:
                 raise RuntimeError(
@@ -1035,6 +1036,7 @@ def _snowflake_clean_delete_insert(df, start_date, end_date, run_id=None, chunk_
                     ctx, df, temp_table,
                     chunk_size=chunk_size,
                     quote_identifiers=True,
+                    use_logical_type=True,
                 )
 
                 # Step 2 — open explicit transaction
@@ -1167,6 +1169,7 @@ def _snowflake_clean_merge(df, run_id=None, chunk_size=20_000):
                     chunk_size=chunk_size,
                     quote_identifiers=True,
                     auto_create_table=False,
+                    use_logical_type=True,
                 )
 
                 # =====================================================

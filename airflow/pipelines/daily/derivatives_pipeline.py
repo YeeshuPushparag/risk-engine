@@ -442,7 +442,7 @@ def write_to_snowflake_history(
         with get_snowflake_conn() as ctx:
             success, nchunks, nrows, _ = write_pandas(
                 ctx, df_hist, SNOWFLAKE_HISTORY_TABLE,
-                chunk_size=chunk_size, quote_identifiers=True,
+                chunk_size=chunk_size, quote_identifiers=True, use_logical_type=True,
             )
             if not success:
                 raise RuntimeError(
@@ -530,6 +530,7 @@ def _snowflake_clean_delete_insert(
                     chunk_size=chunk_size,
                     quote_identifiers=True,
                     auto_create_table=False,
+                    use_logical_type=True,
                 )
 
                 # =====================================================
@@ -702,6 +703,7 @@ def _snowflake_clean_merge(
                     chunk_size=chunk_size,
                     quote_identifiers=True,
                     auto_create_table=False,
+                    use_logical_type=True,
                 )
 
                 if not success:

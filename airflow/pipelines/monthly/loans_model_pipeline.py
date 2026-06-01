@@ -190,7 +190,7 @@ def write_to_snowflake_history(df, table_name, run_id=None, chunk_size=100000):
         with get_snowflake_conn() as ctx:
             with ctx.cursor() as cs:
                 # Write to history table (append-only)
-                write_pandas(ctx, df, table_name, chunk_size=chunk_size, quote_identifiers=True)
+                write_pandas(ctx, df, table_name, chunk_size=chunk_size, quote_identifiers=True, use_logical_type=True)
                 
                 # Get row count
                 cs.execute(f"SELECT COUNT(*) FROM {table_name}")
@@ -281,7 +281,7 @@ def transactional_delete_insert_snowflake_clean(df, table_name, target_months, r
                     print(f"    Deleted {deleted_rows} rows from {table_name} for {len(target_months)} months")
                     
                     # Insert new rows
-                    write_pandas(ctx, df, table_name, chunk_size=chunk_size, quote_identifiers=True)
+                    write_pandas(ctx, df, table_name, chunk_size=chunk_size, quote_identifiers=True,use_logical_type=True)
                     inserted_rows = len(df)
                     print(f"    Inserted {inserted_rows} rows into {table_name}")
                     
@@ -315,7 +315,7 @@ def write_to_snowflake_clean(df, table_name, run_id=None, chunk_size=100000):
     try:
         with get_snowflake_conn() as ctx:
             with ctx.cursor() as cs:
-                write_pandas(ctx, df, table_name, chunk_size=chunk_size, quote_identifiers=True)
+                write_pandas(ctx, df, table_name, chunk_size=chunk_size, quote_identifiers=True,use_logical_type=True)
                 print(f"  Snowflake CLEAN insert {table_name}: {len(df)} rows added")
                 return len(df)
                 
