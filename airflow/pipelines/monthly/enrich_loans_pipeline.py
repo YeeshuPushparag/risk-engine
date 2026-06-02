@@ -473,25 +473,22 @@ def run_enrich_loans_pipeline(
         # ============================================================
         print("[STEP 3] Determining date range for Snowflake load...")
         
-        # For replay/backfill: load ALL data >= start_date_override
-        # For incremental: load ONLY data > watermark (if watermark exists)
         snowflake_start_date = None
         
         if mode in ["replay", "backfill"]:
-            # Load everything from start_date_override onward
             snowflake_start_date = start_date_override
             print(f"  Loading Snowflake data from {snowflake_start_date.date()} onward")
+            
         elif mode == "incremental":
-            if mode == "incremental":
-                if watermark:
-                    snowflake_start_date = (watermark + 1).start_time
-                    print(f"  Loading Snowflake data from {snowflake_start_date.date()} onward")
-                else:
-                    # No previous data - load last 3 months only
-                    today_period = pd.Period(pd.Timestamp.today(), freq="M")
-                    snowflake_start_date = (today_period - 3 + 1).start_time
-                    print(f"  No previous parquet - loading last 3 months only")
-                    print(f"  Loading Snowflake data from {snowflake_start_date.date()} onward")
+            if watermark:
+                snowflake_start_date = (watermark + 1).start_time
+                print(f"  Loading Snowflake data from {snowflake_start_date.date()} onward")
+            else:
+                today_period = pd.Period(pd.Timestamp.today(), freq="M")
+                snowflake_start_date = (today_period - 3 + 1).start_time
+                print(f"  No previous parquet - loading last 3 months from {snowflake_start_date.date()}")
+        
+        print(f"  SNOWFLAKE START DATE: {snowflake_start_date}")
         
         # ============================================================
         # STEP 4: Load Snowflake tables (SOFT FAIL - no alerts)
