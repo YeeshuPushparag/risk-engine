@@ -1110,11 +1110,13 @@ def write_to_postgres(df, mode, retries=3):
 
                         pg_cur.execute(
                             """
-                            DELETE FROM public.commodity_data
-                            WHERE date < (
-                                SELECT MAX(date)
-                                FROM public.commodity_data
-                            ) - INTERVAL '1 day'
+                                DELETE FROM public.commodity_data
+                                WHERE date NOT IN (
+                                    SELECT DISTINCT date 
+                                    FROM public.commodity_data 
+                                    ORDER BY date DESC 
+                                    LIMIT 2
+                                )
                             """
                         )
 

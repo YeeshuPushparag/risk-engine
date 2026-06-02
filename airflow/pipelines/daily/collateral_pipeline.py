@@ -1225,10 +1225,12 @@ def write_single_postgres_table(
 
                         pg_cur.execute(f"""
                             DELETE FROM public.{table_name}
-                            WHERE date < (
-                                SELECT MAX(date)
-                                FROM public.{table_name}
-                            ) - INTERVAL '1 day'
+                            WHERE date NOT IN (
+                                SELECT DISTINCT date 
+                                FROM public.{table_name} 
+                                ORDER BY date DESC 
+                                LIMIT 2
+                            )
                         """)
 
                         trimmed = (

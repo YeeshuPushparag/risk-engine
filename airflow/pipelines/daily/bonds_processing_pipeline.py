@@ -1532,11 +1532,13 @@ def write_to_postgres(
                     ):
                         pg_cur.execute(
                             """
-                            DELETE FROM public.bond_data
-                            WHERE date < (
-                                SELECT MAX(date)
-                                FROM public.bond_data
-                            ) - INTERVAL '1 day'
+                                DELETE FROM public.bond_data
+                                WHERE date NOT IN (
+                                    SELECT DISTINCT date 
+                                    FROM public.bond_data 
+                                    ORDER BY date DESC 
+                                    LIMIT 2
+                                )
                             """
                         )
 
