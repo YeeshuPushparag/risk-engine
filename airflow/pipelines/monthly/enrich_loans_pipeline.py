@@ -484,9 +484,26 @@ def run_enrich_loans_pipeline(
                 snowflake_start_date = (watermark + 1).start_time
                 print(f"  Loading Snowflake data from {snowflake_start_date.date()} onward")
             else:
-                today_period = pd.Period(pd.Timestamp.today(), freq="M")
-                snowflake_start_date = (today_period - 3 + 1).start_time
-                print(f"  No previous parquet - loading last 3 months from {snowflake_start_date.date()}")
+                # No previous parquet - get max date from Snowflake
+                try:
+                    with get_snowflake_conn() as ctx:
+                        cur = ctx.cursor()
+                        cur.execute('SELECT COALESCE(MAX("date"), NULL) FROM "FX"')
+                        max_date_sf = cur.fetchone()[0]
+                        
+                        if max_date_sf:
+                            max_period = pd.Period(max_date_sf, freq="M")
+                            snowflake_start_date = (max_period - 2).start_time
+                            print(f"  Using Snowflake max date {max_period} - loading last 3 months from {snowflake_start_date.date()}")
+                        else:
+                            # No data in Snowflake at all
+                            today_period = pd.Period(pd.Timestamp.today(), freq="M")
+                            snowflake_start_date = (today_period - 2).start_time
+                            print(f"  No data in Snowflake - loading last 3 months from {snowflake_start_date.date()}")
+                except Exception as e:
+                    print(f"  Could not query Snowflake max date: {e} - falling back to today")
+                    today_period = pd.Period(pd.Timestamp.today(), freq="M")
+                    snowflake_start_date = (today_period - 2).start_time
         
         print(f"  SNOWFLAKE START DATE: {snowflake_start_date}")
         
@@ -522,9 +539,6 @@ def run_enrich_loans_pipeline(
         # Determine months available from source tables
         source_months = pd.concat([df["month_year"] for df in tables.values() if not df.empty])
         source_months = pd.PeriodIndex(source_months).dropna().sort_values().unique()
-        
-        today_period = pd.Period(pd.Timestamp.today(), freq="M")
-        source_months = source_months[source_months <= today_period]
         
         # Filter months based on mode
         if mode == "incremental" and watermark:

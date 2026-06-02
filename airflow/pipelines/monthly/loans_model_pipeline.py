@@ -1080,18 +1080,32 @@ def run_loans_model_pipeline(
         loans_calc["volatility_index"] = loans_calc[["cs_roll_std", "fxv_roll_std", "cmd_roll_std"]].mean(axis=1)
         
         # ============================================================
-        # STEP 7: Filter to only months we need to process (for output)
+        # STEP 7: Load ML model, features, and encoders (CRITICAL)
         # ============================================================
-        print("[STEP 7] Filtering to output months...")
+        print("[STEP 7] Loading ML model, features, and encoders...")
+        
+        model = load_model_from_s3_with_retry(S3_BUCKET, "loans_model_creditspread_xgb.json", run_id=run_id, retries=2)
+        print("  Model loaded successfully")
+        
+        features = load_pickle_from_s3_with_retry(S3_BUCKET, "loans_features.pkl", run_id=run_id, retries=2)
+        print(f"  Features loaded: {len(features)} features")
+        
+        encoders = load_pickle_from_s3_with_retry(S3_BUCKET, "loans_label_encoders.pkl", run_id=run_id, retries=2)
+        print(f"  Encoders loaded: {len(encoders)} encoders")
+        
+        # ============================================================
+        # STEP 8: Filter to only months we need to process (for output)
+        # ============================================================
+        print("[STEP 8] Filtering to output months...")
         
         months_set = set(months_to_process)
         loans = loans_calc[loans_calc["date"].dt.to_period("M").isin(months_set)]
         print(f"  Filtered to {len(loans)} rows for {len(months_to_process)} months")
         
         # ============================================================
-        # STEP 8: Safe model prediction (WARNING, not HARD FAIL)
+        # STEP 9: Safe model prediction (WARNING, not HARD FAIL)
         # ============================================================
-        print("[STEP 8] Running model prediction...")
+        print("[STEP 9] Running model prediction...")
         
         loans_orig = loans.copy()
         
@@ -1126,9 +1140,9 @@ def run_loans_model_pipeline(
                 loans[col] = loans_orig[col]
         
         # ============================================================
-        # STEP 9: Enhance risk metrics
+        # STEP 10: Enhance risk metrics
         # ============================================================
-        print("[STEP 9] Enhancing risk metrics...")
+        print("[STEP 10] Enhancing risk metrics...")
         loans = enhance_loan_risk_metrics(loans)
         
         # Remove duplicate business keys created during joins
@@ -1140,11 +1154,11 @@ def run_loans_model_pipeline(
                 keep="last",
             )
         )
-        
+
         # ============================================================
-        # STEP 10: Strict schema projection
+        # STEP 11: Strict schema projection
         # ============================================================
-        print("[STEP 10] Projecting to final schema...")
+        print("[STEP 11] Projecting to final schema...")
         
         allowed_columns = [
             "loan_id", "ticker", "sector", "industry", "currency", "date", "issue_date", "maturity_date",
@@ -1160,15 +1174,15 @@ def run_loans_model_pipeline(
         loans = loans.loc[:, ~loans.columns.duplicated()]
         
         # ============================================================
-        # STEP 11: Add pipeline metadata (includes run_mode for history)
+        # STEP 12: Add pipeline metadata (includes run_mode for history)
         # ============================================================
-        print("[STEP 11] Adding pipeline metadata...")
+        print("[STEP 12] Adding pipeline metadata...")
         loans_with_metadata = add_pipeline_metadata(loans, run_id, mode)
         
         # ============================================================
-        # STEP 12: Write to Snowflake HISTORY (append-only, includes run_mode)
+        # STEP 13: Write to Snowflake HISTORY (append-only, includes run_mode)
         # ============================================================
-        print("[STEP 12] Writing to Snowflake HISTORY (append-only)...")
+        print("[STEP 13] Writing to Snowflake HISTORY (append-only)...")
         
         loans_history = enforce_snowflake_types(loans_with_metadata)
         
@@ -1183,9 +1197,9 @@ def run_loans_model_pipeline(
             print(f"  History table: {history_rows} rows appended")
         
         # ============================================================
-        # STEP 13: Write to Snowflake CLEAN (TRANSACTIONAL delete+insert)
+        # STEP 14: Write to Snowflake CLEAN (TRANSACTIONAL delete+insert)
         # ============================================================
-        print("[STEP 13] Writing to Snowflake CLEAN (transactional)...")
+        print("[STEP 14] Writing to Snowflake CLEAN (transactional)...")
         
         # Remove run_mode for clean table
         loans_clean = remove_run_mode_from_clean(loans_with_metadata.copy())
@@ -1205,14 +1219,14 @@ def run_loans_model_pipeline(
             print(f"  Clean table: {clean_rows} rows written (transactional replace for {len(months_to_process)} months)")
         
         # ══════════════════════════════════════════════════════════════
-        # STEP 14 — Write to Postgres
+        # STEP 15 — Write to Postgres
         # Rules based on unique months in DataFrame:
         #   - 1 month:  Append + trim to last 2 months
         #   - 2 months: Replace entire table (no trim needed)
         #   - >2 months: Trim to latest 2 months in memory, then replace
         # Failure here -> pipeline FAILS (consistency-first).
         # ══════════════════════════════════════════════════════════════
-        print("[STEP 14] Writing to Postgres...")
+        print("[STEP 15] Writing to Postgres...")
 
         # Prepare for Postgres (drop ALL metadata columns including run_mode)
         df_pg = drop_metadata_for_serving(loans_with_metadata.copy())
@@ -1232,7 +1246,7 @@ def run_loans_model_pipeline(
         postgres_success = True
         
         # ============================================================
-        # STEP 15: Success - Send COMPLETORY Slack Alert
+        # STEP 16: Success - Send COMPLETORY Slack Alert
         # ============================================================
         processing_time = round(time.time() - pipeline_start, 2)
         pg_rows = len(df_pg) if 'df_pg' in locals() else 0
