@@ -554,7 +554,7 @@ def run_enrich_loans_pipeline(
         
         print(f"  Months to process: {len(months_to_process)}")
         print(f"  Range: {months_to_process.min()} -> {months_to_process.max()}")
-        
+
         # ============================================================
         # STEP 6: Active loans cross join with months
         # ============================================================
@@ -660,9 +660,13 @@ def run_enrich_loans_pipeline(
         else:
             # Incremental mode: simple append
             if prev is not None and not prev.empty:
+                # Remove months being recomputed
+                months_to_replace = merged["date"].unique()
+
+                prev = prev[~prev["date"].isin(months_to_replace)]
+
+                # Append fresh recomputed months
                 final_df = pd.concat([prev, merged], ignore_index=True)
-                # Remove any duplicates (keep latest for each loan_id + date)
-                final_df.drop_duplicates(subset=["loan_id", "date"], keep="last", inplace=True)
             else:
                 final_df = merged
         
