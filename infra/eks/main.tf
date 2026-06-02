@@ -138,12 +138,6 @@ resource "aws_eks_node_group" "jenkins_agent" {
     role = "jenkins-agent"
   }
 
-  lifecycle {
-    ignore_changes = [
-      scaling_config
-    ]
-  }
-
   tags = {
     "k8s.io/cluster-autoscaler/enabled"               = "true"
     "k8s.io/cluster-autoscaler/${var.cluster_name}"  = "owned"
