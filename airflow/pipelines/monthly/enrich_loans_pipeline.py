@@ -482,13 +482,16 @@ def run_enrich_loans_pipeline(
             snowflake_start_date = start_date_override
             print(f"  Loading Snowflake data from {snowflake_start_date.date()} onward")
         elif mode == "incremental":
-            if watermark:
-                # Load only data AFTER watermark (add 1 month)
-                snowflake_start_date = (watermark + 1).start_time
-                print(f"  Loading Snowflake data from {snowflake_start_date.date()} onward")
-            else:
-                # No previous data, load everything
-                print("  No previous data - loading all Snowflake data")
+            if mode == "incremental":
+                if watermark:
+                    snowflake_start_date = (watermark + 1).start_time
+                    print(f"  Loading Snowflake data from {snowflake_start_date.date()} onward")
+                else:
+                    # No previous data - load last 3 months only
+                    today_period = pd.Period(pd.Timestamp.today(), freq="M")
+                    snowflake_start_date = (today_period - 3 + 1).start_time
+                    print(f"  No previous parquet - loading last 3 months only")
+                    print(f"  Loading Snowflake data from {snowflake_start_date.date()} onward")
         
         # ============================================================
         # STEP 4: Load Snowflake tables (SOFT FAIL - no alerts)

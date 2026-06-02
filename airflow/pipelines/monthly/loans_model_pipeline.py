@@ -994,7 +994,7 @@ def run_loans_model_pipeline(
             print(f"  WARNING: Macro data processing failed: {e} (continuing without macro)")
         
         # ============================================================
-        # STEP 4: Determine months to process based on mode
+        # STEP 4: Determine months to process and prepare rolling window
         # ============================================================
         print("[STEP 4] Determining months to process...")
         
@@ -1009,15 +1009,26 @@ def run_loans_model_pipeline(
             else:
                 months_to_process = list(all_months)
                 print(f"  Replay/backfill mode: processing all {len(months_to_process)} months")
+            
+            # For replay/backfill, use ALL data for rolling calculations
+            loans_for_rolling = loans.copy()
+            
         else:
             # Incremental mode: get watermark from LOANS clean table
             watermark = get_watermark_from_clean_table(OUTPUT_TABLE, run_id=run_id)
+            
             if watermark:
                 months_to_process = [m for m in all_months if m > watermark]
                 print(f"  Incremental mode: processing {len(months_to_process)} months > {watermark}")
+                
+                # CRITICAL FIX: Get last 2 months + new months for rolling calculations
+                start_month_for_rolling = watermark - 1
+                loans_for_rolling = loans[loans["date"].dt.to_period("M") >= start_month_for_rolling]
+                print(f"  Rolling window includes months from {start_month_for_rolling} to {all_months[-1]}")
             else:
                 months_to_process = list(all_months)
                 print(f"  Incremental mode: no watermark found - processing all {len(months_to_process)} months")
+                loans_for_rolling = loans.copy()
         
         if not months_to_process:
             print("  No months to process")
@@ -1028,61 +1039,54 @@ def run_loans_model_pipeline(
             print(f"{'='*66}\n")
             return "NO_NEW_DATA"
         
-        # Filter loans to only months we need to process
-        months_set = set(months_to_process)
-        loans = loans[loans["date"].dt.to_period("M").isin(months_set)]
-        print(f"  Filtered to {len(loans)} rows for {len(months_to_process)} months")
-        
         # ============================================================
-        # STEP 5: Feature Engineering
+        # STEP 5: Feature Engineering (on rolling window data)
         # ============================================================
-        print("[STEP 5] Feature engineering...")
+        print("[STEP 5] Feature engineering on rolling window data...")
         
-        loans["spread_rate"] = loans.get("spread_bps", 0) / 10000.0
-        loans["loan_age_months"] = ((loans["date"] - loans["issue_date"]).dt.days / 30).clip(lower=0)
-        loans["time_to_maturity_months"] = ((loans["maturity_date"] - loans["date"]).dt.days / 30).clip(lower=0)
-        loans["interest_rate_monthly"] = (loans.get("coupon_rate", 0) + loans["spread_rate"]) / 12.0
-        loans["interest_income"] = loans.get("notional_usd", 0) * loans["interest_rate_monthly"]
+        # Use loans_for_rolling for all calculations (has enough history)
+        loans_calc = loans_for_rolling.copy()
         
-        if "collateral_value" not in loans.columns and "exposure_before_collateral" in loans.columns:
-            loans["collateral_value"] = loans["exposure_before_collateral"] * loans.get("collateral_ratio", 0)
-        loans["exposure_pct_collateralized"] = (
-            loans.get("collateral_value", 0) / loans.get("exposure_before_collateral", 1)
+        loans_calc["spread_rate"] = loans_calc.get("spread_bps", 0) / 10000.0
+        loans_calc["loan_age_months"] = ((loans_calc["date"] - loans_calc["issue_date"]).dt.days / 30).clip(lower=0)
+        loans_calc["time_to_maturity_months"] = ((loans_calc["maturity_date"] - loans_calc["date"]).dt.days / 30).clip(lower=0)
+        loans_calc["interest_rate_monthly"] = (loans_calc.get("coupon_rate", 0) + loans_calc["spread_rate"]) / 12.0
+        loans_calc["interest_income"] = loans_calc.get("notional_usd", 0) * loans_calc["interest_rate_monthly"]
+        
+        if "collateral_value" not in loans_calc.columns and "exposure_before_collateral" in loans_calc.columns:
+            loans_calc["collateral_value"] = loans_calc["exposure_before_collateral"] * loans_calc.get("collateral_ratio", 0)
+        loans_calc["exposure_pct_collateralized"] = (
+            loans_calc.get("collateral_value", 0) / loans_calc.get("exposure_before_collateral", 1)
         ).replace([np.inf, -np.inf], np.nan).fillna(0)
         
         # ============================================================
-        # STEP 6: Rolling features
+        # STEP 6: Rolling features (on full rolling window data)
         # ============================================================
         print("[STEP 6] Computing rolling features...")
         
-        loans = loans.sort_values(["loan_id", "date"])
+        loans_calc = loans_calc.sort_values(["loan_id", "date"])
         WINDOW = 3
         
         for col, new_col in [("credit_spread", "cs_roll_std"),
                              ("fx_volatility", "fxv_roll_std"),
                              ("vol_20d", "cmd_roll_std")]:
-            if col in loans.columns:
-                loans[new_col] = loans.groupby("loan_id")[col].transform(lambda s: s.rolling(WINDOW, min_periods=2).std())
-                mu, sd = loans[new_col].mean(), loans[new_col].std(ddof=0)
-                loans[new_col] = (loans[new_col] - mu) / sd if sd > 0 else 0
+            if col in loans_calc.columns:
+                loans_calc[new_col] = loans_calc.groupby("loan_id")[col].transform(lambda s: s.rolling(WINDOW, min_periods=2).std())
+                mu, sd = loans_calc[new_col].mean(), loans_calc[new_col].std(ddof=0)
+                loans_calc[new_col] = (loans_calc[new_col] - mu) / sd if sd > 0 else 0
             else:
-                loans[new_col] = 0
+                loans_calc[new_col] = 0
         
-        loans["volatility_index"] = loans[["cs_roll_std", "fxv_roll_std", "cmd_roll_std"]].mean(axis=1)
+        loans_calc["volatility_index"] = loans_calc[["cs_roll_std", "fxv_roll_std", "cmd_roll_std"]].mean(axis=1)
         
         # ============================================================
-        # STEP 7: Load ML model, features, and encoders (CRITICAL)
+        # STEP 7: Filter to only months we need to process (for output)
         # ============================================================
-        print("[STEP 7] Loading ML model, features, and encoders...")
+        print("[STEP 7] Filtering to output months...")
         
-        model = load_model_from_s3_with_retry(S3_BUCKET, "loans_model_creditspread_xgb.json", run_id=run_id, retries=2)
-        print("  Model loaded successfully")
-        
-        features = load_pickle_from_s3_with_retry(S3_BUCKET, "loans_features.pkl", run_id=run_id, retries=2)
-        print(f"  Features loaded: {len(features)} features")
-        
-        encoders = load_pickle_from_s3_with_retry(S3_BUCKET, "loans_label_encoders.pkl", run_id=run_id, retries=2)
-        print(f"  Encoders loaded: {len(encoders)} encoders")
+        months_set = set(months_to_process)
+        loans = loans_calc[loans_calc["date"].dt.to_period("M").isin(months_set)]
+        print(f"  Filtered to {len(loans)} rows for {len(months_to_process)} months")
         
         # ============================================================
         # STEP 8: Safe model prediction (WARNING, not HARD FAIL)
