@@ -39,11 +39,11 @@ kube-prometheus-stack:
         - job_name: "jenkins-ec2"
           static_configs:
             - targets:
-                - "ip-10-0-1-176.ec2.internal:9100"
+                - "ip-10-0-1-177.ec2.internal:9100"
         - job_name: pushgateway
           static_configs:
             - targets:
-                - pushgateway.monitoring.svc.cluster.local:9091
+                - pushgateway-prometheus-pushgateway.monitoring.svc.cluster.local:9091
   ##################################
   # GRAFANA
   ##################################

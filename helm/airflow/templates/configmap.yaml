@@ -47,7 +47,7 @@ data:
   # =========================
   # Pushgateway
   # =========================
-  PUSHGATEWAY_URL: pushgateway.monitoring.svc.cluster.local:9091
+  PUSHGATEWAY_URL: pushgateway-prometheus-pushgateway.monitoring.svc.cluster.local:9091
 
   # =========================
   # Misc
