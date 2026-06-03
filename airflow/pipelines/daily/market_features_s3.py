@@ -54,6 +54,10 @@ import os
 import requests
 import pendulum
 import pandas_market_calendars as mcal
+from prometheus_client import CollectorRegistry
+from prometheus_client import Gauge
+from prometheus_client import push_to_gateway
+
 
 
 # =============================================================
@@ -92,6 +96,9 @@ CONFIG: dict = {
     "feature_version":         "v1",
     "transformation":          "generate_market_features_v1",
     "data_source":             "yfinance",
+
+    # Pushgateway
+    "pushgateway_url":          os.getenv("PUSHGATEWAY_URL"),
 }
 
 # =============================================================
@@ -1501,7 +1508,98 @@ def write_dlq(
 
         write_json_to_s3(payload, bucket, key)
         print(f"  [DLQ] {len(failed)} ticker(s) for {date_str} -> s3://{bucket}/{key}")
-    
+
+
+# =============================================================
+# PUSH PIPELINE METRICS
+# =============================================================
+
+def push_pipeline_metrics(
+    pipeline_name: str,
+    run_id: str,
+    status: str,
+    runtime_s: float,
+    input_rows: int,
+    output_rows: int,
+    failed_tickers: int,
+    failure_rate: float,
+    anomaly_count: int,
+    sla_status: str,
+):
+    registry = CollectorRegistry()
+
+    metric_labels = {
+        "pipeline": pipeline_name,
+        "run_id": run_id,
+    }
+
+    Gauge(
+        "pipeline_runtime_seconds",
+        "Pipeline runtime in seconds",
+        ["pipeline", "run_id"],
+        registry=registry,
+    ).labels(**metric_labels).set(runtime_s)
+
+    Gauge(
+        "pipeline_input_rows",
+        "Number of input rows",
+        ["pipeline", "run_id"],
+        registry=registry,
+    ).labels(**metric_labels).set(input_rows)
+
+    Gauge(
+        "pipeline_output_rows",
+        "Number of output rows",
+        ["pipeline", "run_id"],
+        registry=registry,
+    ).labels(**metric_labels).set(output_rows)
+
+    Gauge(
+        "pipeline_failed_tickers",
+        "Number of failed tickers",
+        ["pipeline", "run_id"],
+        registry=registry,
+    ).labels(**metric_labels).set(failed_tickers)
+
+    Gauge(
+        "pipeline_failure_rate",
+        "Pipeline failure rate",
+        ["pipeline", "run_id"],
+        registry=registry,
+    ).labels(**metric_labels).set(failure_rate)
+
+    Gauge(
+        "pipeline_anomaly_count",
+        "Total anomaly count",
+        ["pipeline", "run_id"],
+        registry=registry,
+    ).labels(**metric_labels).set(anomaly_count)
+
+    Gauge(
+        "pipeline_sla_status",
+        "1=PASS, 0=FAIL",
+        ["pipeline", "run_id"],
+        registry=registry,
+    ).labels(**metric_labels).set(
+        1 if str(sla_status).upper() == "PASS" else 0
+    )
+
+    Gauge(
+        "pipeline_status",
+        "1=SUCCESS, 0=FAILED",
+        ["pipeline", "run_id"],
+        registry=registry,
+    ).labels(**metric_labels).set(
+        1 if str(status).upper() == "SUCCESS" else 0
+    )
+
+    push_to_gateway(
+        CONFIG["pushgateway_url"],
+        job=f"{pipeline_name}_{run_id}",
+        registry=registry,
+    )
+
+
 # =============================================================
 # MAIN PIPELINE  —  update_market_features
 # =============================================================
@@ -1923,9 +2021,39 @@ def update_market_features(
         print(f"{'=' * 66}\n")
         print("PIPELINE SUCCESS")
 
+        push_pipeline_metrics(
+            pipeline_name=CONFIG["pipeline_name"],
+            run_id=run_id,
+            status="SUCCESS",
+            runtime_s=processing_time_s,
+            input_rows=len(clean_df),
+            output_rows=len(new_features),
+            failed_tickers=len(failed_tickers),
+            failure_rate=failure_rate,
+            anomaly_count=len(anomalies),
+            sla_status=sla["status"],
+        )
+
         return rolling_df, "Success"
 
     except Exception as exc:
+
+        try:
+            push_pipeline_metrics(
+                pipeline_name=CONFIG["pipeline_name"],
+                run_id=run_id,
+                status="FAILED",
+                runtime_s=processing_time_s,
+                input_rows=len(clean_df),
+                output_rows=len(new_features),
+                failed_tickers=len(failed_tickers),
+                failure_rate=failure_rate,
+                anomaly_count=len(anomalies),
+                sla_status=sla.get("status", "FAIL"),
+            )
+        except Exception:
+            pass
+
         # Best-effort failure metadata — may already be written above for specific errors
         send_alert(
             f"Pipeline failed: {exc}",

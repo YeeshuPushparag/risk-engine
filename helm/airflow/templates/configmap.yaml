@@ -45,6 +45,11 @@ data:
   AIRFLOW__LOGGING__HOSTNAME_CALLABLE: airflow.utils.net.get_host_ip_address
 
   # =========================
+  # Pushgateway
+  # =========================
+  PUSHGATEWAY_URL: pushgateway.monitoring.svc.cluster.local:9091
+
+  # =========================
   # Misc
   # =========================
   PYTHONPATH: /opt/airflow

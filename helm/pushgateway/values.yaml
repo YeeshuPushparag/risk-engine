@@ -1,0 +1,26 @@
+prometheus-pushgateway:
+
+  ##################################
+  # SERVICE
+  ##################################
+  service:
+    type: ClusterIP
+    port: 9091
+
+  ##################################
+  # SCHEDULING
+  ##################################
+  nodeSelector:
+    role: monitoring
+
+  ##################################
+  # RESOURCES
+  ##################################
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+    limits:
+      cpu: 500m
+      memory: 512Mi
