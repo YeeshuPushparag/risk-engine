@@ -2097,6 +2097,8 @@ def run_equity_risk_pipeline(
             pipeline_name="equity_risk_prediction_pipeline",
             run_id=run_id,
             status="SUCCESS",
+            dag_run_id=airflow_metadata.get("dag_run_id"),
+            run_type=mode,
             metrics=metrics,
         )
 
@@ -2144,6 +2146,8 @@ def run_equity_risk_pipeline(
                 pipeline_name="equity_risk_prediction_pipeline",
                 run_id=run_id,
                 status="FAILED",
+                dag_run_id=airflow_metadata.get("dag_run_id"),
+                run_type=mode_label,
                 metrics=metrics,
             )
         except Exception:
