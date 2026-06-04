@@ -1114,10 +1114,13 @@ def write_to_postgres(
 # PUSH PIPELINE METRICS
 # =============================================================
 
+
 def push_pipeline_metrics(
     pipeline_name: str,
     run_id: str,
     status: str,
+    dag_run_id: str,
+    run_type: str,
     metrics: dict,
 ):
     registry = CollectorRegistry()
@@ -1125,13 +1128,15 @@ def push_pipeline_metrics(
     labels = {
         "pipeline": pipeline_name,
         "run_id": run_id,
+        "dag_run_id": dag_run_id,
+        "run_type": run_type,
     }
 
     # SUCCESS / FAILED
     Gauge(
         "pipeline_status",
         "1=SUCCESS 0=FAILED",
-        ["pipeline", "run_id"],
+        ["pipeline", "run_id", "dag_run_id", "run_type"],
         registry=registry,
     ).labels(**labels).set(
         1 if status.upper() == "SUCCESS" else 0
@@ -1142,10 +1147,10 @@ def push_pipeline_metrics(
         Gauge(
             f"pipeline_{metric_name}",
             f"Pipeline metric: {metric_name}",
-            ["pipeline", "run_id"],
+            ["pipeline", "run_id", "dag_run_id", "run_type"],
             registry=registry,
         ).labels(**labels).set(metric_value)
-
+        
     try:
         pushgateway_url = os.getenv("PUSHGATEWAY_URL")
 
@@ -1639,6 +1644,8 @@ def run_derivatives_processing(
             pipeline_name="derivatives_pipeline",
             run_id=run_id,
             status="SUCCESS",
+            dag_run_id=airflow_metadata.get("dag_run_id"),
+            run_type=mode,
             metrics={
                 "runtime_seconds": processing_time,
                 "rows_processed": snowflake_rows,
@@ -1694,6 +1701,8 @@ def run_derivatives_processing(
                 pipeline_name="derivatives_pipeline",
                 run_id=run_id,
                 status="FAILED",
+                dag_run_id=airflow_metadata.get("dag_run_id"),
+                run_type=mode,
                 metrics={
                     "runtime_seconds": processing_time,
                 },
