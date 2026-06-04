@@ -99,6 +99,7 @@ from io import BytesIO
 from fredapi import Fred
 import pendulum
 import pandas_market_calendars as mcal
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 
 # =============================================================
 # CONFIG  —  single source of truth
@@ -142,6 +143,9 @@ CONFIG: dict = {
     "data_source":    "fred+synthetic",
     "input_source":   "synthetic_bond+fred",
     "transformation": "bond_features_v1",
+
+    # Pushgateway
+    "pushgateway_url":          os.getenv("PUSHGATEWAY_URL"),
 }
 
 # Volatility basis points by credit rating, expressed as a decimal fraction
@@ -1344,6 +1348,61 @@ def _add_pipeline_metadata(
 
 
 # =============================================================
+# PUSH PIPELINE METRICS
+# =============================================================
+
+def push_pipeline_metrics(
+    pipeline_name: str,
+    run_id: str,
+    status: str,
+    metrics: dict,
+):
+    registry = CollectorRegistry()
+
+    labels = {
+        "pipeline": pipeline_name,
+        "run_id": run_id,
+    }
+
+    # SUCCESS / FAILED
+    Gauge(
+        "pipeline_status",
+        "1=SUCCESS 0=FAILED",
+        ["pipeline", "run_id"],
+        registry=registry,
+    ).labels(**labels).set(
+        1 if status.upper() == "SUCCESS" else 0
+    )
+
+    # Dynamic metrics
+    for metric_name, metric_value in metrics.items():
+        Gauge(
+            f"pipeline_{metric_name}",
+            f"Pipeline metric: {metric_name}",
+            ["pipeline", "run_id"],
+            registry=registry,
+        ).labels(**labels).set(metric_value)
+
+    try:
+        push_to_gateway(
+            CONFIG["pushgateway_url"],
+            job=f"{pipeline_name}_{run_id}",
+            registry=registry,
+        )
+
+        print(
+            f"[PROMETHEUS] Metrics pushed successfully | "
+            f"pipeline={pipeline_name} | run_id={run_id}"
+        )
+
+    except Exception as e:
+        print(
+            f"[PROMETHEUS] Pushgateway FAILED | "
+            f"pipeline={pipeline_name} | run_id={run_id} | error={e}"
+        )
+        raise
+
+# =============================================================
 # MAIN PIPELINE — update_bonds_pipeline
 # =============================================================
 
@@ -1637,6 +1696,22 @@ def update_bonds_pipeline(
         print(f"  fill_flags      : {fill_summary}")
         print(f"{'=' * 66}\n")
 
+        metrics = {
+            "runtime_seconds": processing_time,
+            "output_rows": output_rows,
+            "date_partitions": len(partition_log),
+            "real_rows": fill_summary.get("REAL", 0),
+            "forward_filled_rows": fill_summary.get("FORWARD_FILLED", 0),
+            "backward_filled_rows": fill_summary.get("BACKWARD_FILLED", 0),
+        }
+
+        push_pipeline_metrics(
+            pipeline_name=CONFIG["pipeline_name"],
+            run_id=run_id,
+            status="SUCCESS",
+            metrics=metrics,
+        )
+
         return f"SUCCESS_{output_rows}_ROWS"
 
     except Exception as exc:
@@ -1668,4 +1743,17 @@ def update_bonds_pipeline(
             airflow_metadata=airflow_metadata,
             status="FAILED", processing_time_s=processing_time, error=str(exc),
         )
+
+        try:
+            push_pipeline_metrics(
+                pipeline_name=CONFIG["pipeline_name"],
+                run_id=run_id,
+                status="FAILED",
+                metrics={
+                    "runtime_seconds": processing_time,
+                },
+            )
+        except Exception:
+            pass
+
         raise

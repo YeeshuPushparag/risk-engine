@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from connections.snowflake_conn import get_snowflake_conn
 from connections.postgre_conn import get_postgre_conn
 from snowflake.connector.pandas_tools import write_pandas
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 
 S3_BUCKET = "yeeshu-loan-bucket"
 LOAN_BASE_KEY = "loan_synthetic_base.parquet"
@@ -359,8 +360,69 @@ def replace_month_window(prev_df, new_df, recompute_start_period):
     return final_df
 
 
+# =============================================================
+# PUSH PIPELINE METRICS
+# =============================================================
+
+def push_pipeline_metrics(
+    pipeline_name: str,
+    run_id: str,
+    status: str,
+    metrics: dict,
+):
+    registry = CollectorRegistry()
+
+    labels = {
+        "pipeline": pipeline_name,
+        "run_id": run_id,
+    }
+
+    # SUCCESS / FAILED
+    Gauge(
+        "pipeline_status",
+        "1=SUCCESS 0=FAILED",
+        ["pipeline", "run_id"],
+        registry=registry,
+    ).labels(**labels).set(
+        1 if status.upper() == "SUCCESS" else 0
+    )
+
+    # Dynamic metrics
+    for metric_name, metric_value in metrics.items():
+        Gauge(
+            f"pipeline_{metric_name}",
+            f"Pipeline metric: {metric_name}",
+            ["pipeline", "run_id"],
+            registry=registry,
+        ).labels(**labels).set(metric_value)
+
+    try:
+        pushgateway_url = os.getenv("PUSHGATEWAY_URL")
+
+        if not pushgateway_url:
+            raise ValueError("PUSHGATEWAY_URL environment variable is not set")
+
+        push_to_gateway(
+            pushgateway_url,
+            job=f"{pipeline_name}_{run_id}",
+            registry=registry,
+        )
+
+        print(
+            f"[PROMETHEUS] Metrics pushed successfully | "
+            f"pipeline={pipeline_name} | run_id={run_id}"
+        )
+
+    except Exception as e:
+        print(
+            f"[PROMETHEUS] Pushgateway FAILED | "
+            f"pipeline={pipeline_name} | run_id={run_id} | error={e}"
+        )
+        raise
+
+
 # ============================================================
-# MAIN PIPELINE (WITH CRITICAL ALERTS ONLY)
+# MAIN PIPELINE 
 # ============================================================
 def run_enrich_loans_pipeline(
     start_date_override=None,
@@ -728,7 +790,21 @@ def run_enrich_loans_pipeline(
             "airflow": airflow_metadata,
         }
         write_run_summary(run_summary)
-        
+                
+        push_pipeline_metrics(
+            pipeline_name="enrich_loans_pipeline",
+            run_id=run_id,
+            status="SUCCESS",
+            metrics={
+                "runtime_seconds": round(total_time, 2),
+                "rows_processed": len(final_df),
+                "active_loans": len(active_loans),
+                "months_processed": len(months_to_process),
+                "tables_loaded": len(succeeded_tables),
+                "unique_tickers": final_df["ticker"].nunique(),
+            },
+        )
+
         return "SUCCESS"
     
     except Exception as e:
@@ -766,5 +842,18 @@ def run_enrich_loans_pipeline(
         except Exception:
             pass  # Don't mask the original exception
         
+        try:
+            push_pipeline_metrics(
+                pipeline_name="enrich_loans_pipeline",
+                run_id=run_id,
+                status="FAILED",
+                metrics={
+                    "runtime_seconds": round(total_time, 2),
+                    "tables_loaded": len(succeeded_tables),
+                },
+            )
+        except Exception:
+            pass
+
         # Re-raise for Airflow to catch
         raise

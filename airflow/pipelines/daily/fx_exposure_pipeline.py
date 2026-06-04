@@ -56,6 +56,7 @@ from io import BytesIO
 import requests
 import pendulum
 import pandas_market_calendars as mcal
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 
 # =============================================================
 # CONFIG  —  single source of truth.  No magic numbers in code.
@@ -89,6 +90,9 @@ CONFIG: dict = {
     "feature_version":        "v1",
     "transformation":         "fx_exposure_v1",
     "data_source":            "yfinance+fred",
+
+    # Pushgateway
+    "pushgateway_url":          os.getenv("PUSHGATEWAY_URL"),
 }
 
 # =============================================================
@@ -1464,6 +1468,62 @@ def write_metadata(
 
 
 # =============================================================
+# PUSH PIPELINE METRICS
+# =============================================================
+
+def push_pipeline_metrics(
+    pipeline_name: str,
+    run_id: str,
+    status: str,
+    metrics: dict,
+):
+    registry = CollectorRegistry()
+
+    labels = {
+        "pipeline": pipeline_name,
+        "run_id": run_id,
+    }
+
+    # SUCCESS / FAILED
+    Gauge(
+        "pipeline_status",
+        "1=SUCCESS 0=FAILED",
+        ["pipeline", "run_id"],
+        registry=registry,
+    ).labels(**labels).set(
+        1 if status.upper() == "SUCCESS" else 0
+    )
+
+    # Dynamic metrics
+    for metric_name, metric_value in metrics.items():
+        Gauge(
+            f"pipeline_{metric_name}",
+            f"Pipeline metric: {metric_name}",
+            ["pipeline", "run_id"],
+            registry=registry,
+        ).labels(**labels).set(metric_value)
+
+    try:
+        push_to_gateway(
+            CONFIG["pushgateway_url"],
+            job=f"{pipeline_name}_{run_id}",
+            registry=registry,
+        )
+
+        print(
+            f"[PROMETHEUS] Metrics pushed successfully | "
+            f"pipeline={pipeline_name} | run_id={run_id}"
+        )
+
+    except Exception as e:
+        print(
+            f"[PROMETHEUS] Pushgateway FAILED | "
+            f"pipeline={pipeline_name} | run_id={run_id} | error={e}"
+        )
+        raise
+
+
+# =============================================================
 # MAIN PIPELINE  —  update_fx_pipeline
 # =============================================================
 
@@ -1874,6 +1934,25 @@ def update_fx_pipeline(
         print(f"  anomalies    : {len(anomalies)}")
         print(f"{'=' * 66}\n")
 
+        metrics = {
+            "runtime_seconds": processing_time_s,
+            "input_rows": len(clean_raw_df),
+            "output_rows": len(new_features),
+            "expected_pairs": expected_pairs,
+            "actual_pairs": clean_raw_df["currency_pair"].nunique(),
+            "failed_pairs": len(failed_pairs),
+            "failure_rate": failure_rate,
+            "anomaly_count": len(anomalies),
+            "outlier_flags": dq_report.get("outlier_flags", 0),
+        }
+
+        push_pipeline_metrics(
+            pipeline_name=CONFIG["pipeline_name"],
+            run_id=run_id,
+            status="SUCCESS",
+            metrics=metrics,
+        )
+
         return rolling_df, f"UPDATED_ROWS_{len(new_features)}"
 
     except Exception as exc:
@@ -1882,6 +1961,21 @@ def update_fx_pipeline(
             level  = "CRITICAL",
             context = {"run_id": run_id, "mode": mode_label, "error": str(exc)},
         )
+
+        metrics = {
+            "runtime_seconds": processing_time_s,
+        }
+
+        try:
+            push_pipeline_metrics(
+                pipeline_name=CONFIG["pipeline_name"],
+                run_id=run_id,
+                status="FAILED",
+                metrics=metrics,
+            )
+        except Exception:
+            pass
+
         raise
 
     finally:

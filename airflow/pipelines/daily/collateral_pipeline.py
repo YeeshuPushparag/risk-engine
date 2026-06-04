@@ -78,7 +78,7 @@ import requests
 from connections.snowflake_conn import get_snowflake_conn
 from connections.postgre_conn import get_postgre_conn
 from snowflake.connector.pandas_tools import write_pandas
-
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 
 # ============================================================
 # CONSTANTS
@@ -1303,6 +1303,67 @@ def write_single_postgres_table(
     )
 
 
+# =============================================================
+# PUSH PIPELINE METRICS
+# =============================================================
+
+def push_pipeline_metrics(
+    pipeline_name: str,
+    run_id: str,
+    status: str,
+    metrics: dict,
+):
+    registry = CollectorRegistry()
+
+    labels = {
+        "pipeline": pipeline_name,
+        "run_id": run_id,
+    }
+
+    # SUCCESS / FAILED
+    Gauge(
+        "pipeline_status",
+        "1=SUCCESS 0=FAILED",
+        ["pipeline", "run_id"],
+        registry=registry,
+    ).labels(**labels).set(
+        1 if status.upper() == "SUCCESS" else 0
+    )
+
+    # Dynamic metrics
+    for metric_name, metric_value in metrics.items():
+        Gauge(
+            f"pipeline_{metric_name}",
+            f"Pipeline metric: {metric_name}",
+            ["pipeline", "run_id"],
+            registry=registry,
+        ).labels(**labels).set(metric_value)
+
+    try:
+        pushgateway_url = os.getenv("PUSHGATEWAY_URL")
+
+        if not pushgateway_url:
+            raise ValueError("PUSHGATEWAY_URL environment variable is not set")
+
+        push_to_gateway(
+            pushgateway_url,
+            job=f"{pipeline_name}_{run_id}",
+            registry=registry,
+        )
+
+        print(
+            f"[PROMETHEUS] Metrics pushed successfully | "
+            f"pipeline={pipeline_name} | run_id={run_id}"
+        )
+
+    except Exception as e:
+        print(
+            f"[PROMETHEUS] Pushgateway FAILED | "
+            f"pipeline={pipeline_name} | run_id={run_id} | error={e}"
+        )
+        raise
+
+
 
 # ============================================================
 # MAIN PIPELINE ENTRY POINT
@@ -1655,6 +1716,24 @@ def run_collateral_pipeline(
         }
         write_run_summary(run_summary)
 
+        push_pipeline_metrics(
+            pipeline_name="collateral_pipeline",
+            run_id=run_id,
+            status="SUCCESS",
+            metrics={
+                "runtime_seconds": processing_time,
+                "detail_rows": snowflake_detail_rows,
+                "model_rows": len(df_model),
+                "unique_trades": df_detail["trade_id"].nunique(),
+                "unique_counterparties": df_detail["counterparty"].nunique(),
+                "total_exposure": float(df_detail["exposure_before_collateral"].sum()),
+                "total_collateral": float(df_detail["effective_collateral"].sum()),
+                "total_net_exposure": float(df_detail["net_exposure"].sum()),
+                "margin_calls": int(df_detail["margin_call_flag"].sum()),
+                "reused_collateral": float(df_detail["reused_value"].sum()),
+            },
+        )
+
         return f"SUCCESS_{snowflake_detail_rows}"
 
     except Exception as e:
@@ -1693,6 +1772,18 @@ def run_collateral_pipeline(
             write_run_summary(run_summary)
         except Exception:
             pass  # Don't mask the original exception
+
+        try:
+            push_pipeline_metrics(
+                pipeline_name="collateral_pipeline",
+                run_id=run_id,
+                status="FAILED",
+                metrics={
+                    "runtime_seconds": processing_time,
+                },
+            )
+        except Exception:
+            pass
 
         # Re-raise so Airflow marks the task as FAILED
         raise

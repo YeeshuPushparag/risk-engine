@@ -84,6 +84,7 @@ from connections.snowflake_conn import get_snowflake_conn
 from connections.postgre_conn import get_postgre_conn
 from snowflake.connector.pandas_tools import write_pandas
 import pendulum
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 
 # =============================================================
 # CONFIG  —  single source of truth. No magic numbers in code.
@@ -146,6 +147,9 @@ CONFIG: dict = {
     "data_source":    "layer2_features+xgboost",
     "input_source":   "bonds_features_30d+layer2_partitions",
     "transformation": "bond_processing_v1",
+
+    # Pushgateway
+    "pushgateway_url":          os.getenv("PUSHGATEWAY_URL"),
 }
 
 # Aliases (avoids CONFIG["..."] noise at call sites)
@@ -1610,6 +1614,62 @@ def write_to_postgres(
         f"{last_error}"
     )
 
+
+# =============================================================
+# PUSH PIPELINE METRICS
+# =============================================================
+
+def push_pipeline_metrics(
+    pipeline_name: str,
+    run_id: str,
+    status: str,
+    metrics: dict,
+):
+    registry = CollectorRegistry()
+
+    labels = {
+        "pipeline": pipeline_name,
+        "run_id": run_id,
+    }
+
+    # SUCCESS / FAILED
+    Gauge(
+        "pipeline_status",
+        "1=SUCCESS 0=FAILED",
+        ["pipeline", "run_id"],
+        registry=registry,
+    ).labels(**labels).set(
+        1 if status.upper() == "SUCCESS" else 0
+    )
+
+    # Dynamic metrics
+    for metric_name, metric_value in metrics.items():
+        Gauge(
+            f"pipeline_{metric_name}",
+            f"Pipeline metric: {metric_name}",
+            ["pipeline", "run_id"],
+            registry=registry,
+        ).labels(**labels).set(metric_value)
+
+    try:
+        push_to_gateway(
+            CONFIG["pushgateway_url"],
+            job=f"{pipeline_name}_{run_id}",
+            registry=registry,
+        )
+
+        print(
+            f"[PROMETHEUS] Metrics pushed successfully | "
+            f"pipeline={pipeline_name} | run_id={run_id}"
+        )
+
+    except Exception as e:
+        print(
+            f"[PROMETHEUS] Pushgateway FAILED | "
+            f"pipeline={pipeline_name} | run_id={run_id} | error={e}"
+        )
+        raise
+
 # =============================================================
 # MAIN PIPELINE  —  process_bonds  (SECOND PIPELINE)
 # =============================================================
@@ -1939,7 +1999,20 @@ def process_bonds(
         }
         write_run_summary(run_summary)
 
- 
+        push_pipeline_metrics(
+            pipeline_name=CONFIG["pipeline_name"],
+            run_id=run_id,
+            status="SUCCESS",
+            metrics={
+                "runtime_seconds": processing_time,
+                "rows_processed": snowflake_rows,
+                "unique_bonds": df_to_upload["bond_id"].nunique(),
+                "unique_tickers": df_to_upload["ticker"].nunique(),
+                "avg_credit_spread": float(df_to_upload["credit_spread"].mean()),
+                "avg_pd_annual": float(df_to_upload["implied_pd_annual"].mean()),
+            },
+        )
+
         return f"SUCCESS_{snowflake_rows}_ROWS"
 
     except Exception as exc:
@@ -1975,5 +2048,17 @@ def process_bonds(
             "airflow": airflow_metadata,
         }
         write_run_summary(run_summary)
+
+        try:
+            push_pipeline_metrics(
+                pipeline_name=CONFIG["pipeline_name"],
+                run_id=run_id,
+                status="FAILED",
+                metrics={
+                    "runtime_seconds": processing_time,
+                },
+            )
+        except Exception:
+            pass
 
         raise
