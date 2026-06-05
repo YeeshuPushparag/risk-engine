@@ -5,7 +5,7 @@ metadata:
   namespace: streaming
 spec:
   serviceName: zookeeper
-  replicas: 1
+  replicas: {{ .Values.replicas.zookeeper }}
   selector:
     matchLabels:
       app: zookeeper
@@ -15,16 +15,16 @@ spec:
         app: zookeeper
     spec:
       nodeSelector:
-        role: streaming
-      serviceAccountName: streaming-sa
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      serviceAccountName: {{ .Values.serviceAccount.name }}
       # Make the PVC writable for uid=1000
       securityContext:
         fsGroup: 1000
         fsGroupChangePolicy: "OnRootMismatch"
       containers:
         - name: zookeeper
-          image: 369598751710.dkr.ecr.us-east-1.amazonaws.com/zookeeper:1
-          imagePullPolicy: IfNotPresent
+          image: "{{ .Values.image.zookeeper.repository }}:{{ .Values.image.zookeeper.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - containerPort: 2181
           env:
