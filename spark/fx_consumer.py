@@ -960,9 +960,13 @@ def rebuild_state_from_s3() -> None:
         log("WARNING", "FX state rebuild: event_time column missing — skipping rebuild")
         return
 
-    combined["_evt_dt"] = pd.to_datetime(
-        combined["event_time"],
-        errors="coerce"
+    combined["_evt_dt"] = (
+        pd.to_datetime(
+            combined["event_time"],
+            utc=True,
+            errors="coerce"
+        )
+        .dt.tz_convert("America/New_York")
     )
 
     combined = combined.dropna(subset=["_evt_dt"])
@@ -1321,7 +1325,14 @@ def process_batch(
     #              always older than late_event_max_minutes by wall clock.
     #              Filtering during replay would drop ALL events.
     if not is_replay and "event_time" in pdf.columns:
-        pdf["_evt_dt"] = pd.to_datetime(pdf["event_time"])
+        pdf["_evt_dt"] = (
+            pd.to_datetime(
+                pdf["event_time"],
+                utc=True,
+                errors="coerce"
+            )
+            .dt.tz_convert("America/New_York")
+        )
         late_events    = pdf[pdf["_evt_dt"] < late_cutoff]
         pdf            = pdf[pdf["_evt_dt"] >= late_cutoff].copy()
         metrics["events_late"] = len(late_events)
