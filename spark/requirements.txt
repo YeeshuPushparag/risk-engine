@@ -6,3 +6,5 @@ fsspec==2025.3.0
 s3fs==0.4.2
 pyarrow==17.0.0
 python-dateutil==2.9.0.post0
+pendulum==3.1.0
+prometheus-client==0.22.1
