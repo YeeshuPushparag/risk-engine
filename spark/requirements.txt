@@ -9,3 +9,4 @@ python-dateutil==2.9.0.post0
 pendulum==3.0.0
 prometheus-client==0.21.1
 requests==2.31.0
+kafka-python==2.2.15
