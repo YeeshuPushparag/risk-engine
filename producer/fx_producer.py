@@ -355,7 +355,6 @@ def build_kafka_producer() -> KafkaProducer:
         linger_ms                             = CONFIG["kafka_linger_ms"],
         request_timeout_ms                    = CONFIG["kafka_request_timeout_ms"],
         delivery_timeout_ms                   = CONFIG["kafka_delivery_timeout_ms"],
-        compression_type                      = "snappy",
     )
 
 # =============================================================
