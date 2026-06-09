@@ -67,7 +67,7 @@ Lineage on every output row
     producer_pipeline_name — value from event envelope
     consumer_pipeline_name — "equity_stream_consumer"
     pipeline_run_id        — UUID per batch (constant within one batch)
-    processing_timestamp   — UTC timestamp when batch was processed
+    processing_timestamp   — ET timestamp when batch was processed
 
 Idempotency
 -----------
@@ -109,7 +109,7 @@ import boto3
 import pandas as pd
 import numpy as np
 from io import BytesIO
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from typing import List, Dict
 import requests
 import pendulum
@@ -347,7 +347,7 @@ def log(level: str, message: str, context: dict = None) -> None:
     if context is None:
         context = {}
     record = {
-        "ts":       datetime.now(timezone.utc).isoformat(),
+        "ts":       pendulum.now("America/New_York").to_iso8601_string(),
         "level":    level,
         "pipeline": CONFIG["consumer_pipeline_name"],
         "msg":      message,
@@ -512,7 +512,7 @@ def flush_consumer_dlq_to_s3(
         return
 
     df  = pd.DataFrame(dlq_buffer)
-    now = datetime.now(timezone.utc)
+    now = pendulum.now("America/New_York")
     key = (
         f"{CONFIG['consumer_dlq_prefix']}/"
         f"year={now.year}/month={now.month:02d}/day={now.day:02d}/"
@@ -688,7 +688,7 @@ def rebuild_state_from_s3() -> None:
     DST HANDLING
     ------------
     Uses Eastern Time (America/New_York) with pendulum for automatic DST handling.
-    S3 paths still use UTC for partitioning (converted from ET).
+    S3 paths still use ET for partitioning.
     """
     # ── Guard: only live, non-replay, non-backfill ─────────────────────
     if IS_REPLAY or IS_BACKFILL:
@@ -701,9 +701,8 @@ def rebuild_state_from_s3() -> None:
             {"run_mode": CONFIG["run_mode"]})
         return
 
-    # ── Get current time in Eastern Time (handles DST) and UTC ─────────
+    # ── Get current time in Eastern Time (handles DST) ─────────
     now_et = _get_now_et()
-    now_utc = now_et.astimezone(timezone.utc)
 
     # ── Guard: skip rebuild for fresh session starts or closed market ───
     if _should_skip_equity_state_rebuild(now_et):
@@ -714,18 +713,18 @@ def rebuild_state_from_s3() -> None:
         return
 
     rebuild_minutes = CONFIG["state_rebuild_minutes"]
-    rebuild_start_utc = now_utc - timedelta(minutes=rebuild_minutes)
+    rebuild_start_et = now_et - timedelta(minutes=rebuild_minutes)
 
     log("INFO", "Starting equity state rebuild",
-        {"rebuild_start_utc": rebuild_start_utc.isoformat(),
-         "rebuild_end_utc":   now_utc.isoformat(),
-         "window_minutes":    rebuild_minutes,
-         "current_et":        now_et.isoformat()})
+        {"rebuild_start_et": rebuild_start_et.isoformat(),
+         "rebuild_end_et":   now_et.isoformat(),
+         "window_minutes":   rebuild_minutes,
+         "current_et":       now_et.isoformat()})
 
-    # ── Determine which hour partitions to scan (using UTC) ────────────
+    # ── Determine which hour partitions to scan (using ET) ────────────
     hours_to_scan = set()
-    cursor = rebuild_start_utc
-    while cursor <= now_utc:
+    cursor = rebuild_start_et
+    while cursor <= now_et:
         hours_to_scan.add(cursor.hour)
         cursor += timedelta(hours=1)
 
@@ -735,7 +734,7 @@ def rebuild_state_from_s3() -> None:
 
     today_prefix = (
         f"{base_prefix}"
-        f"year={now_utc.year}/month={now_utc.month:02d}/day={now_utc.day:02d}/"
+        f"year={now_et.year}/month={now_et.month:02d}/day={now_et.day:02d}/"
     )
 
     # Collect keys only from required hour partitions
@@ -786,17 +785,22 @@ def rebuild_state_from_s3() -> None:
         log("WARNING", "State rebuild: event_time column missing — skipping rebuild")
         return
 
-    combined["_evt_dt"] = pd.to_datetime(combined["event_time"], utc=True, errors="coerce")
+    combined["_evt_dt"] = pd.to_datetime(
+        combined["event_time"],
+        errors="coerce"
+    )
+
     combined = combined.dropna(subset=["_evt_dt"])
+
     combined = combined[
-        (combined["_evt_dt"] >= rebuild_start_utc.replace(tzinfo=timezone.utc))
-        & (combined["_evt_dt"] <= now_utc)
+        (combined["_evt_dt"] >= rebuild_start_et)
+        & (combined["_evt_dt"] <= now_et)
     ]
 
     if combined.empty:
         log("INFO", "State rebuild: no events in rebuild window after filtering",
-            {"rebuild_start_utc": rebuild_start_utc.isoformat(),
-             "now_utc":           now_utc.isoformat()})
+            {"rebuild_start_et": rebuild_start_et.isoformat(),
+             "now_et":           now_et.isoformat()})
         return
 
     # Sort chronologically
@@ -1120,11 +1124,11 @@ def process_batch(
       Successful rows are never rolled back by a subsequent row's failure.
     """
     pipeline_run_id      = str(uuid.uuid4())
-    processing_timestamp = datetime.now(timezone.utc).isoformat()
+    processing_timestamp = pendulum.now("America/New_York").to_iso8601_string()
     metrics              = make_batch_metrics()
     dlq_buffer:   list   = []
     batch_start          = time.monotonic()
-    current_time         = datetime.now(timezone.utc)
+    current_time         = pendulum.now("America/New_York")
     late_cutoff          = current_time - timedelta(minutes=CONFIG["late_event_max_minutes"])
 
     PROM_BATCHES_TOTAL.inc()
@@ -1256,7 +1260,7 @@ def process_batch(
                 "kafka_offset":     int(row.get("offset", -1)),
                 "kafka_partition":  int(row.get("partition", -1)),
                 "original_event":   row.to_dict(),
-                "failed_at":        datetime.now(timezone.utc).isoformat(),
+                "failed_at":        pendulum.now("America/New_York").to_iso8601_string(),
                 "consumer_pipeline": CONFIG["consumer_pipeline_name"],
                 "batch_id":         str(batch_id),
                 "pipeline_run_id":  pipeline_run_id,

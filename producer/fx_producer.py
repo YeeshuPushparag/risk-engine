@@ -25,7 +25,7 @@ Lineage on every event
 -----------------------
     producer_run_id   — UUID generated once at process start
     batch_id          — UUID generated per fetch cycle
-    source_fetch_time — UTC timestamp when yfinance data was fetched
+    source_fetch_time — ET timestamp when yfinance data was fetched
     event_id          — SHA-256(currency_pair + timestamp) — deterministic
 
 Kafka guarantees
@@ -81,7 +81,7 @@ import signal
 import uuid
 import hashlib
 import os
-from datetime import datetime, timezone, timedelta, date
+from datetime import datetime, timedelta, date
 from io import BytesIO, StringIO
 from typing import List, Dict, Tuple, Optional
 import requests
@@ -270,7 +270,7 @@ def log(level: str, message: str, context: dict = None) -> None:
     if context is None:
         context = {}
     record = {
-        "ts":       datetime.now(timezone.utc).isoformat(),
+        "ts":       pendulum.now("America/New_York").to_iso8601_string(),
         "level":    level,
         "pipeline": CONFIG["pipeline_name"],
         "msg":      message,
@@ -401,7 +401,7 @@ def build_event(
 
         # Timing
         "event_time":        record["timestamp"],
-        "ingested_at":       datetime.now(timezone.utc).isoformat(),
+        "ingested_at":       pendulum.now("America/New_York").to_iso8601_string(),
 
         # FX payload (no volume — FX OTC market has no centralised volume)
         "data": record,
@@ -430,7 +430,7 @@ def store_raw_events_parquet(
 
     partition_dt: override the partition timestamp (used in backfill so events
     land in the correct historical partition rather than today's partition).
-    When None, defaults to UTC now (normal live mode behaviour).
+    When None, defaults to ET now (normal live mode behaviour).
     """
 
     
@@ -462,8 +462,12 @@ def store_raw_events_parquet(
         rows.append(row)
 
     df  = pd.DataFrame(rows)
-    # Use the override partition time for backfill; UTC now for live mode.
-    now = partition_dt if partition_dt is not None else datetime.now(timezone.utc)
+    # Use the override partition time for backfill; 
+    now = (
+        partition_dt
+        if partition_dt is not None
+        else pendulum.now("America/New_York")
+    )
     
 
     key = (
@@ -505,7 +509,7 @@ def flush_dlq_buffer(
         return
 
     rows = []
-    now  = datetime.now(timezone.utc)
+    now = pendulum.now("America/New_York")
 
     for entry in dlq_buffer:
         ev = entry.get("event", {})
@@ -835,7 +839,7 @@ def fetch_backfill_for_date(
     # yfinance end date is exclusive — add one day
     start_str         = target_date.strftime("%Y-%m-%d")
     end_str           = (target_date + timedelta(days=1)).strftime("%Y-%m-%d")
-    source_fetch_time = datetime.now(timezone.utc).isoformat()
+    source_fetch_time = pendulum.now("America/New_York").to_iso8601_string()
     symbols           = [pair + "=X" for pair in pairs]
 
     df = None
@@ -1047,7 +1051,7 @@ def run_live(producer_run_id: str, producer: KafkaProducer) -> None:
             break
 
         batch_id          = str(uuid.uuid4())
-        source_fetch_time = datetime.now(timezone.utc).isoformat()
+        source_fetch_time = pendulum.now("America/New_York").to_iso8601_string()
         metrics           = make_batch_metrics()
         dlq_buffer:  list = []
         cycle_start       = time.monotonic()
@@ -1259,8 +1263,8 @@ def run_backfill(producer_run_id: str, producer: KafkaProducer) -> None:
                         target_date.year,
                         target_date.month,
                         target_date.day,
-                        hour=hour,  # ← Use actual hour from event timestamp!
-                        tzinfo=timezone.utc,
+                        hour=hour,  # Use actual hour from event timestamp!
+                        tzinfo=pendulum.timezone("America/New_York")
                     )
                     
                     # Store raw events with source_type="backfill" and hour-specific batch_id
