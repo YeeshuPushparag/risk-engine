@@ -1286,8 +1286,8 @@ def process_batch(
     metrics              = make_batch_metrics()
     dlq_buffer:   list   = []
     batch_start          = time.monotonic()
-    current_time         = pendulum.now("America/New_York")
-    late_cutoff          = current_time - timedelta(minutes=CONFIG["late_event_max_minutes"])
+    current_time         = pd.Timestamp.now(tz="America/New_York")
+    late_cutoff          = current_time - pd.Timedelta(minutes=CONFIG["late_event_max_minutes"])
 
     PROM_BATCHES_TOTAL.inc()
 
