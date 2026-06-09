@@ -5,6 +5,9 @@ metadata:
   namespace: streaming
 spec:
   serviceName: zookeeper
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
   replicas: {{ .Values.replicas.zookeeper }}
   selector:
     matchLabels:

@@ -97,3 +97,12 @@ kube-prometheus-stack:
     alertmanagerSpec:
       nodeSelector:
         role: monitoring
+      storage:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: gp3
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 5Gi
