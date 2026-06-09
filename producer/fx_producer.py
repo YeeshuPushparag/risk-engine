@@ -351,7 +351,7 @@ def build_kafka_producer() -> KafkaProducer:
         acks                                  = CONFIG["kafka_acks"],
         retries                               = CONFIG["kafka_retries"],
         enable_idempotence                    = True,   # exactly-once at broker level
-        max_in_flight_requests_per_connection = 5,      # safe with idempotence (Kafka >= 2.1)
+        max_in_flight_requests_per_connection = 1,     
         linger_ms                             = CONFIG["kafka_linger_ms"],
         request_timeout_ms                    = CONFIG["kafka_request_timeout_ms"],
         delivery_timeout_ms                   = CONFIG["kafka_delivery_timeout_ms"],
