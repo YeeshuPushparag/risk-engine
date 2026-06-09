@@ -318,8 +318,7 @@ def atomic_write_parquet_to_s3(df: pd.DataFrame, bucket: str, key: str) -> None:
             CopySource={"Bucket": bucket, "Key": temp_key},
             Key=key,
         )
-        log("INFO", "S3 atomic write complete",
-            {"bucket": bucket, "key": key, "rows": len(df)})
+
     except Exception as exc:
         log("ERROR", "S3 atomic write failed",
             {"bucket": bucket, "key": key, "error": str(exc)})
@@ -510,8 +509,6 @@ def store_raw_events_parquet(
 
     try:
         atomic_write_parquet_to_s3(df, CONFIG["write_bucket"], key)
-        log("INFO", "Raw batch stored",
-            {"batch_id": batch_id, "events": len(events), "key": key})
     except Exception as exc:
         log("ERROR", "Raw batch S3 write failed — events not persisted for replay",
             {"batch_id": batch_id, "error": str(exc)})
@@ -622,10 +619,6 @@ def fetch_snapshot_with_retry(
     for attempt in range(1, CONFIG["fetch_max_retries"] + 1):
         fetch_metrics["fetch_attempts"] = attempt
         try:
-            log("INFO", "Fetching yfinance data",
-                {"batch_id": batch_id, "attempt": attempt,
-                 "max_retries": CONFIG["fetch_max_retries"]})
-
             df = yf.download(
                 tickers  = " ".join(tickers),
                 period   = CONFIG["fetch_period"],
@@ -637,8 +630,6 @@ def fetch_snapshot_with_retry(
 
             if df is not None and not df.empty:
                 fetch_metrics["fetch_success"] = True
-                log("INFO", "yfinance fetch successful",
-                    {"batch_id": batch_id, "attempt": attempt})
                 break
             else:
                 raise ValueError("yfinance returned empty DataFrame")
@@ -649,8 +640,6 @@ def fetch_snapshot_with_retry(
 
             if attempt < CONFIG["fetch_max_retries"]:
                 backoff = CONFIG["fetch_retry_backoff_base_s"] * (2 ** (attempt - 1))
-                log("INFO", "Retrying yfinance fetch",
-                    {"batch_id": batch_id, "backoff_s": backoff})
                 time.sleep(backoff)
             else:
                 log("ERROR", "yfinance fetch failed after all retries",
@@ -937,13 +926,6 @@ def _extract_events_from_df(
                 level="CRITICAL",
             )
 
-    log("INFO", "Snapshot extracted",
-        {"batch_id": batch_id,
-         "valid_events":   len(events),
-         "total_tickers":  len(tickers),
-         "missing":        len(fetch_metrics["missing_tickers"]),
-         "empty":          len(fetch_metrics["empty_tickers"]),
-         "invalid":        len(fetch_metrics["invalid_tickers"])})
 
     return events
 
@@ -1030,8 +1012,8 @@ def make_batch_metrics() -> dict:
     }
 
 
-def log_batch_metrics(batch_id: str, metrics: dict) -> None:
-    log("INFO", "Batch metrics", {"batch_id": batch_id, **metrics})
+def log_backfill_summary(batch_id: str, metrics: dict) -> None:
+    log("INFO", "Backfill Summary", {"batch_id": batch_id, **metrics})
 
 # =============================================================
 # DATE RANGE HELPERS  (backfill)
@@ -1176,12 +1158,7 @@ def run_live(producer_run_id: str, tickers: list[str], producer: KafkaProducer) 
             cycle_duration = time.monotonic() - cycle_start
             metrics["batch_latency_s"] = round(cycle_duration, 3)
             PROM_DURATION_SECONDS.observe(cycle_duration)
-            log_batch_metrics(batch_id, metrics)
-
-            log("INFO", "Producer heartbeat",
-                {"producer_run_id": producer_run_id,
-                 "batch_id": batch_id,
-                 "status": "alive"})
+            log("INFO", "Equity batch processed successfully", {"batch_id": batch_id})
 
             # Push metrics to Pushgateway at end of every cycle
             _push_metrics(producer_run_id)
@@ -1352,7 +1329,7 @@ def run_backfill(producer_run_id: str, tickers: list[str], producer: KafkaProduc
             producer_run_id,
         )
 
-        log_batch_metrics(
+        log_backfill_summary(
             batch_id,
             {
                 **metrics,

@@ -452,8 +452,7 @@ def atomic_write_parquet_to_s3(df: pd.DataFrame, bucket: str, key: str) -> None:
             CopySource={"Bucket": bucket, "Key": temp_key},
             Key=key,
         )
-        log("INFO", "S3 atomic write complete",
-            {"bucket": bucket, "key": key, "rows": len(df)})
+
     except Exception as exc:
         log("ERROR", "S3 atomic write failed",
             {"bucket": bucket, "key": key, "error": str(exc)})
@@ -1046,7 +1045,6 @@ def save_latest_snapshot_all_tickers(
         rc.publish("equity_stream", snapshot_json)
 
         PROM_REDIS_WRITES_TOTAL.inc()
-        log("INFO", "Redis snapshot published", {"tickers": len(latest_rows)})
 
     except Exception as exc:
         log("ERROR", "Redis snapshot publish failed", {"error": str(exc)})
@@ -1208,18 +1206,7 @@ def process_batch(
         return
 
     metrics["events_received"] = len(pdf)
-    log("INFO", "Batch received and deduplicated",
-        {"batch_id":        batch_id,
-         "pipeline_run_id": pipeline_run_id,
-         "is_replay":       is_replay,
-         "original_rows":   original_count,
-         "deduped_rows":    deduped_count,
-         "late_filtered":   metrics["events_late"],
-         "final_rows":      len(pdf),
-         "unique_tickers":  pdf["ticker"].nunique() if "ticker" in pdf.columns else "N/A",
-         "max_offset":      int(pdf["offset"].max()) if "offset" in pdf.columns else "N/A",
-         "min_offset":      int(pdf["offset"].min()) if "offset" in pdf.columns else "N/A"})
-
+   
     snapshot_rows: list = []
 
     for _, row in pdf.iterrows():
@@ -1315,7 +1302,6 @@ def process_batch(
     PROM_LAST_SUCCESS_TIMESTAMP.set(time.time())
     metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
     PROM_DURATION_SECONDS.observe(time.monotonic() - batch_start)
-    log_batch_metrics(str(batch_id), metrics)
     if not is_replay and not IS_BACKFILL:
         _push_metrics()
 
