@@ -9,7 +9,7 @@ RUN apt-get update && \
         curl && \
     rm -rf /var/lib/apt/lists/*
 
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py | /usr/bin/python3
+RUN curl -sS https://bootstrap.pypa.io/pip/3.8/get-pip.py | /usr/bin/python3
 
 ENV PYSPARK_PYTHON=/usr/bin/python3
 ENV PYSPARK_DRIVER_PYTHON=/usr/bin/python3
