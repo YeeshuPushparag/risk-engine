@@ -940,7 +940,6 @@ def send_with_retry(
             else:
                 future = producer.send(
                     topic,
-                    key=event["data"]["currency_pair"],
                     value=event,
                 )
             future.get(timeout=CONFIG["send_timeout_s"])
@@ -949,7 +948,7 @@ def send_with_retry(
         except KafkaError as exc:
             backoff = CONFIG["retry_backoff_base_s"] * (2 ** (attempt - 1))
             log("WARNING", "Kafka FX send failed — retrying",
-                {"pair":      event["data"]["currency_pair"],
+                {"bars":      len(event.get("bars", [])),
                  "attempt":   attempt,
                  "max":       CONFIG["max_send_retries"],
                  "backoff_s": backoff,
@@ -959,10 +958,10 @@ def send_with_retry(
             else:
                 send_alert(
                     f"Kafka send FAILED after retries | "
-                    f"pair={event['data']['currency_pair']} | "
-                    f"event_id={event['event_id']}",
+                    f"bars={len(event.get('bars', []))} | "
+                    f"event_id={event.get('event_id', 'batch_message')}",
                     level="CRITICAL",
-                    context={"pair": event['data']['currency_pair']},
+                    context={"bars": len(event.get('bars', []))},
                 )
                 dlq_buffer.append({
                     "event": event,
@@ -972,16 +971,23 @@ def send_with_retry(
                 return False
 
         except Exception as exc:
-            log("ERROR", "Unexpected FX send error — routing to DLQ",
-                {"pair": event["data"]["currency_pair"], "error": str(exc)})
+            log(
+                "ERROR",
+                "Unexpected FX send error — routing to DLQ",
+                {
+                    "bars": len(event.get("bars", [])),
+                    "error": str(exc),
+                },
+            )
+
             dlq_buffer.append({
                 "event": event,
                 "error": str(exc),
                 "stage": "producer_send_unexpected",
             })
+
             return False
 
-    return False  # unreachable but explicit
 
 # =============================================================
 # BATCH METRICS
@@ -1100,7 +1106,11 @@ def run_live(producer_run_id: str, producer: KafkaProducer) -> None:
             if events:
                 # Build combined payload with all pairs
                 combined_payload = {
-                    "timestamp": pendulum.now("America/New_York").isoformat(),
+                    "producer_run_id": producer_run_id,
+                    "batch_id": batch_id,
+                    "source_fetch_time": source_fetch_time,
+                    "producer_pipeline_name": CONFIG["pipeline_name"],
+                    "batch_ts": pendulum.now("America/New_York").isoformat(),
                     "bars": []
                 }
                 
@@ -1111,6 +1121,7 @@ def run_live(producer_run_id: str, producer: KafkaProducer) -> None:
                         "high": event["data"]["high"],
                         "low": event["data"]["low"],
                         "close": event["data"]["close"],
+                        "timestamp": event["data"]["timestamp"],
                     })
                 
                 # Send single message

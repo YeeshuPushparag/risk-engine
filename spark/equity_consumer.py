@@ -61,7 +61,6 @@ Prevents stale data from corrupting rolling metrics.
 
 Lineage on every output row
 ----------------------------
-    event_id               — from producer (SHA-256, idempotent)
     kafka_offset           — exact offset in source partition
     kafka_partition        — source partition
     producer_pipeline_name — value from event envelope
@@ -71,7 +70,6 @@ Lineage on every output row
 
 Idempotency
 -----------
-    event_id deduplication using pandas drop_duplicates (pure data logic)
     No Redis dependency for dedup — simpler, faster, deterministic
     Spark checkpoints handle offset tracking
 
@@ -114,9 +112,9 @@ from typing import List, Dict
 import requests
 import pendulum
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json
+from pyspark.sql.functions import col, from_json, explode
 from pyspark.sql.types import (
-    StructType, StructField, StringType, FloatType
+    StructType, StructField, StringType, FloatType, ArrayType
 )
 import redis
 from kafka import KafkaProducer
@@ -411,9 +409,11 @@ def send_to_kafka_dlq(payload: dict) -> None:
     try:
         _get_dlq_producer().send(CONFIG["dlq_topic"], payload)
     except Exception as exc:
-        log("ERROR", "Kafka DLQ send failed",
-            {"error": str(exc),
-             "event_id": payload.get("event_id", "unknown")})
+        log(
+            "ERROR",
+            "Kafka DLQ send failed",
+            {"error": str(exc)},
+        )
 
 # =============================================================
 # S3 HELPERS  —  atomic writes
@@ -781,13 +781,13 @@ def rebuild_state_from_s3() -> None:
     combined = pd.concat(frames, ignore_index=True)
 
     # Filter to only events within the rebuild window
-    if "event_time" not in combined.columns:
-        log("WARNING", "State rebuild: event_time column missing — skipping rebuild")
+    if "timestamp" not in combined.columns:
+        log("WARNING", "State rebuild: timestamp column missing — skipping rebuild")
         return
 
     combined["_evt_dt"] = (
         pd.to_datetime(
-            combined["event_time"],
+            combined["timestamp"],
             utc=True,
             errors="coerce"
         )
@@ -979,7 +979,7 @@ def save_to_parquet(df: pd.DataFrame, batch_id: str, is_replay: bool = False) ->
     output_prefix = CONFIG["replay_output_prefix"] if is_replay else CONFIG["output_prefix"]
 
     try:
-        ts             = pd.to_datetime(df["event_time"].iloc[0])
+        ts             = pd.to_datetime(df["timestamp"].iloc[0])
         partition_date = ts.strftime("%Y-%m-%d")
         partition_hour = ts.strftime("%H")
 
@@ -1073,7 +1073,7 @@ def add_lineage(
     Stamp lineage fields onto an output row dict.
     All required lineage fields are set here; values are constant
     within a batch (pipeline_run_id, processing_timestamp) or per-row
-    (event_id, kafka_offset, kafka_partition, producer_pipeline_name).
+    (kafka_offset, kafka_partition, producer_pipeline_name).
     """
     row_dict["consumer_pipeline_name"] = CONFIG["consumer_pipeline_name"]
     row_dict["pipeline_run_id"]        = pipeline_run_id
@@ -1105,20 +1105,18 @@ def process_batch(
 
     Per-batch lifecycle:
       1. Convert Spark -> pandas
-      2. Deduplicate by event_id (pure pandas — no Redis)
-      3. Filter late events (older than late_event_max_minutes)
+      2. Filter late events (older than late_event_max_minutes)
          [late filtering uses wall-clock time; during replay, historical
          events will ALWAYS appear "late" by wall clock — late filtering
          is therefore DISABLED for replay to prevent all events being dropped]
-      4. For each row: validation -> buffer update -> metrics -> lineage
-      5. Enrich with positions
-      6. Atomic S3 write (replay -> equity/replay/, live -> equity/data/)
-      7. Redis snapshot [LIVE ONLY — skipped when is_replay=True]
-      8. Flush consumer DLQ (S3 always; Kafka topic only in live mode)
-      9. Push Prometheus metrics
+      3. For each row: validation -> buffer update -> metrics -> lineage
+      4. Enrich with positions
+      5. Atomic S3 write (replay -> equity/replay/, live -> equity/data/)
+      6. Redis snapshot [LIVE ONLY — skipped when is_replay=True]
+      7. Flush consumer DLQ (S3 always; Kafka topic only in live mode)
+      8. Push Prometheus metrics
 
     Idempotency:
-      - event_id dedup via drop_duplicates (deterministic, no external deps)
       - Spark checkpoints handle offset tracking (live mode)
       - Duplicate replay runs are idempotent (parquet append is safe)
 
@@ -1151,9 +1149,11 @@ def process_batch(
         PROM_FAILURES_TOTAL.inc()
         return
 
-    # ── Step 1: Deduplicate by event_id (pure data logic) ─────────────
+    # ── Step 1: Deduplicate by timestamp (pure data logic) ─────────────
     original_count = len(pdf)
-    pdf = pdf.drop_duplicates(subset=["event_id"])
+    pdf = pdf.drop_duplicates(
+        subset=["ticker", "timestamp"]
+    )
     deduped_count  = len(pdf)
     metrics["events_deduped"] = original_count - deduped_count
 
@@ -1170,17 +1170,17 @@ def process_batch(
     # REPLAY MODE: late filtering is DISABLED because historical events are
     #              always older than late_event_max_minutes by wall clock.
     #              Filtering during replay would drop ALL events.
-    if not is_replay and "event_time" in pdf.columns:
-        pdf["event_time_dt"] = (
+    if not is_replay and "timestamp" in pdf.columns:
+        pdf["_evt_dt"] = (
             pd.to_datetime(
-                pdf["event_time"],
+                pdf["timestamp"],
                 utc=True,
                 errors="coerce"
             )
             .dt.tz_convert("America/New_York")
         )
-        late_events = pdf[pdf["event_time_dt"] < late_cutoff]
-        pdf = pdf[pdf["event_time_dt"] >= late_cutoff]
+        late_events = pdf[pdf["_evt_dt"] < late_cutoff]
+        pdf = pdf[pdf["_evt_dt"] >= late_cutoff]
         metrics["events_late"] = len(late_events)
 
         if not late_events.empty:
@@ -1190,9 +1190,8 @@ def process_batch(
                         f"Late event skipped (older than "
                         f"{CONFIG['late_event_max_minutes']} minutes)"
                     ),
-                    "event_id":        late_row.get("event_id", ""),
                     "ticker":          late_row.get("ticker", ""),
-                    "event_time":      late_row.get("event_time", ""),
+                    "timestamp":      late_row.get("timestamp", ""),
                     "current_time":    current_time.isoformat(),
                     "kafka_offset":    int(late_row.get("offset", -1)),
                     "kafka_partition": int(late_row.get("partition", -1)),
@@ -1204,7 +1203,7 @@ def process_batch(
                 send_to_kafka_dlq(error_payload)
                 dlq_buffer.append(error_payload)
 
-        pdf = pdf.drop(columns=["event_time_dt"])
+        pdf = pdf.drop(columns=["_evt_dt"])
 
     if len(pdf) == 0:
         log("INFO", "All events filtered",
@@ -1227,7 +1226,6 @@ def process_batch(
     for _, row in pdf.iterrows():
         try:
             ticker   = row["ticker"]
-            event_id = row["event_id"]
 
             # ── Guard: Data validation ───────────────────────────────
             if row["close"] <= 0 or row["high"] < row["low"]:
@@ -1254,9 +1252,10 @@ def process_batch(
             )
             row_dict["kafka_offset"]           = int(row["offset"])
             row_dict["kafka_partition"]        = int(row["partition"])
-            row_dict["producer_pipeline_name"] = row.get(
-                "source_pipeline", "equity_kafka_producer"
-            )
+            row_dict["producer_pipeline_name"] = row["producer_pipeline_name"]
+            row_dict["producer_run_id"] = row["producer_run_id"]
+            row_dict["batch_id"] = row["batch_id"]
+            row_dict["source_fetch_time"] = row["source_fetch_time"]
 
             snapshot_rows.append(row_dict)
             metrics["events_processed"] += 1
@@ -1266,7 +1265,6 @@ def process_batch(
             metrics["events_failed"] += 1
             error_payload = {
                 "error":            str(exc),
-                "event_id":         row.get("event_id", ""),
                 "ticker":           row.get("ticker", ""),
                 "kafka_offset":     int(row.get("offset", -1)),
                 "kafka_partition":  int(row.get("partition", -1)),
@@ -1350,7 +1348,6 @@ def load_s3_replay_partitions(
             year=Y/month=MM/day=DD/<optional hour filter>/batch_*.parquet
 
     Each parquet file is treated as one "batch" for consistency.
-    Event_id dedup still applies — replay is idempotent.
     Late event filtering is DISABLED for replay (historical events are always
     older than late_event_max_minutes by wall clock; without this fix every
     event would be dropped).
@@ -1489,26 +1486,26 @@ def build_spark_session() -> SparkSession:
 # =============================================================
 
 EVENT_SCHEMA = StructType([
-    StructField("event_id",          StringType(), True),
-    StructField("event_type",        StringType(), True),
-    StructField("schema_version",    StringType(), True),
-    StructField("pipeline_name",     StringType(), True),
-    StructField("data_source",       StringType(), True),
-    StructField("producer_run_id",   StringType(), True),
-    StructField("batch_id",          StringType(), True),
+    StructField("producer_run_id", StringType(), True),
+    StructField("batch_id", StringType(), True),
     StructField("source_fetch_time", StringType(), True),
-    StructField("event_time",        StringType(), True),
-    StructField("ingested_at",       StringType(), True),
-    StructField("data", StructType([
-        StructField("ticker",    StringType(), True),
-        StructField("open",      FloatType(),  True),
-        StructField("high",      FloatType(),  True),
-        StructField("low",       FloatType(),  True),
-        StructField("close",     FloatType(),  True),
-        StructField("volume",    FloatType(),  True),
-        StructField("timestamp", StringType(), True),
-        StructField("date",      StringType(), True),
-    ])),
+    StructField("producer_pipeline_name", StringType(), True),
+    StructField("batch_ts", StringType(), True),
+    StructField(
+        "tickers",
+        ArrayType(
+            StructType([
+                StructField("ticker", StringType(), True),
+                StructField("open", FloatType(), True),
+                StructField("high", FloatType(), True),
+                StructField("low", FloatType(), True),
+                StructField("close", FloatType(), True),
+                StructField("volume", FloatType(), True),
+                StructField("timestamp", StringType(), True),
+            ])
+        ),
+        True,
+    ),
 ])
 
 # =============================================================
@@ -1575,28 +1572,45 @@ if __name__ == "__main__":
             raw_df
             .selectExpr(
                 "CAST(value AS STRING) as json_str",
-                "topic", "partition", "offset",
-                "timestamp as kafka_timestamp",
+                "topic",
+                "partition",
+                "offset",
+                "timestamp as kafka_timestamp"
             )
             .select(
                 from_json(col("json_str"), EVENT_SCHEMA).alias("event"),
-                "topic", "partition", "offset", "kafka_timestamp",
+                "topic",
+                "partition",
+                "offset",
+                "kafka_timestamp"
             )
             .select(
-                "event.*",
-                "topic", "partition", "offset", "kafka_timestamp",
+                explode(col("event.tickers")).alias("ticker_data"),
+                col("event.batch_id").alias("batch_id"),
+                col("event.producer_run_id").alias("producer_run_id"),
+                col("event.source_fetch_time").alias("source_fetch_time"),
+                col("event.producer_pipeline_name").alias("producer_pipeline_name"),
+                "topic",
+                "partition",
+                "offset",
+                "kafka_timestamp"
             )
             .select(
-                "event_id",
-                "producer_run_id",
+                col("ticker_data.ticker").alias("ticker"),
+                col("ticker_data.open").alias("open"),
+                col("ticker_data.high").alias("high"),
+                col("ticker_data.low").alias("low"),
+                col("ticker_data.close").alias("close"),
+                col("ticker_data.volume").alias("volume"),
+                col("ticker_data.timestamp").alias("timestamp"),
                 "batch_id",
+                "producer_run_id",
                 "source_fetch_time",
-                col("pipeline_name").alias("source_pipeline"),
-                "data_source",
-                "event_time",
-                "ingested_at",
-                col("data.*"),
-                "topic", "partition", "offset", "kafka_timestamp",
+                "producer_pipeline_name",
+                "topic",
+                "partition",
+                "offset",
+                "kafka_timestamp"
             )
             .filter(col("volume") > 0)
         )
@@ -1604,7 +1618,6 @@ if __name__ == "__main__":
         query = (
             parsed_df.writeStream
             .foreachBatch(lambda batch_df, batch_id:
-                          # is_replay=False: live mode — Redis enabled, Kafka DLQ enabled
                           process_batch(batch_df, batch_id, positions_df, is_replay=False))
             .outputMode("append")
             .option("checkpointLocation", CONFIG["checkpoint_dir"])

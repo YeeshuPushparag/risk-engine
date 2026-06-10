@@ -956,12 +956,15 @@ def send_with_retry(
         try:
             if is_combined_equity or is_combined_fx:
                 # Combined payload - send without key
-                future = producer.send(topic, value=event)
+                future = producer.send(
+                    CONFIG["topic_name"],
+                    value=event,
+                )
             else:
                 # Individual event - send with key
                 key_field = event["data"].get("ticker") or event["data"].get("currency_pair")
                 future = producer.send(
-                    topic,
+                    CONFIG["topic_name"],
                     key=key_field,
                     value=event,
                 )
@@ -971,7 +974,7 @@ def send_with_retry(
         except KafkaError as exc:
             backoff = CONFIG["retry_backoff_base_s"] * (2 ** (attempt - 1))
             log("WARNING", "Kafka send failed — retrying",
-                {"ticker":     event["data"]["ticker"],
+                {"tickers": len(event.get("tickers", [])),
                  "attempt":    attempt,
                  "max":        CONFIG["max_send_retries"],
                  "backoff_s":  backoff,
@@ -981,8 +984,7 @@ def send_with_retry(
             else:
                 send_alert(
                     f"[PRODUCER] Kafka send FAILED | "
-                    f"ticker={event['data']['ticker']} | "
-                    f"event_id={event['event_id']}",
+                    f"tickers={len(event.get('tickers', []))}",
                     level="CRITICAL",
                 )
                 dlq_buffer.append({
@@ -993,13 +995,21 @@ def send_with_retry(
                 return False
 
         except Exception as exc:
-            log("ERROR", "Unexpected send error — routing to DLQ",
-                {"ticker": event["data"]["ticker"], "error": str(exc)})
+            log(
+                "ERROR",
+                "Unexpected send error — routing to DLQ",
+                {
+                    "tickers_count": len(event.get("tickers", [])),
+                    "error": str(exc),
+                },
+            )
+
             dlq_buffer.append({
                 "event": event,
                 "error": str(exc),
                 "stage": "producer_send_unexpected",
             })
+
             return False
 
     return False  # unreachable but explicit
@@ -1119,7 +1129,11 @@ def run_live(producer_run_id: str, tickers: list[str], producer: KafkaProducer) 
             if events:
                 # Build combined payload with all tickers
                 combined_payload = {
-                    "timestamp": pendulum.now("America/New_York").isoformat(),
+                    "producer_run_id": producer_run_id,
+                    "batch_id": batch_id,
+                    "source_fetch_time": source_fetch_time,
+                    "producer_pipeline_name": CONFIG["pipeline_name"],
+                    "batch_ts": pendulum.now("America/New_York").isoformat(),
                     "tickers": []
                 }
                 
@@ -1131,6 +1145,7 @@ def run_live(producer_run_id: str, tickers: list[str], producer: KafkaProducer) 
                         "low": event["data"]["low"],
                         "close": event["data"]["close"],
                         "volume": event["data"]["volume"],
+                        "timestamp": event["data"]["timestamp"],
                     })
                 
                 # Send single message

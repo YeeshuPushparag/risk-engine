@@ -70,7 +70,6 @@ Prevents stale data from corrupting rolling metrics in live mode.
 
 Lineage on every output row
 ----------------------------
-    event_id               — from producer (SHA-256, idempotent)
     kafka_offset           — exact offset in source partition
     kafka_partition        — source partition
     producer_pipeline_name — value from event envelope
@@ -80,7 +79,6 @@ Lineage on every output row
 
 Idempotency
 -----------
-    event_id deduplication using pandas drop_duplicates (pure data logic)
     No Redis dependency for dedup — simpler, faster, deterministic
     Spark checkpoints handle offset tracking
 
@@ -124,9 +122,9 @@ from typing import List, Dict
 import requests
 import pendulum
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json
+from pyspark.sql.functions import col, from_json, explode
 from pyspark.sql.types import (
-    StructType, StructField, StringType, FloatType
+    StructType, StructField, StringType, FloatType, ArrayType
 )
 import redis
 from kafka import KafkaProducer
@@ -472,8 +470,7 @@ def send_to_kafka_dlq(payload: dict) -> None:
         _get_dlq_producer().send(CONFIG["dlq_topic"], payload)
     except Exception as exc:
         log("ERROR", "Kafka FX DLQ send failed",
-            {"error": str(exc),
-             "event_id": payload.get("event_id", "unknown")})
+            {"error": str(exc)})
 
 # =============================================================
 # S3 HELPERS  —  atomic writes
@@ -854,7 +851,7 @@ def rebuild_state_from_s3() -> None:
     are inserted into pair_buffers. Each bar is validated before insertion
     (close > 0, high >= low) mirroring live pipeline validation.
 
-    Bars are sorted ascending by event_time before insertion so buffer
+    Bars are sorted ascending by timestamp before insertion so buffer
     order matches live ingestion order.
 
     FAILURE HANDLING
@@ -956,13 +953,13 @@ def rebuild_state_from_s3() -> None:
     combined = pd.concat(frames, ignore_index=True)
 
     # Filter to only events within the rebuild window (using ET)
-    if "event_time" not in combined.columns:
-        log("WARNING", "FX state rebuild: event_time column missing — skipping rebuild")
+    if "timestamp" not in combined.columns:
+        log("WARNING", "FX state rebuild: timestamp column missing — skipping rebuild")
         return
 
     combined["_evt_dt"] = (
         pd.to_datetime(
-            combined["event_time"],
+            combined["timestamp"],
             utc=True,
             errors="coerce"
         )
@@ -1019,7 +1016,7 @@ def rebuild_state_from_s3() -> None:
             "high": high,
             "low": low,
             "close": close,
-            "event_time": row.get("event_time", ""),
+            "timestamp": row.get("timestamp", ""),
             "ingested_at": row.get("ingested_at", ""),
         }
 
@@ -1121,7 +1118,7 @@ def compute_exposure_rows(
             "high":              bar.get("high"),
             "low":               bar.get("low"),
             "close":             bar.get("close"),
-            "event_time":        bar.get("event_time"),
+            "timestamp":         bar.get("timestamp"),
             "ingested_at":       bar.get("ingested_at"),
 
             # Ticker exposure
@@ -1165,7 +1162,7 @@ def save_to_parquet(df: pd.DataFrame, batch_id: str, is_replay: bool = False) ->
     output_prefix = CONFIG["replay_output_prefix"] if is_replay else CONFIG["output_prefix"]
 
     try:
-        ts             = pd.to_datetime(df["event_time"].iloc[0])
+        ts             = pd.to_datetime(df["timestamp"].iloc[0])
         partition_date = ts.strftime("%Y-%m-%d")
         partition_hour = ts.strftime("%H")
 
@@ -1268,7 +1265,6 @@ def process_batch(
 
     Per-batch lifecycle:
       1. Convert Spark -> pandas
-      2. Deduplicate by event_id (pure pandas — no Redis)
       3. Filter late events [LIVE ONLY — disabled for replay]
       4. Per-bar: validation -> buffer update -> FX metrics -> fan-out -> lineage
       5. Atomic S3 write (replay -> fx/replay/, live -> fx/data/)
@@ -1277,7 +1273,6 @@ def process_batch(
       8. Push Prometheus metrics
 
     Idempotency:
-      - event_id dedup via drop_duplicates (deterministic, no external deps)
       - Spark checkpoints handle offset tracking (live mode)
       - Duplicate replay runs are idempotent (parquet append is safe)
     """
@@ -1314,9 +1309,9 @@ def process_batch(
         PROM_FAILURES_TOTAL.inc()
         return
 
-    # ── Step 1: Deduplicate by event_id (pure data logic) ─────────────
+    # ── Step 1: Deduplicate by timestamp (pure data logic) ─────────────
     original_count            = len(pdf)
-    pdf                       = pdf.drop_duplicates(subset=["event_id"])
+    pdf                       = pdf.drop_duplicates(subset=["currency_pair", "timestamp"])
     deduped_count             = len(pdf)
     metrics["events_deduped"] = original_count - deduped_count
 
@@ -1333,10 +1328,10 @@ def process_batch(
     # REPLAY MODE: late filtering is DISABLED because historical events are
     #              always older than late_event_max_minutes by wall clock.
     #              Filtering during replay would drop ALL events.
-    if not is_replay and "event_time" in pdf.columns:
+    if not is_replay and "timestamp" in pdf.columns:
         pdf["_evt_dt"] = (
             pd.to_datetime(
-                pdf["event_time"],
+                pdf["timestamp"],
                 utc=True,
                 errors="coerce"
             )
@@ -1352,9 +1347,8 @@ def process_batch(
                     f"Late FX event skipped — older than "
                     f"{CONFIG['late_event_max_minutes']} minutes"
                 ),
-                "event_id":         late_row.get("event_id", ""),
                 "currency_pair":    late_row.get("currency_pair", ""),
-                "event_time":       late_row.get("event_time", ""),
+                "timestamp":       late_row.get("timestamp", ""),
                 "current_time":     current_time.isoformat(),
                 "kafka_offset":     int(late_row.get("offset", -1)),
                 "kafka_partition":  int(late_row.get("partition", -1)),
@@ -1394,7 +1388,6 @@ def process_batch(
     for _, bar in pdf.iterrows():
         try:
             pair     = bar["currency_pair"]
-            event_id = bar["event_id"]
 
             # Data validation
             if bar["close"] <= 0 or bar["high"] < bar["low"]:
@@ -1417,7 +1410,7 @@ def process_batch(
                 "high":          float(bar["high"]),
                 "low":           float(bar["low"]),
                 "close":         float(bar["close"]),
-                "event_time":    bar.get("event_time", ""),
+                "timestamp":    bar.get("timestamp", ""),
                 "ingested_at":   bar.get("ingested_at", ""),
             }
             update_pair_buffer(pair, clean_bar)
@@ -1439,10 +1432,12 @@ def process_batch(
             # Stamp lineage on every output row
             kafka_offset      = int(bar.get("offset", -1))
             kafka_partition   = int(bar.get("partition", -1))
-            producer_pipeline = bar.get("source_pipeline", "fx_kafka_producer")
+            producer_pipeline = bar.get(
+                "producer_pipeline_name",
+                "fx_kafka_producer"
+            )
 
             for out_row in exposure_rows:
-                out_row["event_id"] = event_id
                 out_row = add_lineage(
                     row_dict             = out_row,
                     batch_id             = str(batch_id),
@@ -1462,7 +1457,6 @@ def process_batch(
             metrics["events_failed"] += 1
             dlq_entry = {
                 "error":            str(exc),
-                "event_id":         bar.get("event_id", ""),
                 "currency_pair":    bar.get("currency_pair", ""),
                 "kafka_offset":     int(bar.get("offset", -1)),
                 "kafka_partition":  int(bar.get("partition", -1)),
@@ -1554,7 +1548,6 @@ def load_s3_replay_partitions(
             year=Y/month=MM/day=DD/hour=HH/batch_*.parquet
 
     Each parquet file is treated as one "batch" for consistency.
-    Event_id dedup still applies — replay is idempotent.
     Late event filtering is DISABLED for replay (historical events are always
     older than late_event_max_minutes by wall clock).
 
@@ -1689,29 +1682,31 @@ def build_spark_session() -> SparkSession:
 # =============================================================
 # KAFKA EVENT SCHEMA  (matches fx_kafka_producer event envelope)
 # =============================================================
-# NOTE: data.timestamp field removed — using ONLY event_time for market time.
+# NOTE: data.timestamp field removed — using ONLY timestamp for market time.
 # This eliminates duplicate timestamp confusion.
 
+
 EVENT_SCHEMA = StructType([
-    StructField("event_id",          StringType(), True),
-    StructField("event_type",        StringType(), True),
-    StructField("schema_version",    StringType(), True),
-    StructField("pipeline_name",     StringType(), True),
-    StructField("data_source",       StringType(), True),
-    StructField("producer_run_id",   StringType(), True),
-    StructField("batch_id",          StringType(), True),
+    StructField("producer_run_id", StringType(), True),
+    StructField("batch_id", StringType(), True),
     StructField("source_fetch_time", StringType(), True),
-    StructField("event_time",        StringType(), True),
-    StructField("ingested_at",       StringType(), True),
-    StructField("data", StructType([
-        StructField("currency_pair", StringType(), True),
-        StructField("open",          FloatType(),  True),
-        StructField("high",          FloatType(),  True),
-        StructField("low",           FloatType(),  True),
-        StructField("close",         FloatType(),  True),
-        StructField("date",          StringType(), True),
-        # NOTE: data.timestamp NOT included — event_time is source of truth
-    ])),
+    StructField("producer_pipeline_name", StringType(), True),
+    StructField("batch_ts", StringType(), True),
+
+    StructField(
+        "bars",
+        ArrayType(
+            StructType([
+                StructField("currency_pair", StringType(), True),
+                StructField("open", FloatType(), True),
+                StructField("high", FloatType(), True),
+                StructField("low", FloatType(), True),
+                StructField("close", FloatType(), True),
+                StructField("timestamp", StringType(), True),
+            ])
+        ),
+        True,
+    ),
 ])
 
 # =============================================================
@@ -1778,34 +1773,46 @@ if __name__ == "__main__":
             raw_df
             .selectExpr(
                 "CAST(value AS STRING) as json_str",
-                "topic", "partition", "offset",
+                "topic",
+                "partition",
+                "offset",
                 "timestamp as kafka_timestamp",
             )
             .select(
                 from_json(col("json_str"), EVENT_SCHEMA).alias("event"),
-                "topic", "partition", "offset", "kafka_timestamp",
+                "topic",
+                "partition",
+                "offset",
+                "kafka_timestamp",
             )
             .select(
-                "event.*",
-                "topic", "partition", "offset", "kafka_timestamp",
+                explode(col("event.bars")).alias("bar"),
+                col("event.producer_run_id").alias("producer_run_id"),
+                col("event.batch_id").alias("batch_id"),
+                col("event.source_fetch_time").alias("source_fetch_time"),
+                col("event.producer_pipeline_name").alias("producer_pipeline_name"),
+                "topic",
+                "partition",
+                "offset",
+                "kafka_timestamp",
             )
             .select(
-                "event_id",
+                col("bar.currency_pair").alias("currency_pair"),
+                col("bar.open").alias("open"),
+                col("bar.high").alias("high"),
+                col("bar.low").alias("low"),
+                col("bar.close").alias("close"),
+                col("bar.timestamp").alias("timestamp"),
+
                 "producer_run_id",
                 "batch_id",
                 "source_fetch_time",
-                col("pipeline_name").alias("source_pipeline"),
-                "data_source",
-                "event_time",                       # PRIMARY market timestamp
-                "ingested_at",
-                col("data.currency_pair").alias("currency_pair"),
-                col("data.open").alias("open"),
-                col("data.high").alias("high"),
-                col("data.low").alias("low"),
-                col("data.close").alias("close"),
-                col("data.date").alias("date"),
-                # NOTE: data.timestamp NOT included — event_time is source of truth
-                "topic", "partition", "offset", "kafka_timestamp",
+                "producer_pipeline_name",
+
+                "topic",
+                "partition",
+                "offset",
+                "kafka_timestamp",
             )
             .filter(col("close") > 0)
         )
