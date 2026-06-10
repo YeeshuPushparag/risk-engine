@@ -657,8 +657,7 @@ def update_pair_buffer(pair: str, row_dict: dict) -> None:
     if len(pair_buffers[pair]) > cap:
         overflow = len(pair_buffers[pair]) - cap
         pair_buffers[pair] = pair_buffers[pair][overflow:]
-        log("DEBUG", "Pair buffer trimmed",
-            {"pair": pair, "trimmed": overflow, "cap": cap})
+
 
 # =============================================================
 # STATE REBUILD  —  LIVE MODE RECOVERY ONLY
@@ -1293,6 +1292,9 @@ def process_batch(
                 {"batch_id": batch_id, "is_replay": is_replay})
             return
         pdf = batch_df.toPandas()
+        print("\n=== AFTER toPandas ===")
+        print(pdf["currency_pair"].value_counts())
+        print(sorted(pdf["currency_pair"].unique().tolist()))
         print(
             pdf[["currency_pair", "partition", "offset"]]
                 .sort_values(["partition", "offset"])
@@ -1312,6 +1314,10 @@ def process_batch(
     # ── Step 1: Deduplicate by timestamp (pure data logic) ─────────────
     original_count            = len(pdf)
     pdf                       = pdf.drop_duplicates(subset=["currency_pair", "timestamp"])
+    print("\n=== AFTER DEDUP ===")
+    print(len(pdf))
+    print(pdf[["currency_pair", "partition", "offset"]]
+      .sort_values(["partition", "offset"]))
     deduped_count             = len(pdf)
     metrics["events_deduped"] = original_count - deduped_count
 
@@ -1386,6 +1392,9 @@ def process_batch(
 
     # ── Step 3: Process each FX bar ───────────────────────────────────
     for _, bar in pdf.iterrows():
+        if bar["currency_pair"] == "USDCNY":
+            print("\n=== PROCESSING USDCNY ===")
+            print(bar.to_dict())
         try:
             pair     = bar["currency_pair"]
 
@@ -1394,6 +1403,12 @@ def process_batch(
                 raise ValueError(
                     f"Invalid FX data: close={bar['close']}, "
                     f"high={bar['high']}, low={bar['low']}"
+                )
+          
+            if pair == "USDCNY":
+                print(
+                    "USDCNY in pair_groups =",
+                    pair in pair_groups
                 )
 
             if pair not in pair_groups:
@@ -1425,7 +1440,11 @@ def process_batch(
                 fx_metrics = fx_metrics,
                 pair_groups= pair_groups,
             )
-
+            if pair == "USDCNY":
+                print(
+                    "USDCNY exposure rows:",
+                    len(exposure_rows)
+                )
             if not exposure_rows:
                 continue
 
@@ -1454,6 +1473,16 @@ def process_batch(
             PROM_RECORDS_PROCESSED_TOTAL.inc()
 
         except Exception as exc:
+
+            print("\n" + "=" * 80)
+            print("FAILED ROW")
+            print("PAIR:", bar.get("currency_pair"))
+            print("OFFSET:", bar.get("offset"))
+            print("PARTITION:", bar.get("partition"))
+            print("ERROR:", repr(exc))
+            print("ROW:")
+            print(bar.to_dict())
+            print("=" * 80 + "\n")
             metrics["events_failed"] += 1
             dlq_entry = {
                 "error":            str(exc),
@@ -1500,6 +1529,16 @@ def process_batch(
         print(
             f"[REDIS-OUT] batch={batch_id} "
             f"pairs={pairs}"
+        )
+
+        print("\n=== OUTPUT PAIRS ===")
+        print(
+            sorted(
+                set(
+                    r["currency_pair"]
+                    for r in output_rows
+                )
+            )
         )
         publish_fx_snapshot_to_redis(output_rows)
 

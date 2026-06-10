@@ -592,8 +592,7 @@ def update_ticker_buffer(ticker: str, row_dict: dict) -> None:
     if len(ticker_buffers[ticker]) > cap:
         overflow = len(ticker_buffers[ticker]) - cap
         ticker_buffers[ticker] = ticker_buffers[ticker][overflow:]
-        log("DEBUG", "Ticker buffer trimmed",
-            {"ticker": ticker, "trimmed": overflow, "cap": cap})
+
 
 # =============================================================
 # STATE REBUILD  —  LIVE MODE RECOVERY ONLY
