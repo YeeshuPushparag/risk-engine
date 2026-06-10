@@ -1298,6 +1298,11 @@ def process_batch(
                 {"batch_id": batch_id, "is_replay": is_replay})
             return
         pdf = batch_df.toPandas()
+        print(
+            f"[CONSUMER-IN] batch={batch_id} "
+            f"rows={len(pdf)} "
+            f"pairs={sorted(pdf['currency_pair'].unique().tolist())}"
+        )
     except Exception as exc:
         log("ERROR", "Failed to convert FX batch to pandas",
             {"batch_id": batch_id, "is_replay": is_replay, "error": str(exc)})
@@ -1493,6 +1498,11 @@ def process_batch(
     # Redis represents live state only; historical replay/backfill must not
     # overwrite the current live snapshot with stale historical data.
     if not is_replay and not IS_BACKFILL:
+        pairs = sorted(set(r["currency_pair"] for r in output_rows))
+        print(
+            f"[REDIS-OUT] batch={batch_id} "
+            f"pairs={pairs}"
+        )
         publish_fx_snapshot_to_redis(output_rows)
 
     # ── Step 7: Flush DLQ ────────────────────────────────────────────

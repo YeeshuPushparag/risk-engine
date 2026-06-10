@@ -1291,7 +1291,8 @@ def process_batch(
         log_batch_metrics(str(batch_id), metrics)
         _push_metrics()
         return
-
+    
+    log("INFO", "Processing events", {"batch_id": batch_id, "event_count": len(snapshot_rows)})
     snapshot_df = pd.DataFrame(snapshot_rows)
 
     # ── Enrichment ───────────────────────────────────────────────────

@@ -654,6 +654,7 @@ def _extract_events_from_df(
 
                 event = build_event(record, producer_run_id, batch_id, source_fetch_time, is_backfill=(not exclude_in_progress_bar))
                 events.append(event)
+                print(f"[PRODUCER] {pair} -> {record['close']}")
 
             if (pair not in fetch_metrics["missing_pairs"]
                     and pair not in fetch_metrics["empty_pairs"]
@@ -800,6 +801,11 @@ def fetch_fx_snapshot_with_retry(
     events = _extract_events_from_df(
         df, pairs, producer_run_id, batch_id, source_fetch_time,
         dlq_buffer, fetch_metrics, exclude_in_progress_bar=True,
+    )
+    print(
+        f"[PRODUCER] batch={batch_id} "
+        f"events={len(events)} "
+        f"pairs={[e['data']['currency_pair'] for e in events]}"
     )
     return events, fetch_metrics
 
