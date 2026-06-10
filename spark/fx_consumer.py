@@ -159,7 +159,7 @@ CONFIG: dict = {
     "output_prefix":         "fx/data",
 
     # Raw Kafka storage (for state rebuild - live recovery only)
-    "raw_state_rebuild_prefix": "kafka_raw/fx/state",
+    "raw_state_rebuild_prefix": "kafka_raw/fx/live/",
 
     # Replay output — never touches live output
     "replay_output_prefix":  "fx/replay",

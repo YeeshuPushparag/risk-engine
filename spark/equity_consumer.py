@@ -154,7 +154,7 @@ CONFIG: dict = {
     "checkpoint_dir":       os.getenv("CHECKPOINT_DIR","s3a://risk-platform-pushparag-analytics") + "/equity/checkpoints",
 
     # Raw Kafka storage (for state rebuild - live recovery only)
-    "raw_state_rebuild_prefix": "kafka_raw/equity/state/",  
+    "raw_state_rebuild_prefix": "kafka_raw/equity/live/",  
 
     # Late event handling
     "late_event_max_minutes":   5,
