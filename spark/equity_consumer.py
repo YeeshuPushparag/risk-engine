@@ -151,7 +151,7 @@ CONFIG: dict = {
     "output_prefix":        "equity/data",
     # Replay output — never touches live output
     "replay_output_prefix": "equity/replay",
-    "consumer_dlq_prefix":  "kafka_dlq/consumer",
+    "consumer_dlq_prefix":  "kafka_dlq/equity/consumer",
     "raw_replay_prefix":    "kafka_raw/equity/backfill/",
     "checkpoint_dir":       os.getenv("CHECKPOINT_DIR","s3a://risk-platform-pushparag-analytics") + "/equity/checkpoints",
 

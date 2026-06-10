@@ -1299,6 +1299,10 @@ def process_batch(
             return
         pdf = batch_df.toPandas()
         print(
+            pdf[["currency_pair", "partition", "offset"]]
+                .sort_values(["partition", "offset"])
+        )
+        print(
             f"[CONSUMER-IN] batch={batch_id} "
             f"rows={len(pdf)} "
             f"pairs={sorted(pdf['currency_pair'].unique().tolist())}"

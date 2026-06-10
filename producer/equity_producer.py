@@ -948,15 +948,23 @@ def send_with_retry(
 
     Returns True on success, False on final failure.
     """
-    topic = CONFIG["topic_name"]
+    # Detect combined payload
+    is_combined_equity = "tickers" in event
+    is_combined_fx = "bars" in event
 
     for attempt in range(1, CONFIG["max_send_retries"] + 1):
         try:
-            future = producer.send(
-                topic,
-                key   = event["data"]["ticker"],
-                value = event,
-            )
+            if is_combined_equity or is_combined_fx:
+                # Combined payload - send without key
+                future = producer.send(topic, value=event)
+            else:
+                # Individual event - send with key
+                key_field = event["data"].get("ticker") or event["data"].get("currency_pair")
+                future = producer.send(
+                    topic,
+                    key=key_field,
+                    value=event,
+                )
             future.get(timeout=CONFIG["send_timeout_s"])
             return True
 
@@ -1107,14 +1115,31 @@ def run_live(producer_run_id: str, tickers: list[str], producer: KafkaProducer) 
             # ── Step 2: Store raw events ───────────────────────────────
             store_raw_events_parquet(events, batch_id, producer_run_id, source_type="live")
 
-            # ── Step 3: Send to Kafka with retry ───────────────────────
-            for event in events:
-                success = send_with_retry(producer, event, dlq_buffer)
+            # ── Step 3: Send combined message to Kafka ─────────────────
+            if events:
+                # Build combined payload with all tickers
+                combined_payload = {
+                    "timestamp": pendulum.now("America/New_York").isoformat(),
+                    "tickers": []
+                }
+                
+                for event in events:
+                    combined_payload["tickers"].append({
+                        "ticker": event["data"]["ticker"],
+                        "open": event["data"]["open"],
+                        "high": event["data"]["high"],
+                        "low": event["data"]["low"],
+                        "close": event["data"]["close"],
+                        "volume": event["data"]["volume"],
+                    })
+                
+                # Send single message
+                success = send_with_retry(producer, combined_payload, dlq_buffer)
                 if success:
-                    metrics["events_sent"] += 1
+                    metrics["events_sent"] = len(events)
                     PROM_KAFKA_MESSAGES_TOTAL.inc()
                 else:
-                    metrics["events_failed"] += 1
+                    metrics["events_failed"] = len(events)
 
             # ── Step 4: Flush DLQ buffer ───────────────────────────────
             PROM_DLQ_TOTAL.inc(len(dlq_buffer))
