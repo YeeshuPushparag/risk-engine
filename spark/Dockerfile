@@ -15,6 +15,9 @@ ENV PYSPARK_DRIVER_PYTHON=/usr/bin/python3
 
 COPY requirements.txt .
 
+RUN /usr/bin/python3 --version && \
+    /usr/bin/python3 -m pip --version
+
 RUN /usr/bin/python3 -m pip install --upgrade pip && \
     /usr/bin/python3 -m pip install --no-cache-dir -r requirements.txt
 
