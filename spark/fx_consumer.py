@@ -157,6 +157,10 @@ CONFIG: dict = {
     "universe_key":          "historical-fx/final_merged.parquet",
     # Live output — never touched by replay
     "output_prefix":         "fx/data",
+
+    # Raw Kafka storage (for state rebuild - live recovery only)
+    "raw_state_rebuild_prefix": "kafka_raw/fx/state",
+
     # Replay output — never touches live output
     "replay_output_prefix":  "fx/replay",
     "consumer_dlq_prefix":   "kafka_dlq/fx/consumer",
@@ -899,7 +903,7 @@ def rebuild_state_from_s3() -> None:
         hours_to_scan.add(cursor.hour)
         cursor += timedelta(hours=1)
 
-    base_prefix = CONFIG["raw_replay_prefix"]
+    base_prefix = CONFIG["raw_state_rebuild_prefix"]
     if not base_prefix.endswith("/"):
         base_prefix += "/"
 
@@ -1127,6 +1131,12 @@ def compute_exposure_rows(
             "foreign_revenue_ratio": nz(ticker_row.get("foreign_revenue_ratio")),
             "position_size":     position_size,
 
+            # Previous FX bar values (ADD THESE)
+            "prev_open":         bar.get("prev_open", np.nan),
+            "prev_high":         bar.get("prev_high", np.nan),
+            "prev_low":          bar.get("prev_low", np.nan),
+            "prev_close":        bar.get("prev_close", np.nan),
+
             # FX metrics
             "fx_return_1m":      nz(fx_metrics["fx_return_1m"]),
             "fx_return_5m":      nz(fx_metrics["fx_return_5m"]),
@@ -1240,6 +1250,42 @@ def add_lineage(
     row_dict["producer_pipeline_name"]  = producer_pipeline
     return row_dict
 
+
+
+def add_prev_ohlcv_to_bar(row_dict: dict, buffer: list) -> dict:
+    """
+    Add previous OHLCV values to an FX bar dict from the pair buffer.
+    
+    If buffer has at least 2 rows, prev values come from the second-to-last row.
+    If buffer has only 1 row (first bar for pair), prev values are set to None.
+    
+    Args:
+        row_dict: The current bar dict (latest FX data)
+        buffer: The pair buffer list (all historical bars for this pair)
+    
+    Returns:
+        Updated row_dict with prev_open, prev_high, prev_low, prev_close fields
+    """
+    if len(buffer) >= 2:
+        prev = buffer[-2]  # second-to-last bar
+        row_dict.update({
+            "prev_open":   prev.get("open",   np.nan),
+            "prev_high":   prev.get("high",   np.nan),
+            "prev_low":    prev.get("low",    np.nan),
+            "prev_close":  prev.get("close",  np.nan),
+        })
+    else:
+        # First bar for this pair - no previous values available
+        row_dict.update({
+            "prev_open": np.nan,
+            "prev_high": np.nan,
+            "prev_low": np.nan,
+            "prev_close": np.nan,
+        })
+    
+    return row_dict
+
+
 # =============================================================
 # PROCESS BATCH  (core consumer logic — live and replay share this)
 # =============================================================
@@ -1292,13 +1338,7 @@ def process_batch(
                 {"batch_id": batch_id, "is_replay": is_replay})
             return
         pdf = batch_df.toPandas()
-        print("\n=== AFTER toPandas ===")
-        print(pdf["currency_pair"].value_counts())
-        print(sorted(pdf["currency_pair"].unique().tolist()))
-        print(
-            pdf[["currency_pair", "partition", "offset"]]
-                .sort_values(["partition", "offset"])
-        )
+
         print(
             f"[CONSUMER-IN] batch={batch_id} "
             f"rows={len(pdf)} "
@@ -1314,10 +1354,7 @@ def process_batch(
     # ── Step 1: Deduplicate by timestamp (pure data logic) ─────────────
     original_count            = len(pdf)
     pdf                       = pdf.drop_duplicates(subset=["currency_pair", "timestamp"])
-    print("\n=== AFTER DEDUP ===")
-    print(len(pdf))
-    print(pdf[["currency_pair", "partition", "offset"]]
-      .sort_values(["partition", "offset"]))
+
     deduped_count             = len(pdf)
     metrics["events_deduped"] = original_count - deduped_count
 
@@ -1392,9 +1429,6 @@ def process_batch(
 
     # ── Step 3: Process each FX bar ───────────────────────────────────
     for _, bar in pdf.iterrows():
-        if bar["currency_pair"] == "USDCNY":
-            print("\n=== PROCESSING USDCNY ===")
-            print(bar.to_dict())
         try:
             pair     = bar["currency_pair"]
 
@@ -1405,11 +1439,6 @@ def process_batch(
                     f"high={bar['high']}, low={bar['low']}"
                 )
           
-            if pair == "USDCNY":
-                print(
-                    "USDCNY in pair_groups =",
-                    pair in pair_groups
-                )
 
             if pair not in pair_groups:
                 log("DEBUG", "FX pair not in universe — skipping",
@@ -1428,7 +1457,11 @@ def process_batch(
                 "timestamp":    bar.get("timestamp", ""),
                 "ingested_at":   bar.get("ingested_at", ""),
             }
+
             update_pair_buffer(pair, clean_bar)
+
+            # ─── Add prev OHLCV values to the clean bar ───
+            clean_bar = add_prev_ohlcv_to_bar(clean_bar, pair_buffers[pair])
 
             # FX rolling metrics (uses clean buffer)
             fx_metrics = compute_fx_metrics(pair_buffers[pair])
@@ -1440,11 +1473,7 @@ def process_batch(
                 fx_metrics = fx_metrics,
                 pair_groups= pair_groups,
             )
-            if pair == "USDCNY":
-                print(
-                    "USDCNY exposure rows:",
-                    len(exposure_rows)
-                )
+
             if not exposure_rows:
                 continue
 
@@ -1474,15 +1503,6 @@ def process_batch(
 
         except Exception as exc:
 
-            print("\n" + "=" * 80)
-            print("FAILED ROW")
-            print("PAIR:", bar.get("currency_pair"))
-            print("OFFSET:", bar.get("offset"))
-            print("PARTITION:", bar.get("partition"))
-            print("ERROR:", repr(exc))
-            print("ROW:")
-            print(bar.to_dict())
-            print("=" * 80 + "\n")
             metrics["events_failed"] += 1
             dlq_entry = {
                 "error":            str(exc),
@@ -1531,15 +1551,6 @@ def process_batch(
             f"pairs={pairs}"
         )
 
-        print("\n=== OUTPUT PAIRS ===")
-        print(
-            sorted(
-                set(
-                    r["currency_pair"]
-                    for r in output_rows
-                )
-            )
-        )
         publish_fx_snapshot_to_redis(output_rows)
 
     # ── Step 7: Flush DLQ ────────────────────────────────────────────

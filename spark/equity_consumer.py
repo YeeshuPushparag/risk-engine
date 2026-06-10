@@ -153,6 +153,9 @@ CONFIG: dict = {
     "raw_replay_prefix":    "kafka_raw/equity/backfill/",
     "checkpoint_dir":       os.getenv("CHECKPOINT_DIR","s3a://risk-platform-pushparag-analytics") + "/equity/checkpoints",
 
+    # Raw Kafka storage (for state rebuild - live recovery only)
+    "raw_state_rebuild_prefix": "kafka_raw/equity/state/",  
+
     # Late event handling
     "late_event_max_minutes":   5,
 
@@ -727,7 +730,7 @@ def rebuild_state_from_s3() -> None:
         hours_to_scan.add(cursor.hour)
         cursor += timedelta(hours=1)
 
-    base_prefix = CONFIG["raw_replay_prefix"]
+    base_prefix = CONFIG["raw_state_rebuild_prefix"]
     if not base_prefix.endswith("/"):
         base_prefix += "/"
 
@@ -1233,9 +1236,31 @@ def process_batch(
                     f"high={row['high']}, low={row['low']}"
                 )
 
+
+
             # ── Buffer update (with safety guards) ───────────────────
             row_dict = row.to_dict()
             update_ticker_buffer(ticker, row_dict)
+
+            # ── NOW get the buffer and add prev OHLCV values ───────────
+            buffer = ticker_buffers[ticker]
+            if len(buffer) >= 2:
+                prev = buffer[-2]
+                row_dict.update({
+                    "prev_open":   prev.get("open",   np.nan),
+                    "prev_high":   prev.get("high",   np.nan),
+                    "prev_low":    prev.get("low",    np.nan),
+                    "prev_close":  prev.get("close",  np.nan),
+                    "prev_volume": prev.get("volume", np.nan),
+                })
+            else:
+                row_dict.update({
+                    "prev_open": np.nan,
+                    "prev_high": np.nan,
+                    "prev_low": np.nan,
+                    "prev_close": np.nan,
+                    "prev_volume": np.nan,
+                })
 
             # ── Feature computation ──────────────────────────────────
             computed = compute_metrics(ticker_buffers[ticker])
