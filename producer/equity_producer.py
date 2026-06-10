@@ -381,7 +381,6 @@ def build_kafka_producer() -> KafkaProducer:
     """
     return KafkaProducer(
         bootstrap_servers                     = CONFIG["kafka_broker"],
-        key_serializer                        = lambda k: k.encode("utf-8"),
         value_serializer                      = lambda v: json.dumps(v, default=str).encode("utf-8"),
         acks                                  = CONFIG["kafka_acks"],
         retries                               = CONFIG["kafka_retries"],

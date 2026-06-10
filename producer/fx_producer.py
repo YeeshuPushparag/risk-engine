@@ -343,16 +343,15 @@ def build_kafka_producer() -> KafkaProducer:
     and serializers matching the FX event schema.
     """
     return KafkaProducer(
-        bootstrap_servers                     = CONFIG["kafka_broker"],
-        key_serializer                        = lambda k: k.encode("utf-8"),
-        value_serializer                      = lambda v: json.dumps(v, default=str).encode("utf-8"),
-        acks                                  = CONFIG["kafka_acks"],
-        retries                               = CONFIG["kafka_retries"],
-        enable_idempotence                    = True,   # exactly-once at broker level
-        max_in_flight_requests_per_connection = 1,     
-        linger_ms                             = CONFIG["kafka_linger_ms"],
-        request_timeout_ms                    = CONFIG["kafka_request_timeout_ms"],
-        delivery_timeout_ms                   = CONFIG["kafka_delivery_timeout_ms"],
+        bootstrap_servers=CONFIG["kafka_broker"],
+        value_serializer=lambda v: json.dumps(v, default=str).encode("utf-8"),
+        acks=CONFIG["kafka_acks"],
+        retries=CONFIG["kafka_retries"],
+        enable_idempotence=True,
+        max_in_flight_requests_per_connection=1,
+        linger_ms=CONFIG["kafka_linger_ms"],
+        request_timeout_ms=CONFIG["kafka_request_timeout_ms"],
+        delivery_timeout_ms=CONFIG["kafka_delivery_timeout_ms"],
     )
 
 # =============================================================
