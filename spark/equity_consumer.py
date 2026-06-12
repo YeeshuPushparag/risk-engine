@@ -716,11 +716,9 @@ def rebuild_state_from_s3() -> None:
 
     rebuild_minutes = CONFIG["state_rebuild_minutes"]
 
-    rebuild_start_et = pd.Timestamp(
-        now_et - timedelta(minutes=rebuild_minutes)
+    rebuild_start_et = now_et - timedelta(
+        minutes=rebuild_minutes
     )
-
-    now_et = pd.Timestamp(now_et)
 
     log("INFO", "Starting equity state rebuild",
         {"rebuild_start_et": rebuild_start_et.isoformat(),
