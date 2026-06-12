@@ -726,7 +726,7 @@ def rebuild_state_from_s3() -> None:
          "window_minutes":   rebuild_minutes,
          "current_et":       now_et.isoformat()})
 
-    # ── Determine which hour partitions to scan (using ET) ────────────
+    # ── Determine which hour partitions to scan  ────────────
     hours_to_scan = set()
     cursor = rebuild_start_et
     while cursor <= now_et:
@@ -790,20 +790,25 @@ def rebuild_state_from_s3() -> None:
         log("WARNING", "State rebuild: timestamp column missing — skipping rebuild")
         return
 
-    combined["_evt_dt"] = (
-        pd.to_datetime(
-            combined["timestamp"],
-            utc=True,
-            errors="coerce"
-        )
-        .dt.tz_convert("America/New_York")
+    combined["_evt_dt"] = pd.to_datetime(
+        combined["timestamp"],
+        utc=True,
+        errors="coerce"
     )
 
     combined = combined.dropna(subset=["_evt_dt"])
 
+    rebuild_start_utc = pd.Timestamp(
+        rebuild_start_et
+    ).tz_convert("UTC")
+
+    now_utc = pd.Timestamp(
+        now_et
+    ).tz_convert("UTC")
+
     combined = combined[
-        (combined["_evt_dt"] >= rebuild_start_et)
-        & (combined["_evt_dt"] <= now_et)
+        (combined["_evt_dt"] >= rebuild_start_utc)
+        & (combined["_evt_dt"] <= now_utc)
     ]
 
     if combined.empty:

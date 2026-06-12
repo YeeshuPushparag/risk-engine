@@ -958,27 +958,33 @@ def rebuild_state_from_s3() -> None:
 
     combined = pd.concat(frames, ignore_index=True)
 
-    # Filter to only events within the rebuild window (using ET)
+    # Filter to only events within the rebuild window 
     if "timestamp" not in combined.columns:
         log("WARNING", "FX state rebuild: timestamp column missing — skipping rebuild")
         return
 
-    combined["_evt_dt"] = (
-        pd.to_datetime(
-            combined["timestamp"],
-            utc=True,
-            errors="coerce"
-        )
-        .dt.tz_convert("America/New_York")
+    combined["_evt_dt"] = pd.to_datetime(
+        combined["timestamp"],
+        utc=True,
+        errors="coerce"
     )
 
     combined = combined.dropna(subset=["_evt_dt"])
 
+    rebuild_start_utc = pd.Timestamp(
+        rebuild_start_et
+    ).tz_convert("UTC")
+
+    now_utc = pd.Timestamp(
+        now_et
+    ).tz_convert("UTC")
+
     combined = combined[
-        (combined["_evt_dt"] >= rebuild_start_et)
-        & (combined["_evt_dt"] <= now_et)
+        (combined["_evt_dt"] >= rebuild_start_utc)
+        & (combined["_evt_dt"] <= now_utc)
     ]
 
+ 
     if combined.empty:
         log("INFO", "FX state rebuild: no events in rebuild window after filtering",
             {"rebuild_start_et": rebuild_start_et.isoformat(),
