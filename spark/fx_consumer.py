@@ -886,7 +886,12 @@ def rebuild_state_from_s3() -> None:
         return
 
     rebuild_minutes = CONFIG["state_rebuild_minutes"]
-    rebuild_start_et = now_et - timedelta(minutes=rebuild_minutes)
+
+    rebuild_start_et = pd.Timestamp(
+        now_et - timedelta(minutes=rebuild_minutes)
+    )
+
+    now_et = pd.Timestamp(now_et)
 
     log("INFO", "Starting FX state rebuild",
         {"rebuild_start_et": rebuild_start_et.isoformat(),
@@ -1057,31 +1062,122 @@ def log_batch_metrics(batch_id: str, metrics: dict) -> None:
 def compute_fx_metrics(buffer: list) -> dict:
     """
     Compute rolling FX metrics from the per-pair OHLC buffer.
-    Business logic preserved from original FX consumer.
+
+    Metrics are calculated using timestamp-based windows rather than
+    row counts. All timestamps are normalized to minute granularity
+    before window construction so second-level differences do not
+    affect metric calculations.
 
     Metrics:
-        fx_return_1m   — 1-bar log return
-        fx_return_5m   — 5-bar log return
-        fx_vol_15m     — 15-bar log-return standard deviation
+        fx_return_1m
+            Return between the oldest and newest observations within
+            the last 1-minute window.
+
+        fx_return_5m
+            Return between the oldest and newest observations within
+            the last 5-minute window.
+
+        fx_vol_15m
+            Standard deviation of log returns within the last
+            15-minute window.
     """
-    closes = np.array([b["close"] for b in buffer], dtype=float)
 
     metrics = {
         "fx_return_1m": np.nan,
         "fx_return_5m": np.nan,
-        "fx_vol_15m":   np.nan,
+        "fx_vol_15m": np.nan,
     }
 
-    if len(closes) >= 2:
-        metrics["fx_return_1m"] = (closes[-1] - closes[-2]) / closes[-2]
+    if not buffer:
+        return metrics
 
-    if len(closes) >= 6:
-        metrics["fx_return_5m"] = (closes[-1] - closes[-6]) / closes[-6]
+    latest_ts = pd.to_datetime(
+        buffer[-1].get("timestamp"),
+        utc=True,
+        errors="coerce",
+    )
 
-    if len(closes) >= 16:
-        r     = np.diff(closes) / closes[:-1]
-        log_r = np.log1p(r)
-        metrics["fx_vol_15m"] = float(np.std(log_r[-15:]))
+    if pd.isna(latest_ts):
+        return metrics
+
+    latest_ts = latest_ts.floor("min")
+
+    cutoff_1m = latest_ts - pd.Timedelta(minutes=1)
+    cutoff_5m = latest_ts - pd.Timedelta(minutes=5)
+    cutoff_15m = latest_ts - pd.Timedelta(minutes=15)
+
+    window_1m = []
+    window_5m = []
+    window_15m = []
+
+    for row in buffer:
+
+        ts = pd.to_datetime(
+            row.get("timestamp"),
+            utc=True,
+            errors="coerce",
+        )
+
+        if pd.isna(ts):
+            continue
+
+        ts = ts.floor("min")
+
+        if ts >= cutoff_1m:
+            window_1m.append(row)
+
+        if ts >= cutoff_5m:
+            window_5m.append(row)
+
+        if ts >= cutoff_15m:
+            window_15m.append(row)
+
+    # ---------------------------------------------------------
+    # 1-minute return
+    # ---------------------------------------------------------
+
+    if len(window_1m) >= 2:
+
+        first_close = window_1m[0]["close"]
+        last_close = window_1m[-1]["close"]
+
+        if pd.notna(first_close) and first_close != 0:
+            metrics["fx_return_1m"] = (
+                last_close - first_close
+            ) / first_close
+
+    # ---------------------------------------------------------
+    # 5-minute return
+    # ---------------------------------------------------------
+
+    if len(window_5m) >= 2:
+
+        first_close = window_5m[0]["close"]
+        last_close = window_5m[-1]["close"]
+
+        if pd.notna(first_close) and first_close != 0:
+            metrics["fx_return_5m"] = (
+                last_close - first_close
+            ) / first_close
+
+    # ---------------------------------------------------------
+    # 15-minute volatility
+    # ---------------------------------------------------------
+
+    if len(window_15m) >= 2:
+
+        closes_15m = np.array(
+            [row["close"] for row in window_15m],
+            dtype=float,
+        )
+
+        returns = np.diff(closes_15m) / closes_15m[:-1]
+        log_returns = np.log1p(returns)
+
+        if len(log_returns) > 0:
+            metrics["fx_vol_15m"] = float(
+                np.std(log_returns)
+            )
 
     return metrics
 

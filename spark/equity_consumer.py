@@ -160,7 +160,7 @@ CONFIG: dict = {
     "late_event_max_minutes":   5,
 
     # Buffer safety (single definition)
-    "max_buffer_per_ticker":    16,
+    "max_buffer_per_ticker":    120,
     "max_total_ticker_symbols": 500,
 
     # Redis (snapshots only — dedup removed; only used in live mode)
@@ -715,7 +715,12 @@ def rebuild_state_from_s3() -> None:
         return
 
     rebuild_minutes = CONFIG["state_rebuild_minutes"]
-    rebuild_start_et = now_et - timedelta(minutes=rebuild_minutes)
+
+    rebuild_start_et = pd.Timestamp(
+        now_et - timedelta(minutes=rebuild_minutes)
+    )
+
+    now_et = pd.Timestamp(now_et)
 
     log("INFO", "Starting equity state rebuild",
         {"rebuild_start_et": rebuild_start_et.isoformat(),
@@ -879,6 +884,50 @@ def compute_metrics(buffer: list) -> dict:
     lows    = np.array([r["low"]    for r in buffer])
     volumes = np.array([r["volume"] for r in buffer])
 
+    # ---------------------------------------------------------
+    # Time-based windows
+    # ---------------------------------------------------------
+    try:
+        latest_ts = pd.to_datetime(
+            buffer[-1].get("timestamp"),
+            utc=True,
+            errors="coerce"
+        ).floor("min")
+
+        if pd.isna(latest_ts):
+            latest_ts = None
+    except Exception:
+        latest_ts = None
+
+    # Build time windows from latest timestamp
+    window_1m = []
+    window_5m = []
+    window_15m = []
+
+    if latest_ts is not None:
+        cutoff_1m = latest_ts - pd.Timedelta(minutes=1)
+        cutoff_5m = latest_ts - pd.Timedelta(minutes=5)
+        cutoff_15m = latest_ts - pd.Timedelta(minutes=15)
+
+        for r in buffer:
+            ts = pd.to_datetime(
+                r.get("timestamp"),
+                utc=True,
+                errors="coerce"
+            ).floor("min")
+
+            if pd.isna(ts):
+                continue
+
+            if ts >= cutoff_1m:
+                window_1m.append(r)
+
+            if ts >= cutoff_5m:
+                window_5m.append(r)
+
+            if ts >= cutoff_15m:
+                window_15m.append(r)
+
     metrics = {
         "return_1m":         np.nan,
         "return_5m":         np.nan,
@@ -894,36 +943,115 @@ def compute_metrics(buffer: list) -> dict:
     }
 
     if len(closes) >= 2:
-        metrics["close_diff"]   = closes[-1] - closes[-2]
-        metrics["return_1m"]    = (closes[-1] - closes[-2]) / closes[-2]
-        metrics["range_pct_1m"] = (highs[-1] - lows[-1]) / closes[-2]
+        # Previous observation difference (keep as-is)
+        metrics["close_diff"] = closes[-1] - closes[-2]
 
-    if len(closes) >= 6:
-        metrics["return_5m"]      = (closes[-1] - closes[-6]) / closes[-6]
-        metrics["trend_slope_5m"] = (closes[-1] - closes[-6]) / 5
+    if len(window_1m) >= 2:
 
-    if len(closes) >= 16:
-        r     = (closes[1:] - closes[:-1]) / closes[:-1]
-        log_r = np.log1p(r)
-        metrics["vol_15m"] = float(np.std(log_r[-15:]))
+        first_close = window_1m[0]["close"]
+        last_close  = window_1m[-1]["close"]
 
-    if len(closes) >= 5:
-        metrics["rolling_vwap_5m"]  = float(
-            np.sum(closes[-5:] * volumes[-5:]) / np.sum(volumes[-5:])
+        if pd.notna(first_close) and first_close != 0:
+
+            metrics["return_1m"] = (
+                last_close - first_close
+            ) / first_close
+
+            latest_high = window_1m[-1]["high"]
+            latest_low  = window_1m[-1]["low"]
+
+            metrics["range_pct_1m"] = (
+                latest_high - latest_low
+            ) / first_close
+
+    if len(window_5m) >= 2:
+
+        first_close = window_5m[0]["close"]
+        last_close  = window_5m[-1]["close"]
+
+        if pd.notna(first_close) and first_close != 0:
+            metrics["return_5m"] = (
+                last_close - first_close
+            ) / first_close
+
+            metrics["trend_slope_5m"] = (
+                last_close - first_close
+            ) / 5
+
+    if len(window_15m) >= 2:
+
+        closes_15m = np.array(
+            [r["close"] for r in window_15m],
+            dtype=float
         )
-        metrics["rolling_high_5m"]  = float(np.max(highs[-5:]))
-        metrics["rolling_low_5m"]   = float(np.min(lows[-5:]))
 
-        high5 = np.max(highs[-5:])
-        low5  = np.min(lows[-5:])
-        rng   = high5 - low5
-        metrics["breakout_strength"] = (
-            float((closes[-1] - low5) / rng) if rng != 0 else None
+        returns = (
+            closes_15m[1:] - closes_15m[:-1]
+        ) / closes_15m[:-1]
+
+        returns = returns[np.isfinite(returns)]
+
+        if len(returns) > 0:
+            metrics["vol_15m"] = float(
+                np.std(np.log1p(returns))
+            )
+
+    if len(window_5m) > 0:
+
+        closes_5m = np.array(
+            [r["close"] for r in window_5m],
+            dtype=float
         )
 
-    if len(volumes) >= 6:
-        avg5 = np.mean(volumes[-6:-1])
-        metrics["volume_burst"] = float(volumes[-1] / avg5) if avg5 != 0 else None
+        highs_5m = np.array(
+            [r["high"] for r in window_5m],
+            dtype=float
+        )
+
+        lows_5m = np.array(
+            [r["low"] for r in window_5m],
+            dtype=float
+        )
+
+        volumes_5m = np.array(
+            [r["volume"] for r in window_5m],
+            dtype=float
+        )
+
+        volume_sum = np.sum(volumes_5m)
+
+        if volume_sum > 0:
+            metrics["rolling_vwap_5m"] = float(
+                np.sum(closes_5m * volumes_5m)
+                / volume_sum
+            )
+
+        metrics["rolling_high_5m"] = float(np.max(highs_5m))
+        metrics["rolling_low_5m"] = float(np.min(lows_5m))
+
+        high5 = np.max(highs_5m)
+        low5 = np.min(lows_5m)
+        rng = high5 - low5
+
+        if rng > 0:
+            metrics["breakout_strength"] = (
+                closes_5m[-1] - low5
+            ) / rng
+
+
+    if len(window_5m) >= 2:
+
+        vols = np.array(
+            [r["volume"] for r in window_5m],
+            dtype=float
+        )
+
+        avg_volume = np.mean(vols[:-1])
+
+        if avg_volume > 0:
+            metrics["volume_burst"] = float(
+                vols[-1] / avg_volume
+            )
 
     return metrics
 
