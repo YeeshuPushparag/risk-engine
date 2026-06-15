@@ -361,98 +361,200 @@ def equity_overview(request):
 # 2. Equity Manager API
 # ---------------------------
 def equity_manager(request):
+    try:
+        print("STEP 1")
 
-    manager = request.GET.get("manager")
-    if not manager:
-        return JsonResponse({"error": "missing manager"}, status=400)
+        manager = request.GET.get("manager")
+        print("manager =", manager)
 
-    raw = redis_client.get("equity_latest_snapshot")
-    if not raw:
-        return JsonResponse({"error": "no snapshot"}, status=404)
+        if not manager:
+            return JsonResponse({"error": "missing manager"}, status=400)
 
-    rows = json.loads(raw)
-    if not rows:
-        return JsonResponse({"error": "empty snapshot"}, status=404)
+        print("STEP 2")
 
-    normalized_manager = manager.replace("-", " ").lower()
+        raw = redis_client.get("equity_latest_snapshot")
 
-    filtered = [
-        r for r in rows
-        if r.get("asset_manager", "").replace("-", " ").lower() == normalized_manager
-    ]
+        if not raw:
+            return JsonResponse({"error": "no snapshot"}, status=404)
 
-    if not filtered:
-        return JsonResponse({"error": "manager not found"}, status=404)
+        print("STEP 3")
 
-    # ---------------- Aggregates ----------------
-    exposure = sum(safe_num(r.get("intraday_exposure")) for r in filtered)
-    pnl = sum(safe_num(r.get("portfolio_intraday_pnl")) for r in filtered)
+        rows = json.loads(raw)
 
-    avg_r1m = sum(safe_num(r.get("return_1m")) for r in filtered) / len(filtered)
-    avg_r5m = sum(safe_num(r.get("return_5m")) for r in filtered) / len(filtered)
-    avg_vol = sum(safe_num(r.get("vol_15m")) for r in filtered) / len(filtered)
+        print("rows =", len(rows))
 
-    portfolio_total_exposure = sum(
-        safe_num(r.get("intraday_exposure")) for r in rows
-    )
-    weight = exposure / portfolio_total_exposure if portfolio_total_exposure else 0
+        if not rows:
+            return JsonResponse({"error": "empty snapshot"}, status=404)
 
-    holdings = sorted(
-        filtered,
-        key=lambda r: safe_num(r.get("intraday_exposure")),
-        reverse=True,
-    )[:50]
+        print("STEP 4")
 
-    timestamp = rows[0].get("timestamp")
+        normalized_manager = manager.replace("-", " ").lower()
 
-    # ---------------- Alerts ----------------
-    alerts = []
+        print("normalized =", normalized_manager)
 
-    for r in filtered:
-        vol = safe_num(r.get("vol_15m"))
-        ret1 = safe_num(r.get("return_1m"))
-        row_exposure = safe_num(r.get("intraday_exposure"))
+        print("STEP 5 FILTERING")
 
-        if vol > 0.02:
-            alerts.append({
-                "type": "Volatility Spike",
-                "ticker": r.get("ticker"),
-                "severity": "medium",
-                "time": r.get("timestamp"),
-                "trigger": "vol_15m > 0.02",
-                "_exposure": row_exposure,
-            })
+        filtered = []
 
-        if abs(ret1) > 0.008:
-            alerts.append({
-                "type": "Return Shock",
-                "ticker": r.get("ticker"),
-                "severity": "high" if abs(ret1) > 0.015 else "medium",
-                "time": r.get("timestamp"),
-                "trigger": "abs(return_1m) > 0.8%",
-                "_exposure": row_exposure,
-            })
+        for i, r in enumerate(rows):
+            try:
+                mgr = r.get("asset_manager", "")
+                if mgr.replace("-", " ").lower() == normalized_manager:
+                    filtered.append(r)
+            except Exception as e:
+                print("FILTER ERROR")
+                print("index =", i)
+                print("ticker =", r.get("ticker"))
+                print("asset_manager =", r.get("asset_manager"))
+                print("type =", type(r.get("asset_manager")))
+                raise
 
-    alerts = sorted(alerts, key=lambda a: a["_exposure"], reverse=True)[:10]
-    for a in alerts:
-        a.pop("_exposure", None)
+        print("filtered =", len(filtered))
 
-    return JsonResponse({
-        "manager": manager,
-        "timestamp": timestamp,
-        "totals": {
-            "intraday_exposure": exposure,
-            "intraday_pnl": pnl,
-            "return_1m": avg_r1m,
-            "return_5m": avg_r5m,
-            "vol_15m": avg_vol,
-            "holdings_count": len(filtered),
-            "weight": weight,
-            "alerts": len(alerts),
-        },
-        "holdings": holdings,
-        "alerts": alerts,
-    })
+        if filtered:
+            print("first ticker =", filtered[0].get("ticker"))
+
+        if not filtered:
+            return JsonResponse({"error": "manager not found"}, status=404)
+
+        print("STEP 6 EXPOSURE")
+
+        exposure = sum(
+            safe_num(r.get("intraday_exposure"))
+            for r in filtered
+        )
+
+        print("exposure ok")
+
+        pnl = sum(
+            safe_num(r.get("portfolio_intraday_pnl"))
+            for r in filtered
+        )
+
+        print("pnl ok")
+
+        avg_r1m = (
+            sum(safe_num(r.get("return_1m")) for r in filtered)
+            / len(filtered)
+        )
+
+        print("r1m ok")
+
+        avg_r5m = (
+            sum(safe_num(r.get("return_5m")) for r in filtered)
+            / len(filtered)
+        )
+
+        print("r5m ok")
+
+        avg_vol = (
+            sum(safe_num(r.get("vol_15m")) for r in filtered)
+            / len(filtered)
+        )
+
+        print("vol ok")
+
+        print("STEP 7 PORTFOLIO TOTAL")
+
+        portfolio_total_exposure = sum(
+            safe_num(r.get("intraday_exposure"))
+            for r in rows
+        )
+
+        print("portfolio exposure ok")
+
+        weight = (
+            exposure / portfolio_total_exposure
+            if portfolio_total_exposure else 0
+        )
+
+        print("weight ok")
+
+        print("STEP 8 HOLDINGS")
+
+        holdings = sorted(
+            filtered,
+            key=lambda r: safe_num(r.get("intraday_exposure")),
+            reverse=True,
+        )[:50]
+
+        print("holdings ok")
+
+        timestamp = rows[0].get("timestamp")
+
+        print("STEP 9 ALERTS")
+
+        alerts = []
+
+        for r in filtered:
+
+            vol = safe_num(r.get("vol_15m"))
+            ret1 = safe_num(r.get("return_1m"))
+            row_exposure = safe_num(r.get("intraday_exposure"))
+
+            if vol > 0.02:
+                alerts.append({
+                    "type": "Volatility Spike",
+                    "ticker": r.get("ticker"),
+                    "severity": "medium",
+                    "time": r.get("timestamp"),
+                    "trigger": "vol_15m > 0.02",
+                    "_exposure": row_exposure,
+                })
+
+            if abs(ret1) > 0.008:
+                alerts.append({
+                    "type": "Return Shock",
+                    "ticker": r.get("ticker"),
+                    "severity": "high" if abs(ret1) > 0.015 else "medium",
+                    "time": r.get("timestamp"),
+                    "trigger": "abs(return_1m) > 0.8%",
+                    "_exposure": row_exposure,
+                })
+
+        print("alerts built =", len(alerts))
+
+        alerts = sorted(
+            alerts,
+            key=lambda a: a["_exposure"],
+            reverse=True
+        )[:10]
+
+        print("alerts sorted")
+
+        for a in alerts:
+            a.pop("_exposure", None)
+
+        print("STEP 10 RESPONSE")
+
+        return JsonResponse({
+            "manager": manager,
+            "timestamp": timestamp,
+            "totals": {
+                "intraday_exposure": exposure,
+                "intraday_pnl": pnl,
+                "return_1m": avg_r1m,
+                "return_5m": avg_r5m,
+                "vol_15m": avg_vol,
+                "holdings_count": len(filtered),
+                "weight": weight,
+                "alerts": len(alerts),
+            },
+            "holdings": holdings,
+            "alerts": alerts,
+        })
+
+    except Exception as e:
+        import traceback
+
+        print("========== ERROR ==========")
+        print(str(e))
+        print(traceback.format_exc())
+        print("========== END ERROR ==========")
+
+        return JsonResponse({
+            "error": str(e)
+        }, status=500)
 
 # ---------------------------
 # 3. Equity Ticker (fixed alerts)
