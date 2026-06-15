@@ -4,7 +4,7 @@ fx_producer.py
 Production-grade Kafka producer for real-time FX OHLC data.
 Reads 1-minute OHLC snapshots from yfinance and publishes to Kafka.
 
-Architecture mirrors equity_kafka_producer.py exactly, adapted for FX.
+
 
 Storage rules
 -------------
@@ -18,7 +18,7 @@ Raw events (parquet, partitioned):
         year=Y/month=MM/day=DD/hour=HH/batch_<batch_id>.parquet
 
 DLQ (parquet, partitioned by day):
-    s3://risk-platform-pushparag-analytics/kafka_dlq/fx/
+    s3://risk-platform-pushparag-analytics/kafka_dlq/fx/mode/
         year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
 
 Lineage on every event
@@ -103,7 +103,8 @@ from prometheus_client import (
 CONFIG: dict = {
     # Kafka
     "kafka_broker":               os.getenv("KAFKA_BROKER", "kafka:9092"),
-    "topic_name":                 "fx_ohlc_1m",
+    "topic_name_live":            "fx_ohlc_1m",
+    "topic_name_backfill":        "fx_ohlc_1m_backfill",
     "kafka_retries":              10,          # broker-level retries
     "kafka_linger_ms":            10,
     "kafka_acks":                 "all",
@@ -124,6 +125,9 @@ CONFIG: dict = {
     "fetch_period":               "1d",
     "fetch_interval":             "1m",
 
+    # Run mode
+    "run_mode":                   os.getenv("FX_MODE", "live").lower(),
+
     # Backfill mode
     "backfill_mode":              os.getenv("FX_BACKFILL_MODE", "false").lower() == "true",
     "backfill_start_date":        os.getenv("FX_BACKFILL_START_DATE", ""),
@@ -143,7 +147,8 @@ CONFIG: dict = {
     "read_bucket":                "yeeshu-fx-bucket",
     "write_bucket":               "risk-platform-pushparag-analytics",
     "raw_event_prefix":           "kafka_raw/fx/",
-    "dlq_prefix":                 "kafka_dlq/fx/",
+    "dlq_prefix_live":            "kafka_dlq/fx/producer/live/",
+    "dlq_prefix_backfill":        "kafka_dlq/fx/producer/backfill/",
 
     # Lineage
     "pipeline_name":              "fx_kafka_producer",
@@ -163,6 +168,9 @@ CONFIG: dict = {
     "pushgateway_url":            os.getenv("PUSHGATEWAY_URL"),
     "metrics_port":               int(os.getenv("METRICS_PORT", "8000")),
 }
+
+# Set topic name dynamically
+CONFIG["topic_name"] = CONFIG["topic_name_backfill"] if CONFIG["backfill_mode"] else CONFIG["topic_name_live"]
 
 # =============================================================
 # PROMETHEUS  — run-level counters, no pair-level labels
@@ -202,6 +210,24 @@ PROM_DURATION_SECONDS = Histogram(
     registry=_prom_registry,
 )
 
+PROM_MISSING_PAIRS = Gauge(
+    "producer_missing_pairs_count",
+    "Number of FX pairs missing from yfinance response in current batch",
+    registry=_prom_registry,
+)
+
+PROM_EMPTY_PAIRS = Gauge(
+    "producer_empty_pairs_count", 
+    "Number of FX pairs with empty data in current batch",
+    registry=_prom_registry,
+)
+
+PROM_INVALID_PAIRS = Gauge(
+    "producer_invalid_pairs_count",
+    "Number of FX pairs with invalid data in current batch", 
+    registry=_prom_registry,
+)
+
 
 def _push_metrics(producer_run_id: str) -> None:
     """
@@ -212,7 +238,7 @@ def _push_metrics(producer_run_id: str) -> None:
     try:
         push_to_gateway(
             CONFIG["pushgateway_url"],
-            job=f"{CONFIG['pipeline_name']}_{producer_run_id}",
+            job=f"{CONFIG['pipeline_name']}_{CONFIG['run_mode']}_{producer_run_id}",
             registry=_prom_registry,
         )
     except Exception as exc:
@@ -496,12 +522,13 @@ def flush_dlq_buffer(
     dlq_buffer:      list,
     batch_id:        str,
     producer_run_id: str,
+    mode:            str,
 ) -> None:
     """
     Write all failed events from the current batch to S3 DLQ in a single
     atomic write. Parquet format for queryability.
 
-    Path: s3://risk-platform-pushparag-analytics/kafka_dlq/fx/
+    Path: s3://risk-platform-pushparag-analytics/kafka_dlq/fx/mode/
               year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
     """
     if not dlq_buffer:
@@ -526,11 +553,19 @@ def flush_dlq_buffer(
         })
 
     df  = pd.DataFrame(rows)
-    key = (
-        f"{CONFIG['dlq_prefix']}"
-        f"year={now.year}/month={now.month:02d}/day={now.day:02d}/"
-        f"dlq_{batch_id}.parquet"
-    )
+
+    if mode == "live":
+        key = (
+            f"{CONFIG['dlq_prefix_live']}"
+            f"year={now.year}/month={now.month:02d}/day={now.day:02d}/"
+            f"dlq_{batch_id}.parquet"
+        )
+    else:
+        key = (
+            f"{CONFIG['dlq_prefix_backfill']}"
+            f"year={now.year}/month={now.month:02d}/day={now.day:02d}/"
+            f"dlq_{batch_id}.parquet"
+        )
 
     try:
         atomic_write_parquet_to_s3(df, CONFIG["write_bucket"], key)
@@ -1086,7 +1121,11 @@ def run_live(producer_run_id: str, producer: KafkaProducer) -> None:
             metrics["missing_pairs"]  = len(fetch_metrics.get("missing_pairs", []))
             metrics["empty_pairs"]    = len(fetch_metrics.get("empty_pairs", []))
             metrics["invalid_pairs"]  = len(fetch_metrics.get("invalid_pairs", []))
-
+            
+            PROM_MISSING_PAIRS.set(metrics["missing_pairs"])
+            PROM_EMPTY_PAIRS.set(metrics["empty_pairs"])
+            PROM_INVALID_PAIRS.set(metrics["invalid_pairs"])
+            
             if not events:
                 log("INFO", "No valid FX events this cycle — sleeping",
                     {"batch_id": batch_id,
@@ -1094,7 +1133,7 @@ def run_live(producer_run_id: str, producer: KafkaProducer) -> None:
                      "empty":    metrics["empty_pairs"],
                      "invalid":  metrics["invalid_pairs"]})
                 PROM_DLQ_TOTAL.inc(len(dlq_buffer))
-                flush_dlq_buffer(dlq_buffer, batch_id, producer_run_id)
+                flush_dlq_buffer(dlq_buffer, batch_id, producer_run_id, mode="live")
                 time.sleep(CONFIG["fetch_interval_s"])
                 continue
 
@@ -1133,7 +1172,7 @@ def run_live(producer_run_id: str, producer: KafkaProducer) -> None:
 
             # ── Step 4: Flush DLQ buffer ───────────────────────────────
             PROM_DLQ_TOTAL.inc(len(dlq_buffer))
-            flush_dlq_buffer(dlq_buffer, batch_id, producer_run_id)
+            flush_dlq_buffer(dlq_buffer, batch_id, producer_run_id, mode="live")
 
             # ── Step 5: Flush Kafka producer ───────────────────────────
             try:
@@ -1260,6 +1299,10 @@ def run_backfill(producer_run_id: str, producer: KafkaProducer) -> None:
             metrics["empty_pairs"]    = len(fetch_metrics.get("empty_pairs", []))
             metrics["invalid_pairs"]  = len(fetch_metrics.get("invalid_pairs", []))
 
+            PROM_MISSING_PAIRS.set(metrics["missing_pairs"])
+            PROM_EMPTY_PAIRS.set(metrics["empty_pairs"])
+            PROM_INVALID_PAIRS.set(metrics["invalid_pairs"])
+
             if events:
                 # =============================================================
                 # STEP 1: Group events by their actual hour
@@ -1360,7 +1403,7 @@ def run_backfill(producer_run_id: str, producer: KafkaProducer) -> None:
 
             # Flush any failed events to DLQ
             PROM_DLQ_TOTAL.inc(len(dlq_buffer))
-            flush_dlq_buffer(dlq_buffer, batch_id, producer_run_id)
+            flush_dlq_buffer(dlq_buffer, batch_id, producer_run_id, mode="backfill")
 
             log_backfill_summary(batch_id, {
                 **metrics,

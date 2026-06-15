@@ -1,20 +1,25 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: equity-producer
+  name: fx-backfill-producer
   namespace: streaming
+
 spec:
-  replicas: {{ .Values.replicas.equityProducer }}
+  replicas: 0
+
   selector:
     matchLabels:
-      app: equity-producer
+      app: fx-backfill-producer
+
   template:
     metadata:
       labels:
-        app: equity-producer
+        app: fx-backfill-producer
+
     spec:
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
+
       serviceAccountName: streaming-sa
 
       initContainers:
@@ -30,14 +35,21 @@ spec:
               done
 
       containers:
-        - name: equity-producer
+        - name: fx-backfill-producer
+
           image: "{{ .Values.image.producer.repository }}:{{ .Values.image.producer.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+
           command: ["python"]
-          args: ["equity_producer.py"]
+          args: ["fx_producer.py"]
+
           envFrom:
             - secretRef:
                 name: streaming-infra-secret
+
           env:
-            - name: EQUITY_MODE
-              value: "live"
+            - name: FX_MODE
+              value: "backfill"
+
+            - name: FX_BACKFILL_MODE
+              value: "true"

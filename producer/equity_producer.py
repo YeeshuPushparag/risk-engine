@@ -16,7 +16,7 @@ Raw events (parquet, partitioned):
         year=Y/month=MM/day=DD/hour=HH/batch_<batch_id>.parquet
 
 DLQ (parquet, partitioned by day + hour):
-    s3://risk-platform-pushparag-analytics/kafka_dlq/equity/
+    s3://risk-platform-pushparag-analytics/kafka_dlq/equity/mode/
         year=Y/month=MM/day=DD/hour=HH/dlq_<batch_id>.parquet
 
 Lineage on every event
@@ -104,7 +104,8 @@ from prometheus_client import (
 CONFIG: dict = {
     # Kafka
     "kafka_broker":               os.getenv("KAFKA_BROKER", "kafka:9092"),
-    "topic_name":                 "equity_stream",
+    "topic_name_live":            "equity_stream",
+    "topic_name_backfill":        "equity_stream_backfill",
     "kafka_retries":              10,          # broker-level retries
     "kafka_linger_ms":            10,
     "kafka_acks":                 "all",
@@ -125,6 +126,9 @@ CONFIG: dict = {
     "fetch_period":               "1d",
     "fetch_interval":             "1m",
 
+    # Run mode
+    "run_mode":                   os.getenv("EQUITY_MODE", "live").lower(),
+
     # Backfill mode
     "backfill_mode":              os.getenv("EQUITY_BACKFILL_MODE", "false").lower() == "true",
     "backfill_date":              os.getenv("EQUITY_BACKFILL_DATE", ""),
@@ -138,7 +142,8 @@ CONFIG: dict = {
     "write_bucket":               "risk-platform-pushparag-analytics",
     "ticker_key":                 "historical-equity/tickers50.csv",
     "raw_event_prefix":           "kafka_raw/equity/",
-    "dlq_prefix":                 "kafka_dlq/equity/",
+    "dlq_prefix_live":            "kafka_dlq/equity/producer/live/",
+    "dlq_prefix_backfill":        "kafka_dlq/equity/producer/backfill",
 
     # Lineage
     "pipeline_name":              "equity_kafka_producer",
@@ -160,6 +165,11 @@ CONFIG: dict = {
     "pushgateway_url":            os.getenv("PUSHGATEWAY_URL"),
     "metrics_port":               int(os.getenv("METRICS_PORT", "8000")),
 }
+
+
+# Set topic name dynamically
+CONFIG["topic_name"] = CONFIG["topic_name_backfill"] if CONFIG["backfill_mode"] else CONFIG["topic_name_live"]
+
 
 # =============================================================
 # PROMETHEUS  — run-level counters, no ticker-level labels
@@ -199,6 +209,25 @@ PROM_DURATION_SECONDS = Histogram(
     registry=_prom_registry,
 )
 
+# ========== ADD THESE 3 GAUGES ==========
+PROM_MISSING_TICKERS = Gauge(
+    "producer_missing_tickers_count",
+    "Number of tickers missing from yfinance response in current batch",
+    registry=_prom_registry,
+)
+
+PROM_EMPTY_TICKERS = Gauge(
+    "producer_empty_tickers_count", 
+    "Number of tickers with empty data in current batch",
+    registry=_prom_registry,
+)
+
+PROM_INVALID_TICKERS = Gauge(
+    "producer_invalid_tickers_count",
+    "Number of tickers with invalid data in current batch", 
+    registry=_prom_registry,
+)
+
 
 def _push_metrics(producer_run_id: str) -> None:
     """
@@ -209,7 +238,7 @@ def _push_metrics(producer_run_id: str) -> None:
     try:
         push_to_gateway(
             CONFIG["pushgateway_url"],
-            job=f"{CONFIG['pipeline_name']}_{producer_run_id}",
+            job=f"{CONFIG['pipeline_name']}_{CONFIG['run_mode']}_{producer_run_id}",
             registry=_prom_registry,
         )
     except Exception as exc:
@@ -521,12 +550,13 @@ def flush_dlq_buffer(
     dlq_buffer:      list[dict],
     batch_id:        str,
     producer_run_id: str,
+    mode:            str,
 ) -> None:
     """
     Write all failed events from the current batch to S3 DLQ in a single
     atomic write. Structured as a parquet file for queryability.
 
-    Path: s3://risk-platform-pushparag-analytics/kafka_dlq/equity/
+    Path: s3://risk-platform-pushparag-analytics/kafka_dlq/equity/mode/
               year=Y/month=MM/day=DD/hour=HH/dlq_<batch_id>.parquet
 
     DLQ record structure per row:
@@ -560,12 +590,21 @@ def flush_dlq_buffer(
 
     df  = pd.DataFrame(rows)
     # DLQ now partitioned by hour (consistent with raw_event_prefix)
-    key = (
-        f"{CONFIG['dlq_prefix']}"
-        f"year={now.year}/month={now.month:02d}/day={now.day:02d}/"
-        f"hour={now.hour:02d}/"
-        f"dlq_{batch_id}.parquet"
-    )
+    
+    if mode == "live":
+        key = (
+            f"{CONFIG['dlq_prefix_live']}"
+            f"year={now.year}/month={now.month:02d}/day={now.day:02d}/"
+            f"hour={now.hour:02d}/"
+            f"dlq_{batch_id}.parquet"
+        )
+    else:
+        key = (
+            f"{CONFIG['dlq_prefix_backfill']}"
+            f"year={now.year}/month={now.month:02d}/day={now.day:02d}/"
+            f"hour={now.hour:02d}/"
+            f"dlq_{batch_id}.parquet"
+        )
 
     try:
         atomic_write_parquet_to_s3(df, CONFIG["write_bucket"], key)
@@ -947,13 +986,11 @@ def send_with_retry(
 
     Returns True on success, False on final failure.
     """
-    # Detect combined payload
-    is_combined_equity = "tickers" in event
-    is_combined_fx = "bars" in event
+
 
     for attempt in range(1, CONFIG["max_send_retries"] + 1):
         try:
-            if is_combined_equity or is_combined_fx:
+            if "tickers" in event:
                 # Combined payload - send without key
                 future = producer.send(
                     CONFIG["topic_name"],
@@ -1111,6 +1148,10 @@ def run_live(producer_run_id: str, tickers: list[str], producer: KafkaProducer) 
             metrics["empty_tickers"]   = len(fetch_metrics.get("empty_tickers", []))
             metrics["invalid_tickers"] = len(fetch_metrics.get("invalid_tickers", []))
 
+            PROM_MISSING_TICKERS.set(metrics["missing_tickers"])
+            PROM_EMPTY_TICKERS.set(metrics["empty_tickers"])
+            PROM_INVALID_TICKERS.set(metrics["invalid_tickers"])
+
             if not events:
                 log("INFO", "No valid events this cycle — sleeping",
                     {"batch_id": batch_id,
@@ -1118,7 +1159,7 @@ def run_live(producer_run_id: str, tickers: list[str], producer: KafkaProducer) 
                      "empty":   metrics["empty_tickers"],
                      "invalid": metrics["invalid_tickers"]})
                 PROM_DLQ_TOTAL.inc(len(dlq_buffer))
-                flush_dlq_buffer(dlq_buffer, batch_id, producer_run_id)
+                flush_dlq_buffer(dlq_buffer, batch_id, producer_run_id, mode="live")
                 continue
 
             # ── Step 2: Store raw events ───────────────────────────────
@@ -1157,7 +1198,7 @@ def run_live(producer_run_id: str, tickers: list[str], producer: KafkaProducer) 
 
             # ── Step 4: Flush DLQ buffer ───────────────────────────────
             PROM_DLQ_TOTAL.inc(len(dlq_buffer))
-            flush_dlq_buffer(dlq_buffer, batch_id, producer_run_id)
+            flush_dlq_buffer(dlq_buffer, batch_id, producer_run_id, mode="live")
 
             # ── Step 5: Flush Kafka producer ───────────────────────────
             try:
@@ -1276,6 +1317,10 @@ def run_backfill(producer_run_id: str, tickers: list[str], producer: KafkaProduc
         metrics["empty_tickers"] = len(fetch_metrics.get("empty_tickers", []))
         metrics["invalid_tickers"] = len(fetch_metrics.get("invalid_tickers", []))
 
+        PROM_MISSING_TICKERS.set(metrics["missing_tickers"])
+        PROM_EMPTY_TICKERS.set(metrics["empty_tickers"])
+        PROM_INVALID_TICKERS.set(metrics["invalid_tickers"])
+
         if events:
             events_by_hour = {}
 
@@ -1366,6 +1411,7 @@ def run_backfill(producer_run_id: str, tickers: list[str], producer: KafkaProduc
             dlq_buffer,
             batch_id,
             producer_run_id,
+            mode="backfill"
         )
 
         log_backfill_summary(

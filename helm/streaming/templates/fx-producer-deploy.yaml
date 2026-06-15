@@ -38,3 +38,6 @@ spec:
           envFrom:
             - secretRef:
                 name: streaming-infra-secret
+          env:
+            - name: FX_MODE
+              value: "live"

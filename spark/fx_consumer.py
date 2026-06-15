@@ -2,59 +2,81 @@
 fx_consumer.py
 =====================
 Production-grade Spark Structured Streaming consumer for real-time FX ticks.
-Architecture mirrors equity_kafka_consumer.py exactly, adapted for FX.
 
 Storage rules
 -------------
-READ-ONLY  : s3://yeeshu-fx-bucket       (FX universe / positions)
-ALL WRITES : s3://risk-platform-pushparag-analytics  (parquet output, DLQ)
+READ-ONLY  : s3://yeeshu-fx-bucket                      (FX universe / positions)
+ALL WRITES : s3://risk-platform-pushparag-analytics      (parquet output, DLQ)
 
 Storage layout (writes)
 -----------------------
-Processed output — LIVE (parquet, partitioned):
-    s3://risk-platform-pushparag-analytics/fx/data/
+Processed output — LIVE (parquet, partitioned by date + hour):
+    s3://risk-platform-pushparag-analytics/fx/data/live/
         date=YYYY-MM-DD/hour=HH/batch_<batch_id>.parquet
 
-Processed output — REPLAY (parquet, partitioned):
-    s3://risk-platform-pushparag-analytics/fx/replay/
+Processed output — BACKFILL (parquet, partitioned by date + hour):
+    s3://risk-platform-pushparag-analytics/fx/data/backfill/
         date=YYYY-MM-DD/hour=HH/batch_<batch_id>.parquet
 
-    REPLAY output is ALWAYS isolated from LIVE output.
-    REPLAY_MODE=s3 NEVER writes to fx/data/.
+Processed output — REPLAY (parquet, partitioned by date + hour):
+    s3://risk-platform-pushparag-analytics/fx/data/replay/
+        date=YYYY-MM-DD/hour=HH/batch_<batch_id>.parquet
 
-Consumer DLQ (S3, parquet, partitioned by day):
-    s3://risk-platform-pushparag-analytics/kafka_dlq/fx/consumer/
-        year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
+    Each mode writes to its own isolated prefix. Modes never share output paths.
+    run_mode=replay NEVER writes to fx/data/live/ or fx/data/backfill/.
 
-Consumer DLQ (Kafka topic, for stream-level routing) — LIVE MODE ONLY:
-    topic: fx_stream_dlq
-    Not used during replay (Kafka not needed in S3 replay mode).
+Consumer DLQ (S3, parquet, partitioned by day) — mode-isolated:
+    LIVE:
+        s3://risk-platform-pushparag-analytics/fx/dlq/live/
+            year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
+    BACKFILL:
+        s3://risk-platform-pushparag-analytics/fx/dlq/backfill/
+            year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
+    REPLAY:
+        s3://risk-platform-pushparag-analytics/fx/dlq/replay/
+            year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
 
-Raw Kafka storage (for replay):
-    s3://risk-platform-pushparag-analytics/kafka_raw/fx/
-        year=YYYY/month=MM/day=DD/hour=HH/batch_<batch_id>.parquet
+    DLQ is S3-only. There is NO Kafka DLQ topic.
+
+Raw Kafka storage (for state rebuild and replay source):
+    LIVE state rebuild:
+        s3://risk-platform-pushparag-analytics/kafka_raw/fx/live/
+            year=YYYY/month=MM/day=DD/hour=HH/batch_<batch_id>.parquet
+    REPLAY source (replay_mode=s3 — historical backfill raw):
+        s3://risk-platform-pushparag-analytics/kafka_raw/fx/backfill/
+            year=YYYY/month=MM/day=DD/hour=HH/batch_<batch_id>.parquet
+    REPLAY source (replay_mode=kafka — historical live raw):
+        s3://risk-platform-pushparag-analytics/kafka_raw/fx/live/
+            year=YYYY/month=MM/day=DD/hour=HH/batch_<batch_id>.parquet
+
+Kafka topics
+------------
+Live mode    : fx_ohlc_1m
+Backfill mode: fx_ohlc_1m_backfill
+Topic routing is determined at startup from the run_mode environment variable.
 
 Replay modes
 ------------
-REPLAY_MODE = "kafka"  -> normal Spark Structured Streaming from Kafka
-REPLAY_MODE = "s3"     -> reads raw parquet from kafka_raw/fx/ directly,
-                         processes through the same pipeline, writes to fx/replay/.
-                         Replay NEVER touches Redis or overwrites fx/data/.
+run_mode=replay, replay_mode=kafka -> reads raw parquet from kafka_raw/fx/live/ directly,
+                         processes through the same pipeline, writes to fx/data/replay/.
+run_mode=replay, replay_mode=s3   -> reads raw parquet from kafka_raw/fx/backfill/ directly,
+                         processes through the same pipeline, writes to fx/data/replay/.
+                         Replay NEVER touches Redis or overwrites live/backfill output.
 
 FX Replay uses a date range (no hour concept):
-    FX_REPLAY_START_DATE=YYYY-MM-DD
-    FX_REPLAY_END_DATE=YYYY-MM-DD
+    REPLAY_START_DATE=YYYY-MM-DD
+    REPLAY_END_DATE=YYYY-MM-DD
 
 Redis policy
 ------------
 Redis represents LIVE state only.
-    Live mode  : Redis snapshot published after every batch.
-    Backfill   : Redis is NEVER written or published to.
-    Replay mode: Redis is NEVER written or published to.
+    Live mode    : Redis snapshot published after every batch.
+    Backfill mode: Redis is NEVER written or published to.
+    Replay mode  : Redis is NEVER written or published to.
 
 State rebuild policy
 --------------------
-State rebuild runs ONLY in live mode (run_mode=live, replay_mode!=s3).
+State rebuild runs ONLY in live mode (run_mode=live).
 State rebuild is NEVER run during replay or backfill.
 State rebuild is NEVER run at or near FX weekly session open — buffers
   start empty for every new weekly session.
@@ -63,10 +85,12 @@ State rebuild NEVER loads Friday session data on Sunday (previous week).
 
 Late Event Handling
 -------------------
-Events older than 5 minutes from current time are skipped in live mode.
-Late filtering is DISABLED during replay (historical events are always older
-than 5 minutes by wall clock — filtering would drop every event).
-Prevents stale data from corrupting rolling metrics in live mode.
+LIVE mode    : Events older than 5 minutes from current time are skipped.
+               Late events are routed to the live DLQ (S3).
+BACKFILL mode: Late-event filtering is DISABLED. No late events are written to DLQ.
+REPLAY mode  : Late-event filtering is DISABLED. Historical events are always
+               older than 5 minutes by wall clock — filtering would drop every event.
+               No late events are written to DLQ.
 
 Lineage on every output row
 ----------------------------
@@ -93,16 +117,23 @@ Prometheus metrics
     Prometheus scrapes every 60 s.
     Run-level counters only — no pair / batch_id labels.
 
-    consumer_batches_total           — total micro-batches processed
-    consumer_failures_total          — batches that raised an unhandled exception
-    consumer_dlq_total               — total events routed to DLQ
+    consumer_batches_total             — total micro-batches processed
+    consumer_failures_total            — batches that raised an unhandled exception
+    consumer_dlq_total                 — total events routed to DLQ (S3)
     consumer_processed_s3_writes_total — successful S3 output writes
-    consumer_redis_writes_total      — successful Redis snapshot publishes (live only)
-    consumer_records_processed_total — total records processed
-    consumer_last_success_timestamp  — Unix timestamp of last fully successful batch
-    consumer_duration_seconds        — histogram of per-batch wall-clock duration
+    consumer_redis_writes_total        — successful Redis snapshot publishes (live only)
+    consumer_records_processed_total   — total records processed
+    consumer_last_success_timestamp    — Unix timestamp of last fully successful batch
+    consumer_duration_seconds          — histogram of per-batch wall-clock duration
 
-    Replay metrics (incremented when REPLAY_MODE=s3):
+    Metrics push behavior by mode:
+    LIVE     : /metrics server is started; metrics pushed after each successful batch
+               and at market shutdown.
+    BACKFILL : /metrics server is NOT started; metrics pushed after each batch
+              
+    REPLAY   : /metrics server is NOT started; metrics pushed at end of replay job.
+
+    Replay metrics (incremented when run_mode=replay):
     replay_jobs_total                — total replay jobs started
     replay_records_processed_total   — total records processed across all replay batches
     replay_failures_total            — replay partitions that failed
@@ -127,7 +158,6 @@ from pyspark.sql.types import (
     StructType, StructField, StringType, FloatType, ArrayType
 )
 import redis
-from kafka import KafkaProducer
 from prometheus_client import (
     Counter, Gauge, Histogram, CollectorRegistry,
     push_to_gateway, start_http_server,
@@ -140,44 +170,55 @@ from prometheus_client import (
 CONFIG: dict = {
     # Kafka
     "kafka_broker":          os.getenv("KAFKA_BROKER", "kafka:9092"),
-    "topic":                 "fx_ohlc_1m",
-    "dlq_topic":             "fx_stream_dlq",
+    "topic_live":            "fx_ohlc_1m",
+    "topic_backfill":        "fx_ohlc_1m_backfill",
 
     # Run mode
-    "run_mode": os.getenv("FX_MODE", "live").lower(),
+    "run_mode":              os.getenv("RUN_MODE", "live").lower(),
 
     # Replay
-    "replay_mode":           os.getenv("FX_REPLAY_MODE", "kafka"),   # "kafka" | "s3"
-    "replay_start_date":     os.getenv("FX_REPLAY_START_DATE", ""),   # "YYYY-MM-DD"
-    "replay_end_date":       os.getenv("FX_REPLAY_END_DATE", ""),     # "YYYY-MM-DD"
+    "replay_mode":           os.getenv("REPLAY_MODE", "kafka"),   # "kafka" | "s3"
+    "replay_start_date":     os.getenv("REPLAY_START_DATE", ""),   # "YYYY-MM-DD"
+    "replay_end_date":       os.getenv("REPLAY_END_DATE", ""),     # "YYYY-MM-DD"
 
     # S3
     "read_bucket":           "yeeshu-fx-bucket",
     "write_bucket":          "risk-platform-pushparag-analytics",
     "universe_key":          "historical-fx/final_merged.parquet",
-    # Live output — never touched by replay
-    "output_prefix":         "fx/data",
 
-    # Raw Kafka storage (for state rebuild - live recovery only)
+    # Mode-isolated output prefixes — NEVER mix modes
+    "output_prefix_live":      "fx/data/live",
+    "output_prefix_backfill":  "fx/data/backfill",
+    "output_prefix_replay":    "fx/data/replay",
+
+    # Mode-isolated DLQ prefixes — S3-only, no Kafka DLQ
+    "dlq_prefix_live":         "fx/dlq/live",
+    "dlq_prefix_backfill":     "fx/dlq/backfill",
+    "dlq_prefix_replay":       "fx/dlq/replay",
+
+    # Raw Kafka storage (for state rebuild — live recovery only)
     "raw_state_rebuild_prefix": "kafka_raw/fx/live/",
 
-    # Replay output — never touches live output
-    "replay_output_prefix":  "fx/replay",
-    "consumer_dlq_prefix":   "kafka_dlq/fx/consumer",
-    "raw_replay_prefix":     "kafka_raw/fx/backfill",
-    "checkpoint_dir":        (
+    # Raw Kafka storage (replay sources — selected by replay_mode)
+    # replay_mode=s3    -> read historical backfill raw files
+    # replay_mode=kafka -> read historical live raw files
+    "raw_replay_prefix_backfill": "kafka_raw/fx/backfill",
+    "raw_replay_prefix_live":     "kafka_raw/fx/live",
+
+    # Spark checkpoint (live and backfill)
+    "checkpoint_dir": (
         os.getenv("CHECKPOINT_DIR", "s3a://risk-platform-pushparag-analytics")
-        + "/fx/checkpoints"
+         + f"/fx/checkpoints/{os.getenv('RUN_MODE', 'live').lower()}"
     ),
 
-    # Late event handling
+    # Late event handling — enforced in LIVE mode only
     "late_event_max_minutes":   5,
 
     # Buffer safety (single definition)
-    "max_buffer_per_pair":      60,    # FX 24/5 — larger buffer than equity
+    "max_buffer_per_pair":      60,    # FX 24/5 
     "max_total_pairs":          50,    # FX universe is small — conservative cap
 
-    # Redis (snapshots only — dedup removed; only used in live mode)
+    # Redis (snapshots only; only used in live mode)
     "redis_host":            os.getenv("REDIS_HOST", "localhost"),
     "redis_port":            int(os.getenv("REDIS_PORT", 6379)),
     "redis_db_stream":       int(os.getenv("REDIS_DB_STREAM", 1)),
@@ -214,17 +255,11 @@ CONFIG: dict = {
     "spark_app_name":        "FXKafkaStreaming_Production",
     "spark_shuffle_partitions": "4",
 
-    # Market Hours — FX shuts down at 17:03 (Friday)
+    # Market Hours — FX shuts down at 17:03 ET on Fridays
     "market_shutdown_hour":   17,
     "market_shutdown_minute": 3,
 
-    # FX Weekly session open: Sunday 17:00 ET.
-    # The FX market opens Sunday ~17:00 ET and closes Friday ~17:00 ET.
-    # session_open_weekday: 6 = Sunday (datetime.weekday() -> Mon=0 … Sun=6)
-    # session_open_hour_et: 17. Adjust via FX_SESSION_OPEN_ET_HOUR if needed.
-    "session_open_weekday":  6,   # Sunday
-    "session_open_hour_et":  int(os.getenv("FX_SESSION_OPEN_ET_HOUR", "17")),
-    "session_open_minute":   0,
+
 
     # State rebuild — live mode recovery only.
     # Number of minutes of raw S3 data to load when recovering mid-session.
@@ -241,12 +276,78 @@ CONFIG: dict = {
     "metrics_port":          int(os.getenv("METRICS_PORT", "8000")),
 }
 
+# Set topic dynamically based on run_mode.
+# Replay mode does not consume Kafka directly — it reads raw S3 parquet files.
+if CONFIG["run_mode"] == "backfill":
+    CONFIG["topic"] = CONFIG["topic_backfill"]
+elif CONFIG["run_mode"] == "live":
+    CONFIG["topic"] = CONFIG["topic_live"]
+else:
+    # replay — no Kafka topic consumed
+    CONFIG["topic"] = None
+
 # =============================================================
-# REPLAY / BACKFILL MODE DETECTION  —  consulted throughout the module
+# MODE DETECTION  —  single source of truth consulted throughout
 # =============================================================
 
-IS_REPLAY   = CONFIG["replay_mode"] == "s3"
-IS_BACKFILL = CONFIG["run_mode"] == "backfill"
+def is_live_mode() -> bool:
+    """Return True when the consumer is processing the live Kafka stream."""
+    return CONFIG["run_mode"] == "live"
+
+
+def is_backfill_mode() -> bool:
+    """Return True when the consumer is processing the backfill Kafka topic."""
+    return CONFIG["run_mode"] == "backfill"
+
+
+def is_replay_mode() -> bool:
+    """Return True when the consumer is replaying from raw S3 parquet files."""
+    return CONFIG["run_mode"] == "replay"
+
+
+# Module-level booleans derived from the mode helpers — used as guards
+# throughout the module to avoid repeated function calls.
+IS_LIVE     = is_live_mode()
+IS_BACKFILL = is_backfill_mode()
+IS_REPLAY   = is_replay_mode()
+
+# =============================================================
+# MODE-AWARE ROUTING HELPERS  —  resolve S3 prefixes by mode
+# =============================================================
+
+def _output_prefix_for_mode() -> str:
+    """
+    Return the correct S3 output prefix for the current run mode.
+
+    LIVE     -> fx/data/live/
+    BACKFILL -> fx/data/backfill/
+    REPLAY   -> fx/data/replay/
+
+    Modes are fully isolated — no cross-writes are possible.
+    """
+    if IS_REPLAY:
+        return CONFIG["output_prefix_replay"]
+    if IS_BACKFILL:
+        return CONFIG["output_prefix_backfill"]
+    return CONFIG["output_prefix_live"]
+
+
+def _dlq_prefix_for_mode() -> str:
+    """
+    Return the correct S3 DLQ prefix for the current run mode.
+
+    LIVE     -> fx/dlq/live/
+    BACKFILL -> fx/dlq/backfill/
+    REPLAY   -> fx/dlq/replay/
+
+    DLQ records from different modes are never mixed.
+    """
+    if IS_REPLAY:
+        return CONFIG["dlq_prefix_replay"]
+    if IS_BACKFILL:
+        return CONFIG["dlq_prefix_backfill"]
+    return CONFIG["dlq_prefix_live"]
+
 
 # =============================================================
 # PROMETHEUS  — run-level counters, no pair/batch labels
@@ -254,7 +355,7 @@ IS_BACKFILL = CONFIG["run_mode"] == "backfill"
 
 _prom_registry = CollectorRegistry()
 
-# Consumer metrics (live + replay share these)
+# Consumer metrics (all modes share these)
 PROM_BATCHES_TOTAL = Counter(
     "consumer_batches_total",
     "Total micro-batches processed",
@@ -267,7 +368,7 @@ PROM_FAILURES_TOTAL = Counter(
 )
 PROM_DLQ_TOTAL = Counter(
     "consumer_dlq_total",
-    "Total events routed to DLQ",
+    "Total events routed to DLQ (S3)",
     registry=_prom_registry,
 )
 PROM_S3_WRITES_TOTAL = Counter(
@@ -296,6 +397,37 @@ PROM_DURATION_SECONDS = Histogram(
     buckets=[0.1, 0.5, 1, 2, 5, 10, 30, 60, 120],
     registry=_prom_registry,
 )
+
+PROM_LATE_EVENTS = Gauge(
+    "consumer_late_events_count",
+    "Number of late events filtered in current batch (LIVE mode only)",
+    registry=_prom_registry,
+)
+
+PROM_FAILED_EVENTS = Gauge(
+    "consumer_failed_events_count",
+    "Number of events that failed processing in current batch",
+    registry=_prom_registry,
+)
+
+PROM_DEDUPED_EVENTS = Gauge(
+    "consumer_deduped_events_count",
+    "Number of duplicate events removed in current batch",
+    registry=_prom_registry,
+)
+
+PROM_BUFFER_SIZE = Gauge(
+    "consumer_buffer_size_total",
+    "Total number of bars across all pair buffers",
+    registry=_prom_registry,
+)
+
+PROM_PAIRS_IN_BUFFER = Gauge(
+    "consumer_pairs_in_buffer_count",
+    "Number of currency pairs currently in buffer",
+    registry=_prom_registry,
+)
+
 
 # Replay-specific metrics
 PROM_REPLAY_JOBS_TOTAL = Counter(
@@ -329,11 +461,16 @@ def _push_metrics() -> None:
     Push accumulated Prometheus metrics to Pushgateway.
     Mirrors the Airflow pattern: push_to_gateway(url, job=<pipeline>_<run_id>, registry).
     Non-fatal — a Pushgateway failure must never stop the consumer.
+
+    Called:
+      LIVE     : after each successful batch and at market shutdown.
+      BACKFILL : after each batch.
+      REPLAY   : at the end of the replay job.
     """
     try:
         push_to_gateway(
             CONFIG["pushgateway_url"],
-            job=f"{CONFIG['consumer_pipeline_name']}_{_consumer_run_id}",
+            job=f"{CONFIG['consumer_pipeline_name']}_{CONFIG['run_mode']}_{_consumer_run_id}",
             registry=_prom_registry,
         )
     except Exception as exc:
@@ -346,6 +483,8 @@ def _start_metrics_server() -> None:
     Passes _prom_registry explicitly so all custom metrics are visible at /metrics.
     The same registry is used for push_to_gateway, ensuring consistency between
     scraped and pushed metric values.
+
+    Started in LIVE mode only. Backfill and replay do not start the HTTP server.
     """
     try:
         start_http_server(CONFIG["metrics_port"], registry=_prom_registry)
@@ -392,6 +531,9 @@ def log(level: str, message: str, context: dict = None) -> None:
     }
     print(json.dumps(record, default=str))
 
+
+
+
 # =============================================================
 # NUMERIC HELPERS
 # =============================================================
@@ -428,9 +570,8 @@ _redis_client = None
 def _get_redis():
     """
     Return the shared Redis client, creating it on first call.
-    Only called from publish_fx_snapshot_to_redis which is already
-    guarded by IS_REPLAY and IS_BACKFILL — so this is never reached during
-    replay or backfill.
+    Only called from publish_fx_snapshot_to_redis, which is already
+    guarded by IS_LIVE — so this is never reached during replay or backfill.
     """
     global _redis_client
     if _redis_client is None:
@@ -443,45 +584,65 @@ def _get_redis():
     return _redis_client
 
 # =============================================================
-# KAFKA DLQ PRODUCER  (live mode only)
-# =============================================================
-
-# _dlq_producer is initialised lazily so that replay mode never attempts
-# a Kafka connection (replay has no Kafka dependency).
-_dlq_producer = None
-
-
-def _get_dlq_producer():
-    """
-    Return the shared Kafka DLQ producer, creating it on first call.
-    Only called in live mode — replay routes DLQ to S3 only, not Kafka.
-    """
-    global _dlq_producer
-    if _dlq_producer is None:
-        _dlq_producer = KafkaProducer(
-            bootstrap_servers = CONFIG["kafka_broker"],
-            value_serializer  = lambda v: json.dumps(v, default=str).encode("utf-8"),
-        )
-    return _dlq_producer
-
-
-def send_to_kafka_dlq(payload: dict) -> None:
-    """
-    Send a single DLQ record to the Kafka DLQ topic (non-blocking).
-    LIVE MODE ONLY — never called during replay or backfill.
-    """
-    try:
-        _get_dlq_producer().send(CONFIG["dlq_topic"], payload)
-    except Exception as exc:
-        log("ERROR", "Kafka FX DLQ send failed",
-            {"error": str(exc)})
-
-# =============================================================
 # S3 HELPERS  —  atomic writes
 # =============================================================
 
 def get_s3():
     return boto3.client("s3")
+
+
+def get_latest_file_per_partition(bucket: str, prefix: str) -> List[str]:
+    """
+    For each partition folder (date=YYYY-MM-DD/), return only the most recent parquet file.
+    
+    This prevents processing duplicate data from multiple backfill runs.
+    """
+    s3 = get_s3()
+    paginator = s3.get_paginator("list_objects_v2")
+    
+    # Group files by their partition path (everything before the last '/')
+    partitions: Dict[str, List[dict]] = {}
+    
+    try:
+        pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
+        for page in pages:
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                if not key.endswith(".parquet"):
+                    continue
+                
+                # Extract partition path (date=YYYY-MM-DD/ folder)
+                # Example: "kafka_raw/fx/live/year=2024/month=01/day=15/batch_xxx.parquet"
+                parts = key.split("/")
+                # Everything except the filename (last part)
+                partition_path = "/".join(parts[:-1])
+                
+                if partition_path not in partitions:
+                    partitions[partition_path] = []
+                partitions[partition_path].append({
+                    "key": key,
+                    "last_modified": obj["LastModified"]
+                })
+    except Exception as exc:
+        log("ERROR", "Failed to list S3 files for latest file filter",
+            {"bucket": bucket, "prefix": prefix, "error": str(exc)})
+        return []
+    
+    # Keep only the most recent file per partition
+    latest_files = []
+    for partition_path, files in partitions.items():
+        files.sort(key=lambda x: x["last_modified"], reverse=True)
+        latest_files.append(files[0]["key"])
+        
+        if len(files) > 1:
+            log("INFO", "Multiple files found in partition - using latest only", {
+                "partition": partition_path,
+                "selected": files[0]["key"],
+                "skipped": len(files) - 1,
+                "latest_modified": files[0]["last_modified"].isoformat()
+            })
+    
+    return latest_files
 
 
 def atomic_write_parquet_to_s3(df: pd.DataFrame, bucket: str, key: str) -> None:
@@ -553,19 +714,21 @@ def flush_consumer_dlq_to_s3(
     """
     Batch-flush consumer DLQ records to S3 as parquet (atomic write).
     Called once per batch — not per failed event.
+    DLQ is S3-only across all modes — there is no Kafka DLQ topic.
 
-    Path: s3://risk-platform-pushparag-analytics/kafka_dlq/fx/consumer/
-              year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
-
-    Works in both live and replay mode — DLQ is always written to S3.
+    Output path is mode-isolated:
+        LIVE     : fx/dlq/live/year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
+        BACKFILL : fx/dlq/backfill/year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
+        REPLAY   : fx/dlq/replay/year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
     """
     if not dlq_buffer:
         return
 
     df  = pd.DataFrame(dlq_buffer)
     now = pendulum.now("America/New_York")
+    dlq_prefix = _dlq_prefix_for_mode()
     key = (
-        f"{CONFIG['consumer_dlq_prefix']}/"
+        f"{dlq_prefix}/"
         f"year={now.year}/month={now.month:02d}/day={now.day:02d}/"
         f"dlq_{batch_id}.parquet"
     )
@@ -587,7 +750,7 @@ def flush_consumer_dlq_to_s3(
 
 def load_fx_universe() -> tuple:
     """
-    Load the FX-exposed equity universe from S3.
+    Load the FX-exposed from S3.
     Returns (universe_df, pair_groups_dict).
 
     universe_df contains: ticker, sector, revenue, currency_pair,
@@ -808,9 +971,7 @@ def rebuild_state_from_s3() -> None:
     WHEN IT RUNS
     ------------
     ONLY when ALL of the following are true:
-      - run_mode == "live"
-      - replay_mode != "s3"   (not IS_REPLAY)
-      - IS_BACKFILL is False
+      - run_mode == "live"   (IS_LIVE is True, IS_REPLAY and IS_BACKFILL are both False)
       - FX market is currently open
       - Startup is NOT within the grace window after weekly session open
 
@@ -828,18 +989,17 @@ def rebuild_state_from_s3() -> None:
 
     WHAT IT LOADS
     -------------
-    Scans kafka_raw/fx/ for partitions that fall within:
+    Scans kafka_raw/fx/live/ for partitions that fall within:
         [now - state_rebuild_minutes, now]
 
     Only the current calendar day is scanned. The function determines
     which hour partitions overlap with the rebuild window and requests
     only those — it never scans full date ranges or previous days.
 
-
     PREVIOUS SESSION ISOLATION
     --------------------------
     The prefix always includes the current day's date:
-        kafka_raw/fx/backfill/year=Y/month=MM/day=DD/
+        kafka_raw/fx/live/year=Y/month=MM/day=DD/
     This guarantees:
       - Friday data is NEVER loaded on Sunday (new weekly session)
       - Previous day data is NEVER loaded on the current day
@@ -887,9 +1047,7 @@ def rebuild_state_from_s3() -> None:
 
     rebuild_minutes = CONFIG["state_rebuild_minutes"]
 
-    rebuild_start_et = now_et - timedelta(
-        minutes=rebuild_minutes
-    )
+    rebuild_start_et = now_et - timedelta(minutes=rebuild_minutes)
 
     log("INFO", "Starting FX state rebuild",
         {"rebuild_start_et": rebuild_start_et.isoformat(),
@@ -921,12 +1079,9 @@ def rebuild_state_from_s3() -> None:
     for hour in sorted(hours_to_scan):
         hour_prefix = f"{today_prefix}hour={hour:02d}/"
         try:
-            paginator = s3.get_paginator("list_objects_v2")
-            pages = paginator.paginate(Bucket=CONFIG["write_bucket"], Prefix=hour_prefix)
-            for page in pages:
-                for obj in page.get("Contents", []):
-                    if obj["Key"].endswith(".parquet"):
-                        all_keys.append(obj["Key"])
+            # Use get_latest_file_per_partition to get ONLY the latest file per hour
+            latest_files = get_latest_file_per_partition(CONFIG["write_bucket"], hour_prefix)
+            all_keys.extend(latest_files)
         except Exception as exc:
             log("WARNING", "FX state rebuild: failed to list S3 prefix",
                 {"prefix": hour_prefix, "error": str(exc)})
@@ -958,7 +1113,7 @@ def rebuild_state_from_s3() -> None:
 
     combined = pd.concat(frames, ignore_index=True)
 
-    # Filter to only events within the rebuild window 
+    # Filter to only events within the rebuild window
     if "timestamp" not in combined.columns:
         log("WARNING", "FX state rebuild: timestamp column missing — skipping rebuild")
         return
@@ -971,20 +1126,14 @@ def rebuild_state_from_s3() -> None:
 
     combined = combined.dropna(subset=["_evt_dt"])
 
-    rebuild_start_utc = pd.Timestamp(
-        rebuild_start_et
-    ).tz_convert("UTC")
-
-    now_utc = pd.Timestamp(
-        now_et
-    ).tz_convert("UTC")
+    rebuild_start_utc = pd.Timestamp(rebuild_start_et).tz_convert("UTC")
+    now_utc           = pd.Timestamp(now_et).tz_convert("UTC")
 
     combined = combined[
         (combined["_evt_dt"] >= rebuild_start_utc)
         & (combined["_evt_dt"] <= now_utc)
     ]
 
- 
     if combined.empty:
         log("INFO", "FX state rebuild: no events in rebuild window after filtering",
             {"rebuild_start_et": rebuild_start_et.isoformat(),
@@ -1012,8 +1161,8 @@ def rebuild_state_from_s3() -> None:
         # Validate the bar before buffering (mirrors live pipeline validation)
         try:
             close = float(row["close"])
-            high = float(row["high"])
-            low = float(row["low"])
+            high  = float(row["high"])
+            low   = float(row["low"])
         except (TypeError, ValueError):
             continue
 
@@ -1024,20 +1173,20 @@ def rebuild_state_from_s3() -> None:
         # pipeline stores via update_pair_buffer
         clean_bar = {
             "currency_pair": pair,
-            "open": float(row["open"]),
-            "high": high,
-            "low": low,
-            "close": close,
-            "timestamp": row.get("timestamp", ""),
-            "ingested_at": row.get("ingested_at", ""),
+            "open":          float(row["open"]),
+            "high":          high,
+            "low":           low,
+            "close":         close,
+            "timestamp":     row.get("timestamp", ""),
+            "ingested_at":   row.get("ingested_at", ""),
         }
 
         update_pair_buffer(pair, clean_bar)
         records_loaded += 1
 
     log("INFO", "FX state rebuild complete",
-        {"records_loaded": records_loaded,
-         "pairs_in_buffer": len(pair_buffers),
+        {"records_loaded":        records_loaded,
+         "pairs_in_buffer":       len(pair_buffers),
          "rebuild_window_minutes": rebuild_minutes})
 
 # =============================================================
@@ -1085,11 +1234,10 @@ def compute_fx_metrics(buffer: list) -> dict:
             Standard deviation of log returns within the last
             15-minute window.
     """
-
     metrics = {
         "fx_return_1m": np.nan,
         "fx_return_5m": np.nan,
-        "fx_vol_15m": np.nan,
+        "fx_vol_15m":   np.nan,
     }
 
     if not buffer:
@@ -1104,18 +1252,16 @@ def compute_fx_metrics(buffer: list) -> dict:
     if pd.isna(latest_ts):
         return metrics
 
-    latest_ts = latest_ts.floor("min")
-
-    cutoff_1m = latest_ts - pd.Timedelta(minutes=1)
-    cutoff_5m = latest_ts - pd.Timedelta(minutes=5)
+    latest_ts  = latest_ts.floor("min")
+    cutoff_1m  = latest_ts - pd.Timedelta(minutes=1)
+    cutoff_5m  = latest_ts - pd.Timedelta(minutes=5)
     cutoff_15m = latest_ts - pd.Timedelta(minutes=15)
 
-    window_1m = []
-    window_5m = []
+    window_1m  = []
+    window_5m  = []
     window_15m = []
 
     for row in buffer:
-
         ts = pd.to_datetime(
             row.get("timestamp"),
             utc=True,
@@ -1139,49 +1285,33 @@ def compute_fx_metrics(buffer: list) -> dict:
     # ---------------------------------------------------------
     # 1-minute return
     # ---------------------------------------------------------
-
     if len(window_1m) >= 2:
-
         first_close = window_1m[0]["close"]
-        last_close = window_1m[-1]["close"]
+        last_close  = window_1m[-1]["close"]
 
         if pd.notna(first_close) and first_close != 0:
-            metrics["fx_return_1m"] = (
-                last_close - first_close
-            ) / first_close
+            metrics["fx_return_1m"] = (last_close - first_close) / first_close
 
     # ---------------------------------------------------------
     # 5-minute return
     # ---------------------------------------------------------
-
     if len(window_5m) >= 2:
-
         first_close = window_5m[0]["close"]
-        last_close = window_5m[-1]["close"]
+        last_close  = window_5m[-1]["close"]
 
         if pd.notna(first_close) and first_close != 0:
-            metrics["fx_return_5m"] = (
-                last_close - first_close
-            ) / first_close
+            metrics["fx_return_5m"] = (last_close - first_close) / first_close
 
     # ---------------------------------------------------------
     # 15-minute volatility
     # ---------------------------------------------------------
-
     if len(window_15m) >= 2:
-
-        closes_15m = np.array(
-            [row["close"] for row in window_15m],
-            dtype=float,
-        )
-
-        returns = np.diff(closes_15m) / closes_15m[:-1]
+        closes_15m  = np.array([row["close"] for row in window_15m], dtype=float)
+        returns     = np.diff(closes_15m) / closes_15m[:-1]
         log_returns = np.log1p(returns)
 
         if len(log_returns) > 0:
-            metrics["fx_vol_15m"] = float(
-                np.std(log_returns)
-            )
+            metrics["fx_vol_15m"] = float(np.std(log_returns))
 
     return metrics
 
@@ -1216,35 +1346,35 @@ def compute_exposure_rows(
 
         rows.append({
             # FX bar
-            "currency_pair":     pair,
-            "open":              bar.get("open"),
-            "high":              bar.get("high"),
-            "low":               bar.get("low"),
-            "close":             bar.get("close"),
-            "timestamp":         bar.get("timestamp"),
-            "ingested_at":       bar.get("ingested_at"),
+            "currency_pair":         pair,
+            "open":                  bar.get("open"),
+            "high":                  bar.get("high"),
+            "low":                   bar.get("low"),
+            "close":                 bar.get("close"),
+            "timestamp":             bar.get("timestamp"),
+            "ingested_at":           bar.get("ingested_at"),
 
             # Ticker exposure
-            "ticker":            ticker_row["ticker"],
-            "sector":            ticker_row.get("sector", ""),
-            "revenue":           nz(ticker_row.get("revenue")),
+            "ticker":                ticker_row["ticker"],
+            "sector":                ticker_row.get("sector", ""),
+            "revenue":               nz(ticker_row.get("revenue")),
             "foreign_revenue_ratio": nz(ticker_row.get("foreign_revenue_ratio")),
-            "position_size":     position_size,
+            "position_size":         position_size,
 
-            # Previous FX bar values (ADD THESE)
-            "prev_open":         bar.get("prev_open", np.nan),
-            "prev_high":         bar.get("prev_high", np.nan),
-            "prev_low":          bar.get("prev_low", np.nan),
-            "prev_close":        bar.get("prev_close", np.nan),
+            # Previous FX bar values
+            "prev_open":             bar.get("prev_open",  np.nan),
+            "prev_high":             bar.get("prev_high",  np.nan),
+            "prev_low":              bar.get("prev_low",   np.nan),
+            "prev_close":            bar.get("prev_close", np.nan),
 
             # FX metrics
-            "fx_return_1m":      nz(fx_metrics["fx_return_1m"]),
-            "fx_return_5m":      nz(fx_metrics["fx_return_5m"]),
-            "fx_vol_15m":        fx_vol_15m,
+            "fx_return_1m":          nz(fx_metrics["fx_return_1m"]),
+            "fx_return_5m":          nz(fx_metrics["fx_return_5m"]),
+            "fx_vol_15m":            fx_vol_15m,
 
             # Risk metrics
-            "fx_pnl":            nz(position_size * fx_return_1m),
-            "VaR_95_15m":        nz(position_size * fx_vol_15m * z95),
+            "fx_pnl":                nz(position_size * fx_return_1m),
+            "VaR_95_15m":            nz(position_size * fx_vol_15m * z95),
         })
 
     return rows
@@ -1253,41 +1383,72 @@ def compute_exposure_rows(
 # SAVE OUTPUT  (atomic S3 write, partitioned by date + hour)
 # =============================================================
 
-def save_to_parquet(df: pd.DataFrame, batch_id: str, is_replay: bool = False) -> None:
+def save_to_parquet(df: pd.DataFrame, batch_id: str) -> None:
     """
     Write processed FX batch to S3 as parquet using atomic write.
-    Partitioned by date and hour — never overwrites existing batches.
+    Partitioned by date and hour based on each row's timestamp.
 
-    LIVE mode  : writes to fx/data/date=.../hour=.../batch_<id>.parquet
-    REPLAY mode: writes to fx/replay/date=.../hour=.../batch_<id>.parquet
+    CRITICAL: Uses each row's individual timestamp for partitioning.
+    This handles batches that span multiple hours (backfill/replay mode)
+    correctly, instead of putting all rows into the first row's hour.
 
-    The is_replay flag ensures replay output is ALWAYS isolated from live output.
-    Replay can never overwrite fx/data/ regardless of configuration.
+    Output path is determined by the current run mode via _output_prefix_for_mode():
+        LIVE     : fx/data/live/date=.../hour=.../batch_<timestamp>.parquet
+        BACKFILL : fx/data/backfill/date=.../hour=.../batch_<timestamp>.parquet
+        REPLAY   : fx/data/replay/date=.../hour=.../batch_<timestamp>.parquet
+
+    Backfill/Replay batch example:
+        Input batch contains events from hour 09, 10, and 11 on same date.
+        This function writes 3 separate parquet files:
+            date=2024-01-15/hour=09/batch_20250115_143022_123.parquet
+            date=2024-01-15/hour=10/batch_20250115_143023_456.parquet
+            date=2024-01-15/hour=11/batch_20250115_143024_789.parquet
+
+    Each run generates unique filenames using current timestamp (millisecond precision).
+    This prevents file conflicts when running replay/backfill multiple times for the
+    same date/hour partition.
+
+    Modes are fully isolated — no cross-writes are possible.
     """
     if df.empty:
         return
 
-    # Select the correct output prefix based on mode — never mix them
-    output_prefix = CONFIG["replay_output_prefix"] if is_replay else CONFIG["output_prefix"]
-
-    try:
-        ts             = pd.to_datetime(df["timestamp"].iloc[0])
-        partition_date = ts.strftime("%Y-%m-%d")
-        partition_hour = ts.strftime("%H")
-
+    output_prefix = _output_prefix_for_mode()
+    
+    # Create temporary partition columns from each row's timestamp
+    df['_partition_date'] = pd.to_datetime(df['timestamp']).dt.strftime('%Y-%m-%d')
+    df['_partition_hour'] = pd.to_datetime(df['timestamp']).dt.strftime('%H')
+    
+    # Group by date and hour, writing each group to its own partitioned file
+    for (date, hour), group in df.groupby(['_partition_date', '_partition_hour']):
+        # Generate unique filename using current timestamp (YYYYMMDD_HHMMSS_milliseconds)
+        # This ensures each run creates unique filenames, avoiding S3 overwrite conflicts
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]  # Remove last 3 digits of microseconds
         key = (
             f"{output_prefix}/"
-            f"date={partition_date}/hour={partition_hour}/"
-            f"batch_{batch_id}.parquet"
+            f"date={date}/hour={hour}/"
+            f"batch_{timestamp}.parquet"
         )
-        atomic_write_parquet_to_s3(df, CONFIG["write_bucket"], key)
-        PROM_S3_WRITES_TOTAL.inc()
-
-    except Exception as exc:
-        log("ERROR", "save_to_parquet failed",
-            {"batch_id": batch_id, "is_replay": is_replay, "error": str(exc)})
-        send_alert(f"S3 write FAILED | batch_id={batch_id} | error={str(exc)}")
-
+        
+        # Drop temporary columns before writing
+        group_to_write = group.drop(['_partition_date', '_partition_hour'], axis=1)
+        
+        try:
+            atomic_write_parquet_to_s3(group_to_write, CONFIG["write_bucket"], key)
+            PROM_S3_WRITES_TOTAL.inc()
+        except Exception as exc:
+            log("ERROR", "save_to_parquet failed for partition",
+                {"batch_id": batch_id, "date": date, "hour": hour, 
+                 "mode": CONFIG["run_mode"], "error": str(exc)})
+            send_alert(f"S3 write FAILED | batch_id={batch_id} | date={date} | hour={hour} | error={str(exc)}")
+            raise
+    
+    # Log summary of what was written
+    log("INFO", "save_to_parquet completed",
+        {"batch_id": batch_id, "mode": CONFIG["run_mode"], 
+         "partitions_written": len(df.groupby(['_partition_date', '_partition_hour'])),
+         "total_rows": len(df)})
+         
 # =============================================================
 # REDIS SNAPSHOT  (LIVE MODE ONLY)
 # =============================================================
@@ -1295,11 +1456,12 @@ def save_to_parquet(df: pd.DataFrame, batch_id: str, is_replay: bool = False) ->
 def publish_fx_snapshot_to_redis(snapshot_rows: list) -> None:
     """
     Publish the latest FX snapshot to Redis for real-time consumers.
-    Mirrors the equity pattern: SET + PUBLISH.
+    SET + PUBLISH.
 
     LIVE MODE ONLY — this function must never be called during replay or backfill.
-    The call site (process_batch) enforces this via the is_replay parameter
-    and the IS_BACKFILL flag.
+    The call site (process_batch) enforces this via IS_LIVE.
+    Redis represents live market state only; historical modes must never
+    overwrite the current live snapshot with stale data.
     """
     if not snapshot_rows:
         return
@@ -1330,95 +1492,125 @@ def add_lineage(
     kafka_offset:         int,
     kafka_partition:      int,
     producer_pipeline:    str,
-    is_replay:            bool,
 ) -> dict:
     """
     Stamp all required lineage fields onto an output row.
     Constant fields (pipeline_run_id, processing_timestamp) are set here.
     Per-row fields (kafka_offset, kafka_partition) are passed in from the source row.
+    run_mode reflects the actual execution mode (live / backfill / replay).
     """
-    row_dict["consumer_pipeline_name"]  = CONFIG["consumer_pipeline_name"]
-    row_dict["pipeline_run_id"]         = pipeline_run_id
-    row_dict["processing_timestamp"]    = processing_timestamp
-    row_dict["data_source"]             = CONFIG["data_source"]
-    row_dict["transformation"]          = CONFIG["transformation"]
-    row_dict["record_created_at"]       = processing_timestamp
-    row_dict["run_mode"]                = ("replay" if is_replay else CONFIG["run_mode"])
-    # Per-row Kafka provenance
-    row_dict["kafka_offset"]            = kafka_offset
-    row_dict["kafka_partition"]         = kafka_partition
-    row_dict["producer_pipeline_name"]  = producer_pipeline
-    return row_dict
+    # Determine the lineage run_mode label
+    if IS_REPLAY:
+        run_mode_label = "replay"
+    elif IS_BACKFILL:
+        run_mode_label = "backfill"
+    else:
+        run_mode_label = "live"
 
+    row_dict["consumer_pipeline_name"] = CONFIG["consumer_pipeline_name"]
+    row_dict["pipeline_run_id"]        = pipeline_run_id
+    row_dict["processing_timestamp"]   = processing_timestamp
+    row_dict["data_source"]            = CONFIG["data_source"]
+    row_dict["transformation"]         = CONFIG["transformation"]
+    row_dict["record_created_at"]      = processing_timestamp
+    row_dict["run_mode"]               = run_mode_label
+    # Per-row Kafka provenance
+    row_dict["kafka_offset"]           = kafka_offset
+    row_dict["kafka_partition"]        = kafka_partition
+    row_dict["producer_pipeline_name"] = producer_pipeline
+    return row_dict
 
 
 def add_prev_ohlcv_to_bar(row_dict: dict, buffer: list) -> dict:
     """
     Add previous OHLCV values to an FX bar dict from the pair buffer.
-    
+
     If buffer has at least 2 rows, prev values come from the second-to-last row.
-    If buffer has only 1 row (first bar for pair), prev values are set to None.
-    
+    If buffer has only 1 row (first bar for pair), prev values are set to NaN.
+
     Args:
         row_dict: The current bar dict (latest FX data)
-        buffer: The pair buffer list (all historical bars for this pair)
-    
+        buffer:   The pair buffer list (all historical bars for this pair)
+
     Returns:
         Updated row_dict with prev_open, prev_high, prev_low, prev_close fields
     """
     if len(buffer) >= 2:
         prev = buffer[-2]  # second-to-last bar
         row_dict.update({
-            "prev_open":   prev.get("open",   np.nan),
-            "prev_high":   prev.get("high",   np.nan),
-            "prev_low":    prev.get("low",    np.nan),
-            "prev_close":  prev.get("close",  np.nan),
+            "prev_open":  prev.get("open",  np.nan),
+            "prev_high":  prev.get("high",  np.nan),
+            "prev_low":   prev.get("low",   np.nan),
+            "prev_close": prev.get("close", np.nan),
         })
     else:
-        # First bar for this pair - no previous values available
+        # First bar for this pair — no previous values available
         row_dict.update({
-            "prev_open": np.nan,
-            "prev_high": np.nan,
-            "prev_low": np.nan,
+            "prev_open":  np.nan,
+            "prev_high":  np.nan,
+            "prev_low":   np.nan,
             "prev_close": np.nan,
         })
-    
+
     return row_dict
 
 
 # =============================================================
-# PROCESS BATCH  (core consumer logic — live and replay share this)
+# PROCESS BATCH  (core consumer logic — all modes share this)
 # =============================================================
 
 def process_batch(
     batch_df,
     batch_id:    int,
     pair_groups: dict,
-    is_replay:   bool = False,
 ) -> None:
     """
     Spark foreachBatch handler AND replay batch processor.
-    Called once per micro-batch (live) or per S3 partition (replay).
+    Called once per micro-batch (live/backfill) or per S3 partition (replay).
 
-    is_replay flag controls:
-      - Output path: fx/replay/ vs fx/data/
-      - Redis: SKIPPED entirely when is_replay=True
-      - Kafka DLQ publish: SKIPPED when is_replay=True (S3 DLQ only)
-      - Late event filtering: DISABLED when is_replay=True (historical events
-        are always older than late_event_max_minutes by wall clock — without
-        this guard every replayed event would be dropped)
+    Mode behavior is determined by the IS_LIVE / IS_BACKFILL / IS_REPLAY
+    module-level flags derived from CONFIG at startup.
+
+    Output path routing:
+        LIVE     -> fx/data/live/
+        BACKFILL -> fx/data/backfill/
+        REPLAY   -> fx/data/replay/
+
+    DLQ routing (S3-only, no Kafka DLQ):
+        LIVE     -> fx/dlq/live/
+        BACKFILL -> fx/dlq/backfill/
+        REPLAY   -> fx/dlq/replay/
+
+    Late event filtering:
+        LIVE     : Events older than late_event_max_minutes are filtered and
+                   routed to the live S3 DLQ.
+        BACKFILL : Late-event filtering is DISABLED. No late DLQ writes.
+        REPLAY   : Late-event filtering is DISABLED. Historical events are always
+                   older than late_event_max_minutes by wall clock — filtering
+                   would drop every event. No late DLQ writes.
+
+    Redis:
+        LIVE     : Snapshot published after every successful batch.
+        BACKFILL : Redis is NEVER touched.
+        REPLAY   : Redis is NEVER touched.
+
+    Prometheus metrics:
+        LIVE     : Pushed after each successful batch.
+        BACKFILL : Pushed after each batch 
+        REPLAY   : Pushed at end of replay job in load_s3_replay_partitions.
 
     Per-batch lifecycle:
       1. Convert Spark -> pandas
-      3. Filter late events [LIVE ONLY — disabled for replay]
+      2. Deduplicate by (currency_pair, timestamp)
+      3. Filter late events [LIVE ONLY]
       4. Per-bar: validation -> buffer update -> FX metrics -> fan-out -> lineage
-      5. Atomic S3 write (replay -> fx/replay/, live -> fx/data/)
-      6. Redis snapshot [LIVE ONLY — skipped when is_replay=True or IS_BACKFILL]
-      7. Flush consumer DLQ (S3 always; Kafka topic only in live mode)
-      8. Push Prometheus metrics
+      5. Atomic S3 write (mode-isolated output prefix)
+      6. Redis snapshot [LIVE ONLY]
+      7. Flush consumer DLQ to S3 (mode-isolated DLQ prefix)
+      8. Push Prometheus metrics [LIVE and BACKFILL — replay pushes at job end]
 
     Idempotency:
-      - Spark checkpoints handle offset tracking (live mode)
+      - Spark checkpoints handle offset tracking (live/backfill mode)
       - Duplicate replay runs are idempotent (parquet append is safe)
     """
     pipeline_run_id      = str(uuid.uuid4())
@@ -1435,7 +1627,7 @@ def process_batch(
     try:
         if batch_df.count() == 0:
             log("INFO", "Empty FX batch received",
-                {"batch_id": batch_id, "is_replay": is_replay})
+                {"batch_id": batch_id, "run_mode": CONFIG["run_mode"]})
             return
         pdf = batch_df.toPandas()
 
@@ -1446,7 +1638,7 @@ def process_batch(
         )
     except Exception as exc:
         log("ERROR", "Failed to convert FX batch to pandas",
-            {"batch_id": batch_id, "is_replay": is_replay, "error": str(exc)})
+            {"batch_id": batch_id, "run_mode": CONFIG["run_mode"], "error": str(exc)})
         send_alert(f"Batch conversion FAILED | batch_id={batch_id} | error={str(exc)}")
         PROM_FAILURES_TOTAL.inc()
         return
@@ -1454,7 +1646,6 @@ def process_batch(
     # ── Step 1: Deduplicate by timestamp (pure data logic) ─────────────
     original_count            = len(pdf)
     pdf                       = pdf.drop_duplicates(subset=["currency_pair", "timestamp"])
-
     deduped_count             = len(pdf)
     metrics["events_deduped"] = original_count - deduped_count
 
@@ -1466,71 +1657,71 @@ def process_batch(
         return
 
     # ── Step 2: Late event filtering ──────────────────────────────────
-    # LIVE MODE : filter events older than late_event_max_minutes to prevent
-    #             stale data from corrupting rolling metrics.
-    # REPLAY MODE: late filtering is DISABLED because historical events are
-    #              always older than late_event_max_minutes by wall clock.
-    #              Filtering during replay would drop ALL events.
-    if not is_replay and "timestamp" in pdf.columns:
+    # LIVE MODE ONLY: filter events older than late_event_max_minutes to
+    # prevent stale data from corrupting rolling metrics.
+    # BACKFILL and REPLAY: late filtering is DISABLED.
+    #   - Backfill processes historical data; filtering would cause incorrect
+    #     data loss from legitimate historical batches.
+    #   - Replay events are always older than late_event_max_minutes by wall
+    #     clock — filtering would drop every event.
+    # Late DLQ writes only occur in live mode.
+    if IS_LIVE and "timestamp" in pdf.columns:
         pdf["_evt_dt"] = (
-            pd.to_datetime(
-                pdf["timestamp"],
-                utc=True,
-                errors="coerce"
-            )
+            pd.to_datetime(pdf["timestamp"], utc=True, errors="coerce")
             .dt.tz_convert("America/New_York")
         )
-        late_events    = pdf[pdf["_evt_dt"] < late_cutoff]
-        pdf            = pdf[pdf["_evt_dt"] >= late_cutoff].copy()
+        late_events            = pdf[pdf["_evt_dt"] < late_cutoff]
+        pdf                    = pdf[pdf["_evt_dt"] >= late_cutoff].copy()
         metrics["events_late"] = len(late_events)
+    
+
 
         for _, late_row in late_events.iterrows():
             dlq_entry = {
-                "error":            (
+                "error":             (
                     f"Late FX event skipped — older than "
                     f"{CONFIG['late_event_max_minutes']} minutes"
                 ),
-                "currency_pair":    late_row.get("currency_pair", ""),
-                "timestamp":       late_row.get("timestamp", ""),
-                "current_time":     current_time.isoformat(),
-                "kafka_offset":     int(late_row.get("offset", -1)),
-                "kafka_partition":  int(late_row.get("partition", -1)),
+                "currency_pair":     late_row.get("currency_pair", ""),
+                "timestamp":         late_row.get("timestamp", ""),
+                "current_time":      current_time.isoformat(),
+                "kafka_offset":      int(late_row.get("offset", -1)),
+                "kafka_partition":   int(late_row.get("partition", -1)),
                 "consumer_pipeline": CONFIG["consumer_pipeline_name"],
-                "batch_id":         str(batch_id),
-                "pipeline_run_id":  pipeline_run_id,
+                "batch_id":          str(batch_id),
+                "pipeline_run_id":   pipeline_run_id,
             }
-            # Kafka DLQ only in live mode
-            send_to_kafka_dlq(dlq_entry)
             dlq_buffer.append(dlq_entry)
 
         pdf = pdf.drop(columns=["_evt_dt"])
 
+    # ========== GAUGES FOR ALL MODES (OUTSIDE THE IF BLOCK) ==========
+    PROM_LATE_EVENTS.set(metrics["events_late"])
+    PROM_DEDUPED_EVENTS.set(metrics["events_deduped"])
+    PROM_BUFFER_SIZE.set(sum(len(buf) for buf in pair_buffers.values()))
+    PROM_PAIRS_IN_BUFFER.set(len(pair_buffers))
+    
     if len(pdf) == 0:
         log("INFO", "All FX events filtered",
             {"batch_id":   batch_id,
              "late_count": metrics["events_late"],
-             "is_replay":  is_replay})
+             "run_mode":   CONFIG["run_mode"]})
         PROM_DLQ_TOTAL.inc(len(dlq_buffer))
         flush_consumer_dlq_to_s3(dlq_buffer, str(batch_id))
-        if not is_replay and _dlq_producer is not None:
-            _dlq_producer.flush()
         metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
         log_batch_metrics(str(batch_id), metrics)
         _push_metrics()
         return
 
     metrics["events_received"] = len(pdf)
-    log(
-        "INFO",
-        "FX batch processed successfully",
-        {"batch_id": str(batch_id)}
-    )
+    log("INFO", "FX batch processed successfully", {"batch_id": str(batch_id)})
+
     output_rows: list = []
 
     # ── Step 3: Process each FX bar ───────────────────────────────────
     for _, bar in pdf.iterrows():
         try:
-            pair     = bar["currency_pair"]
+            pair = bar["currency_pair"]
 
             # Data validation
             if bar["close"] <= 0 or bar["high"] < bar["low"]:
@@ -1538,7 +1729,6 @@ def process_batch(
                     f"Invalid FX data: close={bar['close']}, "
                     f"high={bar['high']}, low={bar['low']}"
                 )
-          
 
             if pair not in pair_groups:
                 log("DEBUG", "FX pair not in universe — skipping",
@@ -1554,7 +1744,7 @@ def process_batch(
                 "high":          float(bar["high"]),
                 "low":           float(bar["low"]),
                 "close":         float(bar["close"]),
-                "timestamp":    bar.get("timestamp", ""),
+                "timestamp":     bar.get("timestamp", ""),
                 "ingested_at":   bar.get("ingested_at", ""),
             }
 
@@ -1568,10 +1758,10 @@ def process_batch(
 
             # Fan-out to per-ticker exposure rows (uses clean bar)
             exposure_rows = compute_exposure_rows(
-                bar        = clean_bar,
-                pair       = pair,
-                fx_metrics = fx_metrics,
-                pair_groups= pair_groups,
+                bar         = clean_bar,
+                pair        = pair,
+                fx_metrics  = fx_metrics,
+                pair_groups = pair_groups,
             )
 
             if not exposure_rows:
@@ -1580,10 +1770,7 @@ def process_batch(
             # Stamp lineage on every output row
             kafka_offset      = int(bar.get("offset", -1))
             kafka_partition   = int(bar.get("partition", -1))
-            producer_pipeline = bar.get(
-                "producer_pipeline_name",
-                "fx_kafka_producer"
-            )
+            producer_pipeline = bar.get("producer_pipeline_name", "fx_kafka_producer")
 
             for out_row in exposure_rows:
                 out_row = add_lineage(
@@ -1594,7 +1781,6 @@ def process_batch(
                     kafka_offset         = kafka_offset,
                     kafka_partition      = kafka_partition,
                     producer_pipeline    = producer_pipeline,
-                    is_replay            = is_replay,
                 )
                 output_rows.append(out_row)
 
@@ -1602,32 +1788,32 @@ def process_batch(
             PROM_RECORDS_PROCESSED_TOTAL.inc()
 
         except Exception as exc:
-
             metrics["events_failed"] += 1
             dlq_entry = {
-                "error":            str(exc),
-                "currency_pair":    bar.get("currency_pair", ""),
-                "kafka_offset":     int(bar.get("offset", -1)),
-                "kafka_partition":  int(bar.get("partition", -1)),
-                "original_event":   bar.to_dict(),
-                "failed_at":        pendulum.now("America/New_York").to_iso8601_string(),
+                "error":             str(exc),
+                "currency_pair":     bar.get("currency_pair", ""),
+                "kafka_offset":      int(bar.get("offset", -1)),
+                "kafka_partition":   int(bar.get("partition", -1)),
+                "original_event":    bar.to_dict(),
+                "failed_at":         pendulum.now("America/New_York").to_iso8601_string(),
                 "consumer_pipeline": CONFIG["consumer_pipeline_name"],
-                "batch_id":         str(batch_id),
-                "pipeline_run_id":  pipeline_run_id,
-                "is_replay":        is_replay,
+                "batch_id":          str(batch_id),
+                "pipeline_run_id":   pipeline_run_id,
+                "run_mode":          CONFIG["run_mode"],
             }
-            # Kafka DLQ only in live mode — replay routes to S3 DLQ only
-            if not is_replay:
-                send_to_kafka_dlq(dlq_entry)
             dlq_buffer.append(dlq_entry)
+
+
+    # ========== SET FAILED EVENTS GAUGE ==========
+    # Count events that failed (those with "original_event" in dlq_buffer)
+    metrics["events_failed"] = len([e for e in dlq_buffer if "original_event" in e])
+    PROM_FAILED_EVENTS.set(metrics["events_failed"])
 
     metrics["output_rows"] = len(output_rows)
 
     if not output_rows:
         PROM_DLQ_TOTAL.inc(len(dlq_buffer))
         flush_consumer_dlq_to_s3(dlq_buffer, str(batch_id))
-        if not is_replay and _dlq_producer is not None:
-            _dlq_producer.flush()
         metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
         log_batch_metrics(str(batch_id), metrics)
         _push_metrics()
@@ -1637,36 +1823,38 @@ def process_batch(
     df_out = pd.DataFrame(output_rows)
     df_out = df_out.where(pd.notnull(df_out), None)
 
-    # ── Step 5: Atomic S3 write: replay -> fx/replay/, live -> fx/data/ ─
-    save_to_parquet(df_out, str(batch_id), is_replay=is_replay)
+    # ── Step 5: Atomic S3 write — mode-isolated output prefix ─────────
+    # LIVE     -> fx/data/live/
+    # BACKFILL -> fx/data/backfill/
+    # REPLAY   -> fx/data/replay/
+    save_to_parquet(df_out, str(batch_id))
 
-    # ── Step 6: Redis snapshot: LIVE ONLY ─────────────────────────────
-    # is_replay guard and IS_BACKFILL guard enforced here.
-    # Redis represents live state only; historical replay/backfill must not
-    # overwrite the current live snapshot with stale historical data.
-    if not is_replay and not IS_BACKFILL:
+    # ── Step 6: Redis snapshot — LIVE ONLY ────────────────────────────
+    # Redis represents live market state only.
+    # Backfill and replay must never overwrite the live snapshot with
+    # stale historical data.
+    if IS_LIVE:
         pairs = sorted(set(r["currency_pair"] for r in output_rows))
-        print(
-            f"[REDIS-OUT] batch={batch_id} "
-            f"pairs={pairs}"
-        )
-
+        print(f"[REDIS-OUT] batch={batch_id} pairs={pairs}")
         publish_fx_snapshot_to_redis(output_rows)
 
-    # ── Step 7: Flush DLQ ────────────────────────────────────────────
+    # ── Step 7: Flush DLQ to S3 (mode-isolated DLQ prefix) ────────────
     PROM_DLQ_TOTAL.inc(len(dlq_buffer))
     flush_consumer_dlq_to_s3(dlq_buffer, str(batch_id))
-    if not is_replay and _dlq_producer is not None:
-        _dlq_producer.flush()
 
     PROM_LAST_SUCCESS_TIMESTAMP.set(time.time())
     metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
     PROM_DURATION_SECONDS.observe(time.monotonic() - batch_start)
-    if not is_replay and not IS_BACKFILL:
+
+    # ── Step 8: Push Prometheus metrics ───────────────────────────────
+    # LIVE     : pushed after each successful batch.
+    # BACKFILL : pushed after each batch 
+    # REPLAY   : pushed at end of load_s3_replay_partitions().
+    if IS_LIVE or IS_BACKFILL:
         _push_metrics()
 
 # =============================================================
-# S3 REPLAY  (REPLAY_MODE = "s3")
+# S3 REPLAY  (run_mode = "replay")
 # =============================================================
 
 def load_s3_replay_partitions(
@@ -1677,38 +1865,52 @@ def load_s3_replay_partitions(
     """
     Read raw FX event parquet files from S3 for the inclusive date range and
     process them through the same pipeline as the Kafka stream.
-    Used when REPLAY_MODE = "s3".
+    Used when run_mode = "replay".
 
-    FX replay uses a date range (FX_REPLAY_START_DATE..FX_REPLAY_END_DATE).
+    FX replay uses a date range (REPLAY_START_DATE..REPLAY_END_DATE).
     There is NO hour concept in FX replay.
 
     Output isolation:
-      All output is written to fx/replay/ — NEVER to fx/data/.
-      process_batch is called with is_replay=True on every partition.
+      All output is written to fx/data/replay/ — NEVER to fx/data/live/ or
+      fx/data/backfill/. process_batch routes via _output_prefix_for_mode()
+      which returns fx/data/replay/ when IS_REPLAY is True.
+
+    DLQ isolation:
+      All DLQ records are written to fx/dlq/replay/ — never mixed with live
+      or backfill DLQ records.
 
     Redis:
-      NEVER touched during replay. process_batch enforces this via is_replay=True.
+      NEVER touched during replay. IS_LIVE is False so publish_fx_snapshot_to_redis
+      is never called.
+
+    Late event filtering:
+      DISABLED for replay. Historical events are always older than
+      late_event_max_minutes by wall clock — filtering would drop all events.
+      No late events are written to DLQ.
 
     State rebuild:
       NEVER called during replay. Replay starts with empty pair_buffers.
       State warms naturally from the replay records themselves, in order.
 
-    Path pattern:
-        s3://risk-platform-pushparag-analytics/kafka_raw/fx/
-            year=Y/month=MM/day=DD/hour=HH/batch_*.parquet
+    Source path pattern — selected by replay_mode:
+        replay_mode=s3    (historical backfill raw):
+            s3://risk-platform-pushparag-analytics/kafka_raw/fx/backfill/
+                year=Y/month=MM/day=DD/batch_*.parquet
+        replay_mode=kafka (historical live raw):
+            s3://risk-platform-pushparag-analytics/kafka_raw/fx/live/
+                year=Y/month=MM/day=DD/batch_*.parquet
 
     Each parquet file is treated as one "batch" for consistency.
-    Late event filtering is DISABLED for replay (historical events are always
-    older than late_event_max_minutes by wall clock).
 
     Prometheus replay metrics:
         replay_jobs_total              — once per replay job invocation
         replay_records_processed_total — per-record across all partitions
         replay_failures_total          — per failed partition
         replay_duration_seconds        — total replay wall-clock time
+    Metrics are pushed at the end of the replay job.
     """
     if not start_date_str or not end_date_str:
-        log("ERROR", "FX_REPLAY_START_DATE and FX_REPLAY_END_DATE must both be set.")
+        log("ERROR", "REPLAY_START_DATE and REPLAY_END_DATE must both be set.")
         return
 
     replay_start = time.monotonic()
@@ -1723,29 +1925,42 @@ def load_s3_replay_partitions(
         PROM_REPLAY_FAILURES_TOTAL.inc()
         return
 
+    # Select the raw S3 source prefix based on replay_mode:
+    #   replay_mode=s3    -> read historical backfill raw files
+    #   replay_mode=kafka -> read historical live raw files
+    replay_mode_lower = CONFIG["replay_mode"].lower()
+    if replay_mode_lower == "s3":
+        raw_replay_prefix = CONFIG["raw_replay_prefix_backfill"]
+    else:
+        # replay_mode=kafka — read from historical live raw files
+        raw_replay_prefix = CONFIG["raw_replay_prefix_live"]
+
     # Collect all daily prefixes in the date range
     prefixes = []
     current  = start_dt
     while current <= end_dt:
         prefix = (
-            f"{CONFIG['raw_replay_prefix']}/"
+            f"{raw_replay_prefix}/"
             f"year={current.year}/month={current.month:02d}/day={current.day:02d}/"
         )
         prefixes.append(prefix)
         current += timedelta(days=1)
 
     log("INFO", "Starting FX S3 replay",
-        {"start_date":    start_date_str,
-         "end_date":      end_date_str,
-         "date_count":    len(prefixes),
-         "output_prefix": CONFIG["replay_output_prefix"]})
+        {"start_date":        start_date_str,
+         "end_date":          end_date_str,
+         "date_count":        len(prefixes),
+         "replay_mode":       replay_mode_lower,
+         "raw_source_prefix": raw_replay_prefix,
+         "output_prefix":     CONFIG["output_prefix_replay"]})
 
-    # Collect all keys across the date range
+    # Collect all keys across the date range - ONLY latest file per partition
     all_keys = []
     for prefix in prefixes:
         try:
-            keys = list_s3_files_with_prefix(CONFIG["write_bucket"], prefix)
-            all_keys.extend(keys)
+            # Use get_latest_file_per_partition to get ONLY the latest file per day
+            latest_files = get_latest_file_per_partition(CONFIG["write_bucket"], prefix)
+            all_keys.extend(latest_files)
         except Exception as exc:
             log("ERROR", "S3 replay listing failed",
                 {"prefix": prefix, "error": str(exc)})
@@ -1790,8 +2005,7 @@ def load_s3_replay_partitions(
                 def toPandas(self):
                     return self._df.copy()
 
-            # is_replay=True: writes to fx/replay/, skips Redis, skips Kafka DLQ
-            process_batch(_MockBatch(pdf), batch_num, pair_groups, is_replay=True)
+            process_batch(_MockBatch(pdf), batch_num, pair_groups)
 
         except Exception as exc:
             log("ERROR", "FX S3 replay partition failed",
@@ -1801,6 +2015,11 @@ def load_s3_replay_partitions(
     replay_duration = time.monotonic() - replay_start
     PROM_REPLAY_DURATION_SECONDS.observe(replay_duration)
     _push_metrics()
+
+    send_alert(
+        f"FX REPLAY COMPLETE: {start_date_str} to {end_date_str} "
+        f"| {len(all_keys)} files | {round(replay_duration, 3)}s"
+    )
 
     log("INFO", "FX S3 replay complete",
         {"start_date":      start_date_str,
@@ -1835,24 +2054,23 @@ def build_spark_session() -> SparkSession:
 # NOTE: data.timestamp field removed — using ONLY timestamp for market time.
 # This eliminates duplicate timestamp confusion.
 
-
 EVENT_SCHEMA = StructType([
-    StructField("producer_run_id", StringType(), True),
-    StructField("batch_id", StringType(), True),
-    StructField("source_fetch_time", StringType(), True),
+    StructField("producer_run_id",        StringType(), True),
+    StructField("batch_id",               StringType(), True),
+    StructField("source_fetch_time",      StringType(), True),
     StructField("producer_pipeline_name", StringType(), True),
-    StructField("batch_ts", StringType(), True),
+    StructField("batch_ts",               StringType(), True),
 
     StructField(
         "bars",
         ArrayType(
             StructType([
                 StructField("currency_pair", StringType(), True),
-                StructField("open", FloatType(), True),
-                StructField("high", FloatType(), True),
-                StructField("low", FloatType(), True),
-                StructField("close", FloatType(), True),
-                StructField("timestamp", StringType(), True),
+                StructField("open",          FloatType(),  True),
+                StructField("high",          FloatType(),  True),
+                StructField("low",           FloatType(),  True),
+                StructField("close",         FloatType(),  True),
+                StructField("timestamp",     StringType(), True),
             ])
         ),
         True,
@@ -1869,8 +2087,9 @@ if __name__ == "__main__":
     run_id = str(uuid.uuid4())
     _consumer_run_id = run_id   # used by _push_metrics for Pushgateway job label
 
-    # Start /metrics HTTP server (background thread — live mode only)
-    if not IS_REPLAY and not IS_BACKFILL:
+    # Start /metrics HTTP server in live mode only.
+    # Backfill and replay push metrics directly; no scrape server needed.
+    if IS_LIVE:
         _start_metrics_server()
 
     # Load FX universe once at startup (read-only)
@@ -1882,13 +2101,20 @@ if __name__ == "__main__":
          "run_id":      run_id,
          "run_mode":    CONFIG["run_mode"]})
 
-    if replay_mode == "s3":
-        # ── S3 REPLAY MODE ───────────────────────────────────────────
+    if IS_REPLAY:
+        # ── REPLAY MODE ──────────────────────────────────────────────
+        # run_mode=replay — reads historical raw S3 parquet files.
+        # Source prefix is selected by replay_mode inside load_s3_replay_partitions:
+        #   replay_mode=s3    -> kafka_raw/fx/backfill/
+        #   replay_mode=kafka -> kafka_raw/fx/live/
         # State rebuild is NEVER called in replay mode.
         # pair_buffers start empty; state warms from replay records.
+        # Output -> fx/data/replay/
+        # DLQ    -> fx/dlq/replay/
         log("INFO", "Starting FX replay — state rebuild skipped (replay mode)",
             {"replay_start": CONFIG["replay_start_date"],
-             "replay_end":   CONFIG["replay_end_date"]})
+             "replay_end":   CONFIG["replay_end_date"],
+             "replay_mode":  replay_mode})
 
         load_s3_replay_partitions(
             start_date_str = CONFIG["replay_start_date"],
@@ -1897,11 +2123,15 @@ if __name__ == "__main__":
         )
 
     else:
-        # ── LIVE KAFKA STREAM MODE ───────────────────────────────────
-        log("INFO", "Starting Kafka stream pipeline")
+        # ── LIVE / BACKFILL KAFKA STREAM MODE ───────────────────────
+        # Live     : fx_ohlc_1m topic, Redis enabled, state rebuild enabled.
+        # Backfill : fx_ohlc_1m_backfill topic, Redis disabled,
+        #            state rebuild disabled.
+        log("INFO", "Starting Kafka stream pipeline",
+            {"topic": CONFIG["topic"], "run_mode": CONFIG["run_mode"]})
 
         # State rebuild — live recovery only.
-        # Skipped automatically for: replay, backfill, fresh session starts
+        # Skipped automatically for: backfill, fresh session starts
         # (within grace window after weekly open), closed market periods.
         # Previous weekly session data is NEVER loaded.
         rebuild_state_from_s3()
@@ -1970,8 +2200,7 @@ if __name__ == "__main__":
         query = (
             parsed_df.writeStream
             .foreachBatch(lambda batch_df, batch_id:
-                          # is_replay=False: live mode — Redis enabled, Kafka DLQ enabled
-                          process_batch(batch_df, batch_id, pair_groups, is_replay=False))
+                          process_batch(batch_df, batch_id, pair_groups))
             .outputMode("append")
             .option("checkpointLocation", CONFIG["checkpoint_dir"])
             .start()
@@ -1983,7 +2212,7 @@ if __name__ == "__main__":
 
             if (
                 now.weekday() == 4
-                and now.hour == CONFIG["market_shutdown_hour"]
+                and now.hour  == CONFIG["market_shutdown_hour"]
                 and now.minute >= CONFIG["market_shutdown_minute"]
             ):
                 log(
@@ -1995,6 +2224,11 @@ if __name__ == "__main__":
                             f"{CONFIG['market_shutdown_minute']:02d}"
                     },
                 )
+
+                try:
+                    _push_metrics()
+                except Exception:
+                    pass
 
                 query.stop()
                 break

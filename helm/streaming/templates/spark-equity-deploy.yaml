@@ -39,6 +39,8 @@ spec:
                 name: streaming-infra-secret
 
           env:
+            - name: EQUITY_MODE
+              value: "live"
             - name: SPARK_LOCAL_IP
               valueFrom:
                 fieldRef:

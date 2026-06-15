@@ -38,7 +38,11 @@ spec:
             - secretRef:
                 name: streaming-infra-secret
 
+
+
           env:
+            - name: FX_MODE
+              value: "live"
             - name: SPARK_LOCAL_IP
               valueFrom:
                 fieldRef:
