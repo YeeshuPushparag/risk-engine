@@ -126,16 +126,16 @@ CONFIG: dict = {
     "fetch_interval":             "1m",
 
     # Run mode
-    "run_mode":                   os.getenv("FX_MODE", "live").lower(),
+    "run_mode":                   os.getenv("RUN_MODE", "live").lower(),
 
     # Backfill mode
-    "backfill_mode":              os.getenv("FX_BACKFILL_MODE", "false").lower() == "true",
-    "backfill_start_date":        os.getenv("FX_BACKFILL_START_DATE", ""),
-    "backfill_end_date":          os.getenv("FX_BACKFILL_END_DATE", ""),
+    "backfill_mode":              os.getenv("BACKFILL_MODE", "false").lower() == "true",
+    "backfill_start_date":        os.getenv("BACKFILL_START_DATE", ""),
+    "backfill_end_date":          os.getenv("BACKFILL_END_DATE", ""),
 
     # yfinance interval to use for backfill fetches.
     # 1m data is only available for last 7 days in yfinance; use 5m or 1h for older dates.
-    "backfill_interval":          os.getenv("FX_BACKFILL_INTERVAL", "1m"),
+    "backfill_interval":          os.getenv("BACKFILL_INTERVAL", "1m"),
 
     # FX universe — all pairs this producer covers
     "currency_pairs": [

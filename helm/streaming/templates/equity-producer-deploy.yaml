@@ -39,5 +39,5 @@ spec:
             - secretRef:
                 name: streaming-infra-secret
           env:
-            - name: EQUITY_MODE
+            - name: RUN_MODE
               value: "live"

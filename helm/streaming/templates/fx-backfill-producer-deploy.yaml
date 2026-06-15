@@ -48,8 +48,8 @@ spec:
                 name: streaming-infra-secret
 
           env:
-            - name: FX_MODE
+            - name: RUN_MODE
               value: "backfill"
 
-            - name: FX_BACKFILL_MODE
+            - name: BACKFILL_MODE
               value: "true"

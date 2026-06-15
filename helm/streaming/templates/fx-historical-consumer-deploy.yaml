@@ -1,66 +1,64 @@
 apiVersion: apps/v1
 kind: Deployment
+
 metadata:
-name: fx-historical-consumer
-namespace: streaming
+  name: fx-historical-consumer
+  namespace: streaming
 
 spec:
-replicas: 0
+  replicas: 0
 
-selector:
-matchLabels:
-app: fx-historical-consumer
+  selector:
+    matchLabels:
+      app: fx-historical-consumer
 
-template:
-metadata:
-labels:
-app: fx-historical-consumer
+  template:
+    metadata:
+      labels:
+        app: fx-historical-consumer
 
+    spec:
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
 
-spec:
-  nodeSelector:
-    {{- toYaml .Values.nodeSelector | nindent 8 }}
+      serviceAccountName: streaming-sa
 
-  serviceAccountName: streaming-sa
+      containers:
+        - name: fx-historical-consumer
+          image: "{{ .Values.image.spark.repository }}:{{ .Values.image.spark.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
 
-  containers:
-    - name: fx-historical-consumer
+          envFrom:
+            - secretRef:
+                name: streaming-infra-secret
 
-      image: "{{ .Values.image.spark.repository }}:{{ .Values.image.spark.tag }}"
-      imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: SPARK_LOCAL_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
 
-      envFrom:
-        - secretRef:
-            name: streaming-infra-secret
+          command: ["/bin/bash", "-lc"]
 
-      env:
-        - name: SPARK_LOCAL_IP
-          valueFrom:
-            fieldRef:
-              fieldPath: status.podIP
+          args:
+            - >
+              spark-submit
+              --master local[*]
+              --conf spark.driver.host=$(SPARK_LOCAL_IP)
+              --conf spark.driver.bindAddress=0.0.0.0
+              --conf spark.driver.port=7077
+              --conf spark.ui.port=4041
+              --conf spark.blockManager.port=7080
+              --conf spark.network.timeout=600s
+              --repositories https://repo.maven.apache.org/maven2
+              --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.7,org.apache.kafka:kafka-clients:3.5.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.696
+              /app/fx_consumer.py
 
-      command: ["/bin/bash", "-lc"]
+          volumeMounts:
+            - name: ivy-cache
+              mountPath: /root/.ivy2
 
-      args:
-        - >
-          spark-submit
-          --master local[*]
-          --conf spark.driver.host=$(SPARK_LOCAL_IP)
-          --conf spark.driver.bindAddress=0.0.0.0
-          --conf spark.driver.port=7077
-          --conf spark.ui.port=4041
-          --conf spark.blockManager.port=7080
-          --conf spark.network.timeout=600s
-          --repositories https://repo.maven.apache.org/maven2
-          --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.7,org.apache.kafka:kafka-clients:3.5.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.696
-          /app/fx_consumer.py
-
-      volumeMounts:
+      volumes:
         - name: ivy-cache
-          mountPath: /root/.ivy2
-
-  volumes:
-    - name: ivy-cache
-      persistentVolumeClaim:
-        claimName: spark-ivy-cache-pvc
-
+          persistentVolumeClaim:
+            claimName: spark-ivy-cache-pvc

@@ -127,15 +127,15 @@ CONFIG: dict = {
     "fetch_interval":             "1m",
 
     # Run mode
-    "run_mode":                   os.getenv("EQUITY_MODE", "live").lower(),
+    "run_mode":                   os.getenv("RUN_MODE", "live").lower(),
 
     # Backfill mode
-    "backfill_mode":              os.getenv("EQUITY_BACKFILL_MODE", "false").lower() == "true",
-    "backfill_date":              os.getenv("EQUITY_BACKFILL_DATE", ""),
+    "backfill_mode":              os.getenv("BACKFILL_MODE", "false").lower() == "true",
+    "backfill_date":              os.getenv("BACKFILL_DATE", ""),
     
     # yfinance interval to use for backfill fetches.
     # 1m data is only available for last 7 days in yfinance; use 5m or 1h for older dates.
-    "backfill_interval":          os.getenv("EQUITY_BACKFILL_INTERVAL", "1m"),
+    "backfill_interval":          os.getenv("BACKFILL_INTERVAL", "1m"),
 
     # S3
     "read_bucket":                "yeeshu-equity-bucket",

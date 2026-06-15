@@ -48,8 +48,8 @@ spec:
                 name: streaming-infra-secret
 
           env:
-            - name: EQUITY_MODE
+            - name: RUN_MODE
               value: "backfill"
 
-            - name: EQUITY_BACKFILL_MODE
+            - name: BACKFILL_MODE
               value: "true"
