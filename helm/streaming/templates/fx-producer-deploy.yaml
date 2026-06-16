@@ -5,16 +5,20 @@ metadata:
   namespace: streaming
 spec:
   replicas: {{ .Values.replicas.fxProducer }}
+
   selector:
     matchLabels:
       app: fx-producer
+
   template:
     metadata:
       labels:
         app: fx-producer
+
     spec:
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
+
       serviceAccountName: streaming-sa
 
       initContainers:
@@ -33,11 +37,55 @@ spec:
         - name: fx-producer
           image: "{{ .Values.image.producer.repository }}:{{ .Values.image.producer.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+
           command: ["python"]
           args: ["fx_producer.py"]
+
           envFrom:
             - secretRef:
                 name: streaming-infra-secret
+
           env:
             - name: RUN_MODE
               value: "live"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fx-producer
+  namespace: streaming
+  labels:
+    app: fx-producer
+
+spec:
+  selector:
+    app: fx-producer
+
+  ports:
+    - name: metrics
+      port: 8000
+      targetPort: 8000
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: fx-producer
+  namespace: monitoring
+  labels:
+    release: monitoring
+
+spec:
+  namespaceSelector:
+    matchNames:
+      - streaming
+
+  selector:
+    matchLabels:
+      app: fx-producer
+
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 60s

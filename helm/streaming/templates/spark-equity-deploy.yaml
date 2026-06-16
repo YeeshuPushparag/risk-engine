@@ -8,13 +8,16 @@ spec:
   selector:
     matchLabels:
       app: spark-equity
+
   template:
     metadata:
       labels:
         app: spark-equity
+
     spec:
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
+
       serviceAccountName: streaming-sa
 
       initContainers:
@@ -41,12 +44,14 @@ spec:
           env:
             - name: EQUITY_MODE
               value: "live"
+
             - name: SPARK_LOCAL_IP
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
 
           command: ["/bin/bash", "-lc"]
+
           args:
             - >
               spark-submit
@@ -67,19 +72,52 @@ spec:
         - name: ivy-cache
           persistentVolumeClaim:
             claimName: spark-ivy-cache-pvc
+
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: spark-equity
   namespace: streaming
+  labels:
+    app: spark-equity
+
 spec:
   selector:
     app: spark-equity
+
   ports:
     - name: ui
       port: 4040
       targetPort: 4040
+
     - name: blockmanager
       port: 7079
       targetPort: 7079
+
+    - name: metrics
+      port: 8000
+      targetPort: 8000
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: spark-equity
+  namespace: monitoring
+  labels:
+    release: monitoring
+
+spec:
+  namespaceSelector:
+    matchNames:
+      - streaming
+
+  selector:
+    matchLabels:
+      app: spark-equity
+
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 60s

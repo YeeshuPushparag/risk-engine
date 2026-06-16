@@ -118,7 +118,7 @@ export default function CurrencyPage() {
                 {currency} <span className="text-blue-500">Aggregates</span>
               </h1>
             </div>
-            <p className="text-[11px] sm:text-lg font-bold text-slate-500 tracking-tight">Currency-level risk and performance monitoring</p>
+            <p className="text-[11px] sm:text-lg font-bold text-slate-500 tracking-tight">Currency risk and performance monitoring</p>
           </div>
 
           <div className="flex flex-row md:flex-col items-center md:items-end gap-3 sm:gap-2">
