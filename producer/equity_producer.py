@@ -1334,7 +1334,7 @@ def run_backfill(producer_run_id: str, tickers: list[str], producer: KafkaProduc
                 events_by_hour[hour].append(event)
 
             # Store each hour separately
-            for hour, hour_events in events_by_hour.items():
+            for hour, hour_events in sorted(events_by_hour.items()):
                 partition_dt = datetime(
                     target_date.year,
                     target_date.month,
@@ -1351,38 +1351,45 @@ def run_backfill(producer_run_id: str, tickers: list[str], producer: KafkaProduc
                     source_type="backfill",
                 )
                 
+                combined_payload = {
+                    "producer_run_id": producer_run_id,
+                    "batch_id": f"{batch_id}_h{hour:02d}",
+                    "source_fetch_time": hour_events[0]["source_fetch_time"],
+                    "producer_pipeline_name": CONFIG["pipeline_name"],
+                    "batch_ts": pendulum.now("America/New_York").isoformat(),
+                    "tickers": [],
+                }
 
-            combined_payload = {
-                "producer_run_id": producer_run_id,
-                "batch_id": batch_id,
-                "source_fetch_time": events[0]["source_fetch_time"],
-                "producer_pipeline_name": CONFIG["pipeline_name"],
-                "batch_ts": pendulum.now("America/New_York").isoformat(),
-                "tickers": [],
-            }
+                for event in hour_events:
+                    combined_payload["tickers"].append({
+                        "ticker": event["data"]["ticker"],
+                        "open": event["data"]["open"],
+                        "high": event["data"]["high"],
+                        "low": event["data"]["low"],
+                        "close": event["data"]["close"],
+                        "volume": event["data"]["volume"],
+                        "timestamp": event["data"]["timestamp"],
+                    })
 
-            for event in events:
-                combined_payload["tickers"].append({
-                    "ticker": event["data"]["ticker"],
-                    "open": event["data"]["open"],
-                    "high": event["data"]["high"],
-                    "low": event["data"]["low"],
-                    "close": event["data"]["close"],
-                    "volume": event["data"]["volume"],
-                    "timestamp": event["data"]["timestamp"],
-                })
+                log(
+                    "INFO",
+                    "Sending hourly batch",
+                    {
+                        "hour": hour,
+                        "tickers": len(combined_payload["tickers"])
+                    }
+                )
+                success = send_with_retry(
+                    producer,
+                    combined_payload,
+                    dlq_buffer,
+                )
 
-            success = send_with_retry(
-                producer,
-                combined_payload,
-                dlq_buffer,
-            )
-
-            if success:
-                metrics["events_sent"] = len(events)
-                PROM_KAFKA_MESSAGES_TOTAL.inc()
-            else:
-                metrics["events_failed"] = len(events)
+                if success:
+                    metrics["events_sent"] += len(hour_events)
+                    PROM_KAFKA_MESSAGES_TOTAL.inc()
+                else:
+                    metrics["events_failed"] += len(hour_events)
 
             try:
                 producer.flush()

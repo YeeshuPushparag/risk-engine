@@ -1313,108 +1313,143 @@ def run_backfill(producer_run_id: str, producer: KafkaProducer) -> None:
                 # Without this, replay with REPLAY_HOUR=10 would not work correctly.
                 # =============================================================
                 events_by_hour: dict[int, list[dict]] = {}
-                
+
                 for event in events:
-                    # Parse the actual event timestamp to get the hour
                     event_time = datetime.fromisoformat(event["event_time"])
                     hour = event_time.hour
-                    
+
                     if hour not in events_by_hour:
                         events_by_hour[hour] = []
+
                     events_by_hour[hour].append(event)
-                
-                log("INFO", "FX backfill: grouped events by hour",
-                    {"date": str(target_date),
-                     "batch_id": batch_id,
-                     "hours": list(events_by_hour.keys()),
-                     "events_per_hour": {h: len(evts) for h, evts in events_by_hour.items()}})
-                
+
+                log(
+                    "INFO",
+                    "FX backfill: grouped events by hour",
+                    {
+                        "date": str(target_date),
+                        "batch_id": batch_id,
+                        "hours": list(events_by_hour.keys()),
+                        "events_per_hour": {
+                            h: len(evts)
+                            for h, evts in events_by_hour.items()
+                        },
+                    },
+                )
+
                 # =============================================================
                 # STEP 2: Store each hour's events to S3 with correct partition
                 # =============================================================
-                # Uses backfill/ prefix for clean separation from live data.
-                # Uses hour-specific batch_id (batch_id_h{hour}) for S3 file naming
-                # to avoid collisions when storing multiple hours.
-                # =============================================================
-                for hour, hour_events in events_by_hour.items():
-                    # Create partition datetime with the actual hour (not midnight)
+                for hour, hour_events in sorted(events_by_hour.items()):
+
                     partition_dt = datetime(
                         target_date.year,
                         target_date.month,
                         target_date.day,
-                        hour=hour,  # Use actual hour from event timestamp!
-                        tzinfo=pendulum.timezone("America/New_York")
+                        hour=hour,
+                        tzinfo=pendulum.timezone("America/New_York"),
                     )
-                    
-                    # Store raw events with source_type="backfill" and hour-specific batch_id
+
                     store_raw_events_parquet(
                         hour_events,
-                        f"{batch_id}_h{hour:02d}",  # Unique batch_id per hour for S3
+                        f"{batch_id}_h{hour:02d}",
                         producer_run_id,
                         partition_dt=partition_dt,
-                        source_type="backfill",  # ← Writes to source=backfill/ path
+                        source_type="backfill",
                     )
-                    
-                    log("INFO", "FX backfill: stored hour partition",
-                        {"date": str(target_date),
-                         "hour": hour,
-                         "events": len(hour_events),
-                         "batch_id": f"{batch_id}_h{hour:02d}"})
-                
+
+                    log(
+                        "INFO",
+                        "FX backfill: stored hour partition",
+                        {
+                            "date": str(target_date),
+                            "hour": hour,
+                            "events": len(hour_events),
+                            "batch_id": f"{batch_id}_h{hour:02d}",
+                        },
+                    )
+
                 # =============================================================
-                # STEP 3: Send ALL events to Kafka (using original batch_id)
+                # STEP 3: Send ONE Kafka message per hour
                 # =============================================================
-                # IMPORTANT: Kafka uses the original batch_id (not hour-specific)
-                # so all events from this backfill share the same lineage.
-                # This allows the consumer to trace all events from one backfill run.
+                # Prevents MessageSizeTooLargeError while preserving
+                # the exact same schema used by live mode.
                 # =============================================================
-                combined_payload = {
-                    "producer_run_id": producer_run_id,
-                    "batch_id": batch_id,
-                    "source_fetch_time": events[0]["source_fetch_time"],
-                    "producer_pipeline_name": CONFIG["pipeline_name"],
-                    "batch_ts": pendulum.now("America/New_York").isoformat(),
-                    "bars": [],
-                }
+                for hour, hour_events in sorted(events_by_hour.items()):
 
-                for event in events:
-                    combined_payload["bars"].append({
-                        "currency_pair": event["data"]["currency_pair"],
-                        "open": event["data"]["open"],
-                        "high": event["data"]["high"],
-                        "low": event["data"]["low"],
-                        "close": event["data"]["close"],
-                        "timestamp": event["data"]["timestamp"],
-                    })
+                    combined_payload = {
+                        "producer_run_id": producer_run_id,
+                        "batch_id": f"{batch_id}_h{hour:02d}",
+                        "source_fetch_time": hour_events[0]["source_fetch_time"],
+                        "producer_pipeline_name": CONFIG["pipeline_name"],
+                        "batch_ts": pendulum.now("America/New_York").isoformat(),
+                        "bars": [],
+                    }
 
-                success = send_with_retry(
-                    producer,
-                    combined_payload,
-                    dlq_buffer,
-                )
+                    for event in hour_events:
+                        combined_payload["bars"].append({
+                            "currency_pair": event["data"]["currency_pair"],
+                            "open": event["data"]["open"],
+                            "high": event["data"]["high"],
+                            "low": event["data"]["low"],
+                            "close": event["data"]["close"],
+                            "timestamp": event["data"]["timestamp"],
+                        })
 
-                if success:
-                    metrics["events_sent"] = len(events)
-                    PROM_KAFKA_MESSAGES_TOTAL.inc()
-                else:
-                    metrics["events_failed"] = len(events)
+                    log(
+                        "INFO",
+                        "Sending hourly FX batch",
+                        {
+                            "hour": hour,
+                            "bars": len(combined_payload["bars"]),
+                        },
+                    )
 
-                # Flush Kafka producer to ensure all messages are sent
+                    success = send_with_retry(
+                        producer,
+                        combined_payload,
+                        dlq_buffer,
+                    )
+
+                    if success:
+                        metrics["events_sent"] += len(hour_events)
+                        PROM_KAFKA_MESSAGES_TOTAL.inc()
+                    else:
+                        metrics["events_failed"] += len(hour_events)
+
+                # =============================================================
+                # STEP 4: Flush Kafka producer
+                # =============================================================
                 try:
                     producer.flush()
+
                 except Exception as exc:
-                    log("ERROR", "Backfill: FX producer flush failed",
-                        {"date": target_date.isoformat(),
-                         "batch_id": batch_id, "error": str(exc)})
+                    log(
+                        "ERROR",
+                        "Backfill: FX producer flush failed",
+                        {
+                            "date": target_date.isoformat(),
+                            "batch_id": batch_id,
+                            "error": str(exc),
+                        },
+                    )
+
                     dlq_buffer.append({
-                        "event": {"data": {"currency_pair": "BATCH_FLUSH_FAILED"},
-                                  "batch_id": batch_id},
+                        "event": {
+                            "data": {
+                                "currency_pair": "BATCH_FLUSH_FAILED"
+                            },
+                            "batch_id": batch_id,
+                        },
                         "error": f"producer.flush() failed: {str(exc)}",
                         "stage": "backfill_producer_flush",
                     })
+
                     send_alert(
                         f"[PRODUCER BACKFILL] Kafka flush FAILED | "
-                        f"date={target_date} | batch={batch_id} | error={str(exc)}",
+                        f"date={target_date} | "
+                        f"batch={batch_id} | "
+                        f"error={str(exc)}",
                         level="CRITICAL",
                         context={"batch_id": batch_id},
                     )
