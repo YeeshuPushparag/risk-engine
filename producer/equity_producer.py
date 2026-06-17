@@ -1036,7 +1036,8 @@ def send_with_retry(
                 "Unexpected send error — routing to DLQ",
                 {
                     "tickers_count": len(event.get("tickers", [])),
-                    "error": str(exc),
+                    "error": repr(exc),
+                    "error_type": type(exc).__name__,
                 },
             )
 
@@ -1280,7 +1281,7 @@ def run_backfill(producer_run_id: str, tickers: list[str], producer: KafkaProduc
 
     if not target_date_str:
         raise ValueError(
-            "EQUITY_BACKFILL_MODE=true requires EQUITY_BACKFILL_DATE"
+            "BACKFILL_MODE=true requires BACKFILL_DATE"
         )
 
     target_date = _parse_date(target_date_str)
@@ -1351,14 +1352,37 @@ def run_backfill(producer_run_id: str, tickers: list[str], producer: KafkaProduc
                 )
                 
 
-            for event in events:
-                success = send_with_retry(producer, event, dlq_buffer)
+            combined_payload = {
+                "producer_run_id": producer_run_id,
+                "batch_id": batch_id,
+                "source_fetch_time": events[0]["source_fetch_time"],
+                "producer_pipeline_name": CONFIG["pipeline_name"],
+                "batch_ts": pendulum.now("America/New_York").isoformat(),
+                "tickers": [],
+            }
 
-                if success:
-                    metrics["events_sent"] += 1
-                    PROM_KAFKA_MESSAGES_TOTAL.inc()
-                else:
-                    metrics["events_failed"] += 1
+            for event in events:
+                combined_payload["tickers"].append({
+                    "ticker": event["data"]["ticker"],
+                    "open": event["data"]["open"],
+                    "high": event["data"]["high"],
+                    "low": event["data"]["low"],
+                    "close": event["data"]["close"],
+                    "volume": event["data"]["volume"],
+                    "timestamp": event["data"]["timestamp"],
+                })
+
+            success = send_with_retry(
+                producer,
+                combined_payload,
+                dlq_buffer,
+            )
+
+            if success:
+                metrics["events_sent"] = len(events)
+                PROM_KAFKA_MESSAGES_TOTAL.inc()
+            else:
+                metrics["events_failed"] = len(events)
 
             try:
                 producer.flush()

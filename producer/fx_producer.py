@@ -49,9 +49,9 @@ Graceful shutdown
 
 Backfill mode
 -------------
-    FX_BACKFILL_MODE=true
-    FX_BACKFILL_START_DATE=YYYY-MM-DD
-    FX_BACKFILL_END_DATE=YYYY-MM-DD
+    BACKFILL_MODE=true
+    BACKFILL_START_DATE=YYYY-MM-DD
+    BACKFILL_END_DATE=YYYY-MM-DD
 
     Backfill fetches historical OHLC for the full date range using yfinance
     start/end params instead of the live "period" param. Events are written
@@ -857,7 +857,7 @@ def fetch_backfill_for_date(
     """
     Fetch historical OHLC for a single calendar date using yfinance start/end params.
 
-    Uses FX_BACKFILL_INTERVAL (default "1m") — note yfinance only provides 1m data
+    Uses BACKFILL_INTERVAL (default "1m") — note yfinance only provides 1m data
     for the last 7 days; use "5m" or "1h" for older dates.
 
     event_time is set to the historical bar timestamp, making event_id deterministic
@@ -1010,7 +1010,8 @@ def send_with_retry(
                 "Unexpected FX send error — routing to DLQ",
                 {
                     "bars": len(event.get("bars", [])),
-                    "error": str(exc),
+                    "error": repr(exc),
+                    "error_type": type(exc).__name__,
                 },
             )
 
@@ -1245,7 +1246,7 @@ def run_backfill(producer_run_id: str, producer: KafkaProducer) -> None:
       - Uses hour-specific batch_id for S3 files to avoid collisions
       - Each hour's events are stored in correct hour=HH partition
 
-    FX backfill spans a date range (FX_BACKFILL_START_DATE to FX_BACKFILL_END_DATE)
+    FX backfill spans a date range (BACKFILL_START_DATE to BACKFILL_END_DATE)
     because FX markets operate across multiple calendar days continuously.
 
     Prometheus backfill metrics:
@@ -1259,8 +1260,8 @@ def run_backfill(producer_run_id: str, producer: KafkaProducer) -> None:
 
     if not start_date_str or not end_date_str:
         raise ValueError(
-            "FX_BACKFILL_MODE=true requires both FX_BACKFILL_START_DATE "
-            "and FX_BACKFILL_END_DATE"
+            "BACKFILL_MODE=true requires both BACKFILL_START_DATE "
+            "and BACKFILL_END_DATE"
         )
 
     start_date = _parse_date(start_date_str)
@@ -1367,13 +1368,36 @@ def run_backfill(producer_run_id: str, producer: KafkaProducer) -> None:
                 # so all events from this backfill share the same lineage.
                 # This allows the consumer to trace all events from one backfill run.
                 # =============================================================
+                combined_payload = {
+                    "producer_run_id": producer_run_id,
+                    "batch_id": batch_id,
+                    "source_fetch_time": events[0]["source_fetch_time"],
+                    "producer_pipeline_name": CONFIG["pipeline_name"],
+                    "batch_ts": pendulum.now("America/New_York").isoformat(),
+                    "bars": [],
+                }
+
                 for event in events:
-                    success = send_with_retry(producer, event, dlq_buffer)
-                    if success:
-                        metrics["events_sent"] += 1
-                        PROM_KAFKA_MESSAGES_TOTAL.inc()
-                    else:
-                        metrics["events_failed"] += 1
+                    combined_payload["bars"].append({
+                        "currency_pair": event["data"]["currency_pair"],
+                        "open": event["data"]["open"],
+                        "high": event["data"]["high"],
+                        "low": event["data"]["low"],
+                        "close": event["data"]["close"],
+                        "timestamp": event["data"]["timestamp"],
+                    })
+
+                success = send_with_retry(
+                    producer,
+                    combined_payload,
+                    dlq_buffer,
+                )
+
+                if success:
+                    metrics["events_sent"] = len(events)
+                    PROM_KAFKA_MESSAGES_TOTAL.inc()
+                else:
+                    metrics["events_failed"] = len(events)
 
                 # Flush Kafka producer to ensure all messages are sent
                 try:
@@ -1446,8 +1470,8 @@ def main():
         Runs the live FX producer loop until SIGTERM/SIGINT or 17:03 market close.
         Flow: YFinance -> Kafka + raw S3
 
-    Backfill mode (FX_BACKFILL_MODE=true):
-        Fetches historical yfinance data for FX_BACKFILL_START_DATE..FX_BACKFILL_END_DATE,
+    Backfill mode (BACKFILL_MODE=true):
+        Fetches historical yfinance data for BACKFILL_START_DATE..BACKFILL_END_DATE,
         publishes every event to Kafka AND writes raw S3 events, then exits.
         Flow: Historical YFinance -> Kafka + raw S3
         Consumer processes backfill events from Kafka identically to live events.
