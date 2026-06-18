@@ -1370,13 +1370,28 @@ def run_backfill(producer_run_id: str, producer: KafkaProducer) -> None:
                         tzinfo=pendulum.timezone("America/New_York"),
                     )
 
-                    store_raw_events_parquet(
-                        hour_events,
-                        f"{batch_id}_h{hour:02d}",
-                        producer_run_id,
-                        partition_dt=partition_dt,
-                        source_type="backfill",
-                    )
+                    events_by_minute = {}
+
+                    for event in hour_events:
+                        event_time = datetime.fromisoformat(event["event_time"])
+
+                        minute_key = event_time.strftime("%Y%m%d%H%M")
+
+                        events_by_minute.setdefault(minute_key, []).append(event)
+
+                    for minute_key, minute_events in sorted(events_by_minute.items()):
+
+                        minute_dt = datetime.fromisoformat(
+                            minute_events[0]["event_time"]
+                        )
+
+                        store_raw_events_parquet(
+                            minute_events,              # all FX pairs for one minute
+                            f"{batch_id}_{minute_key}",
+                            producer_run_id,
+                            partition_dt=minute_dt,
+                            source_type="backfill",
+                        )
 
                     log(
                         "INFO",

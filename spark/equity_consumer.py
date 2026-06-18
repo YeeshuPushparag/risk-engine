@@ -1387,6 +1387,7 @@ def process_batch(
       Failed rows are collected in dlq_buffer and written once at end.
       Successful rows are never rolled back by a subsequent row's failure.
     """
+    log("INFO", f"ENTER process_batch batch={batch_id}")  # <-- ADD THIS
     pipeline_run_id      = str(uuid.uuid4())
     processing_timestamp = pendulum.now("America/New_York").to_iso8601_string()
     metrics              = make_batch_metrics()
@@ -1401,7 +1402,10 @@ def process_batch(
             log("INFO", "Empty batch received",
                 {"batch_id": batch_id, "run_mode": CONFIG["run_mode"]})
             return
+        rows = batch_df.count()  # <-- ADD THIS
+        log("INFO", f"ROWS={rows}")  # <-- ADD THIS
         pdf = batch_df.toPandas()
+        log("INFO", "PANDAS_DONE")  # <-- ADD THIS
     except Exception as exc:
         log("ERROR", "Failed to convert batch to pandas",
             {"batch_id": batch_id, "run_mode": CONFIG["run_mode"], "error": str(exc)})
@@ -1574,6 +1578,11 @@ def process_batch(
     # Enrichment
     snapshot_df = enrich_intraday_with_positions(snapshot_df, positions_df)
     snapshot_df = snapshot_df.where(pd.notnull(snapshot_df), None)
+    log("INFO", "SAVE_START")  # <-- ADD THIS
+    # S3 write — mode-specific path; outputs are always isolated
+    save_to_parquet(snapshot_df, str(batch_id))
+    log("INFO", "SAVE_DONE")  # <-- ADD THIS
+
 
     # S3 write — mode-specific path; outputs are always isolated
     save_to_parquet(snapshot_df, str(batch_id))
@@ -1591,6 +1600,7 @@ def process_batch(
     PROM_LAST_SUCCESS_TIMESTAMP.set(time.time())
     metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
     PROM_DURATION_SECONDS.observe(time.monotonic() - batch_start)
+    log("INFO", f"EXIT process_batch batch={batch_id}")  # <-- ADD THIS
 
 
 # =============================================================
