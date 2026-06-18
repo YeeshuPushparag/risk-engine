@@ -1598,6 +1598,19 @@ def main():
                 {"producer_run_id": producer_run_id},
             )
 
+    except Exception as e:  
+        log(
+            "ERROR",
+            "Fatal error in main execution",
+            {"producer_run_id": producer_run_id, "error": str(e)}
+        )
+        raise
+    
+    finally:  
+        try:
+            _push_metrics(producer_run_id)
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     main()
