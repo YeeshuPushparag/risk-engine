@@ -212,7 +212,7 @@ export default function FxIntradayMain() {
         </div>
 
         <section className="w-full lg:max-w-[500px]">
-          <TickerSearch ticker_url="fx/daily" />
+          <TickerSearch ticker_url="fx/intraday" />
         </section>
       </div>
 
