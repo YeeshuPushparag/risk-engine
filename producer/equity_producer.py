@@ -153,7 +153,7 @@ CONFIG: dict = {
 
     #Market Hours (3 minute extended)
     "market_shutdown_hour":        16,
-    "market_shutdown_minute":        3,
+    "market_shutdown_minute":       3,
 
 
     # Observability
@@ -236,15 +236,31 @@ def _push_metrics(producer_run_id: str) -> None:
     Non-fatal — a Pushgateway failure must never stop the producer.
     """
     try:
+        job_name = f"{CONFIG['pipeline_name']}_{CONFIG['run_mode']}_{producer_run_id}"
+        
+        # ── LOG success (no Slack) ──────────────────────────────────────
+        log("INFO", "Pushing metrics to Pushgateway",
+            {"job": job_name, "mode": CONFIG["run_mode"]})
+        
         push_to_gateway(
             CONFIG["pushgateway_url"],
-            job=f"{CONFIG['pipeline_name']}_{CONFIG['run_mode']}_{producer_run_id}",
+            job=job_name,
             registry=_prom_registry,
         )
+        
+        # ── Log success after push ──────────────────────────────────────
+        log("INFO", "Metrics pushed successfully",
+            {"job": job_name, "mode": CONFIG["run_mode"]})
+        
     except Exception as exc:
         log("WARNING", "Prometheus push_to_gateway failed",
-            {"error": str(exc)})
-
+            {"error": str(exc), "mode": CONFIG["run_mode"]})
+        
+        # ─── Send Slack alert (message only) ────────────────────────────
+        send_alert(
+            f"❌ Metrics Push FAILED | mode={CONFIG['run_mode']} | error={str(exc)}",
+            level="CRITICAL"
+        )
 
 def _start_metrics_server() -> None:
     """
@@ -977,7 +993,7 @@ def send_with_retry(
     dlq_buffer: list[dict],
 ) -> bool:
     """
-    Attempt to send a single event to Kafka with exponential backoff retry.
+    Attempt to send a Kafka payload (single event or aggregated batch payload) with exponential backoff retry.
 
     Uses future.get() to block and surface delivery failures at the
     application level (on top of the broker-level retry configured in the
@@ -1099,7 +1115,7 @@ def run_live(producer_run_id: str, tickers: list[str], producer: KafkaProducer) 
     Each cycle:
       1. Fetch snapshot from yfinance (with retry + observability)
       2. Store raw events to S3 as parquet (for replay / audit)
-      3. Send each event to Kafka with retry + DLQ buffering
+      3. Send combined batch payload to Kafka
       4. Flush DLQ buffer to S3 in a single batch write
       5. Flush Kafka producer
       6. Push Prometheus metrics
@@ -1241,9 +1257,6 @@ def run_live(producer_run_id: str, tickers: list[str], producer: KafkaProducer) 
             PROM_DURATION_SECONDS.observe(cycle_duration)
             log("INFO", "Equity batch processed successfully", {"batch_id": batch_id})
 
-            # Push metrics to Pushgateway at end of every cycle
-            _push_metrics(producer_run_id)
-
  
             time.sleep(CONFIG["fetch_interval_s"])
 
@@ -1254,14 +1267,14 @@ def run_live(producer_run_id: str, tickers: list[str], producer: KafkaProducer) 
 def run_backfill(producer_run_id: str, tickers: list[str], producer: KafkaProducer) -> None:
     """
     Backfill mode: fetch historical yfinance data for a date range, write raw
-    events to S3, AND publish every event to Kafka.
+    events to S3, AND publish historical data to Kafka in hourly batch payloads.
 
     Architecture requirement (FINAL):
         Historical YFinance -> Producer -> Kafka -> Consumer -> Processed S3
 
     Both outputs are mandatory in backfill mode:
       1. Raw S3  (kafka_raw/equity/) — partitioned by historical date for replay
-      2. Kafka   (equity_stream)     — same topic as live, same schema, same guarantees
+      2. Kafka (equity_stream_backfill) — dedicated backfill topic
 
     The consumer processes backfill events from Kafka exactly as it processes live
     events, writing output to equity/data/.  Replay (REPLAY_MODE=s3) then reads
@@ -1273,7 +1286,7 @@ def run_backfill(producer_run_id: str, tickers: list[str], producer: KafkaProduc
     Prometheus backfill metrics:
       producer_runs_total             — one increment per date processed
       producer_failures_total         — one increment per date that fails
-      producer_kafka_messages_total   — incremented for every event sent to Kafka
+      Historical YFinance -> Producer -> Kafka -> Consumer -> Processed S3
       producer_dlq_total              — incremented for fetch/validation/send failures
     """
 
@@ -1504,7 +1517,7 @@ def main():
 
     Backfill mode (BACKFILL_MODE=true):
         Fetches historical yfinance data for BACKFILL_DATE
-        publishes every event to Kafka AND writes raw S3 events, then exits.
+        publishes historical data to Kafka in hourly batch payloads, then exits.
         Flow: Historical YFinance -> Kafka + raw S3
         Consumer processes backfill events from Kafka identically to live events.
         Replay (REPLAY_MODE=s3) then reads kafka_raw/equity/ for reprocessing.
@@ -1538,11 +1551,7 @@ def main():
             run_backfill(producer_run_id, tickers, producer)
         else:
             run_live(producer_run_id, tickers, producer)
-    finally:
-        try:
-            _push_metrics(producer_run_id)
-        except Exception:
-            pass
+
 
         log(
             "INFO",
@@ -1557,7 +1566,34 @@ def main():
             "Producer stopped cleanly.",
             {"producer_run_id": producer_run_id},
         )
-
+        # ===== ADD THIS: 10-minute wait for backfill mode =====
+        if is_backfill:
+            log(
+                "INFO",
+                "Backfill mode: waiting 10 minutes before exiting",
+                {
+                    "producer_run_id": producer_run_id,
+                    "wait_seconds": 600,
+                    "wait_minutes": 10,
+                }
+            )
+            time.sleep(600)  # 10 minutes
+            log(
+                "INFO",
+                "Backfill mode: 10-minute wait complete, exiting now",
+                {"producer_run_id": producer_run_id},
+            )
+        else:
+            try:
+                _push_metrics(producer_run_id)
+            except Exception:
+                pass          
+            time.sleep(120)  # 2 minutes
+            log(
+                "INFO",
+                "Live mode: 2-minute wait complete, exiting now",
+                {"producer_run_id": producer_run_id},
+            )
 
 if __name__ == "__main__":
     main()

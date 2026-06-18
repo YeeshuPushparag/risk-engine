@@ -111,7 +111,8 @@ Lineage on every output row
 Idempotency
 -----------
   Spark checkpoints handle offset tracking (live and backfill modes).
-  Duplicate replay runs are idempotent (parquet write is keyed by batch_id).
+  Replay output is append-only. Repeated replay runs create new uniquely
+  named parquet files and may produce duplicate historical records.
 
 Buffer safety
 -------------
@@ -138,12 +139,6 @@ Prometheus metrics
   replay_records_processed_total      — total records processed across all replay batches
   replay_failures_total               — replay partitions that failed
   replay_duration_seconds             — total wall-clock time of the replay job
-
-  Metrics push behavior:
-  LIVE     : Pushgateway push after every successful batch and at market shutdown.
-  BACKFILL : No per-batch Pushgateway push (matches Equity consumer behavior).
-             Metrics accumulate and are pushed at job completion.
-  REPLAY   : Pushgateway push once at replay job completion.
 """
 
 import os
@@ -250,9 +245,9 @@ CONFIG: dict = {
     "pushgateway_url": os.getenv("PUSHGATEWAY_URL"),
     "metrics_port":    int(os.getenv("METRICS_PORT", "8000")),
 
-    # Market hours (shutdown with 3-minute extension)
+    # Market hours (shutdown with 4-minute extension)
     "market_shutdown_hour":   16,
-    "market_shutdown_minute":  3,
+    "market_shutdown_minute":  4,
 
     # State rebuild — live mode recovery only.
     # Number of minutes of raw S3 data to load when recovering mid-session.
@@ -438,18 +433,35 @@ def _push_metrics() -> None:
     Non-fatal — a Pushgateway failure must never stop the consumer.
 
     Push behavior by mode:
-      LIVE     : called after every successful batch and at market shutdown.
+      LIVE     : called at market shutdown.
       BACKFILL : called once at job completion.
       REPLAY   : called once at replay job completion.
     """
     try:
+        job_name = f"{CONFIG['consumer_pipeline_name']}_{CONFIG['run_mode']}_{_consumer_run_id}"
+        
+        # ── LOG success (no Slack) ──────────────────────────────────────
+        log("INFO", "Pushing metrics to Pushgateway",
+            {"job": job_name, "mode": CONFIG["run_mode"]})
+        
         push_to_gateway(
             CONFIG["pushgateway_url"],
-            job=f"{CONFIG['consumer_pipeline_name']}_{CONFIG['run_mode']}_{_consumer_run_id}",
+            job=job_name,
             registry=_prom_registry,
         )
+        
+        # ── Log success after push ──────────────────────────────────────
+        log("INFO", "Metrics pushed successfully",
+            {"job": job_name, "mode": CONFIG["run_mode"]})
+        
     except Exception as exc:
-        log("WARNING", "Prometheus push_to_gateway failed", {"error": str(exc)})
+        log("WARNING", "Prometheus push_to_gateway failed",
+            {"error": str(exc), "mode": CONFIG["run_mode"]})
+        
+        # ─── Send Slack alert (message only) ────────────────────────────
+        send_alert(
+            f"❌ Metrics Push FAILED | mode={CONFIG['run_mode']} | error={str(exc)}"
+        )
 
 
 def _start_metrics_server() -> None:
@@ -900,6 +912,7 @@ def rebuild_state_from_s3() -> None:
 
     # Collect keys only from required hour partitions - ONLY latest file per hour
     all_keys: List[str] = []
+    s3 = get_s3()
     for hour in sorted(hours_to_scan):
         hour_prefix = f"{today_prefix}hour={hour:02d}/"
         try:
@@ -1351,7 +1364,7 @@ def process_batch(
       DLQ path     : equity/dlq/live/  | equity/dlq/backfill/  | equity/dlq/replay/
       Redis        : published after every batch (LIVE ONLY)
       Late events  : filtered and routed to live DLQ (LIVE ONLY)
-      Metrics push : after every batch (LIVE ONLY); at job end (BACKFILL/REPLAY)
+      Metrics push : at market end (LIVE ONLY); at job end (BACKFILL/REPLAY)
 
     Per-batch lifecycle:
       1. Convert Spark -> pandas
@@ -1362,11 +1375,12 @@ def process_batch(
       6. Atomic S3 write to mode-specific output path
       7. Redis snapshot (LIVE ONLY)
       8. Flush DLQ to mode-specific S3 DLQ path
-      9. Push Prometheus metrics (LIVE ONLY — others push at job end)
+      9. Expose metrics (LIVE ONLY — others push at job end)
 
     Idempotency:
-      Spark checkpoints handle offset tracking (live and backfill modes).
-      Replay runs are idempotent (parquet write is keyed by batch_id).
+        Spark checkpoints handle offset tracking (live and backfill modes).
+        Replay output is append-only. Repeated replay runs create new uniquely
+        named parquet files and may produce duplicate historical records.
 
     Partial failure handling:
       Exceptions within a row's processing are caught individually.
@@ -1463,8 +1477,6 @@ def process_batch(
         flush_dlq_to_s3(dlq_buffer, str(batch_id))
         metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
         log_batch_metrics(str(batch_id), metrics)
-        if IS_LIVE:
-            _push_metrics()
         return
 
     metrics["events_received"] = len(pdf)
@@ -1549,8 +1561,6 @@ def process_batch(
         flush_dlq_to_s3(dlq_buffer, str(batch_id))
         metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
         log_batch_metrics(str(batch_id), metrics)
-        if IS_LIVE:
-            _push_metrics()
         return
 
     PROM_FAILED_EVENTS.set(metrics["events_failed"])
@@ -1582,9 +1592,6 @@ def process_batch(
     metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
     PROM_DURATION_SECONDS.observe(time.monotonic() - batch_start)
 
-    # Metrics push — LIVE ONLY per batch; backfill and replay push at job end
-    if IS_LIVE:
-        _push_metrics()
 
 # =============================================================
 # S3 REPLAY  (run_mode = "replay")
@@ -1679,7 +1686,8 @@ def load_s3_replay_partitions(
         return
 
     log("INFO", "Replay partitions found", {"count": len(keys)})
-
+    
+    s3 = get_s3()
     for batch_num, key in enumerate(keys, start=1):
         try:
             obj = s3.get_object(Bucket=CONFIG["write_bucket"], Key=key)
@@ -1818,6 +1826,10 @@ if __name__ == "__main__":
             hour_str     = CONFIG["replay_hour"],
             positions_df = positions_df,
         )
+        # Sleep 10 minutes after replay completes before exiting
+        log("INFO", "Replay complete - waiting 10 minutes before final exit")
+        time.sleep(600)  # 10 minutes = 600 seconds
+        log("INFO", "Exiting replay consumer")
 
     else:
         # ── LIVE or BACKFILL — Kafka Structured Streaming ────────────
@@ -1833,15 +1845,26 @@ if __name__ == "__main__":
         spark = build_spark_session()
         spark.sparkContext.setLogLevel("WARN")
 
-        raw_df = (
-            spark.readStream
-            .format("kafka")
-            .option("kafka.bootstrap.servers", CONFIG["kafka_broker"])
-            .option("subscribe", CONFIG["topic"])
-            .option("startingOffsets", "latest")
-            .option("failOnDataLoss", "false")
-            .load()
-        )
+        if IS_LIVE:   
+            raw_df = (
+                spark.readStream
+                .format("kafka")
+                .option("kafka.bootstrap.servers", CONFIG["kafka_broker"])
+                .option("subscribe", CONFIG["topic"])
+                .option("startingOffsets", "latest")
+                .option("failOnDataLoss", "false")
+                .load()
+            )
+        else:
+            raw_df = (
+                spark.readStream
+                .format("kafka")
+                .option("kafka.bootstrap.servers", CONFIG["kafka_broker"])
+                .option("subscribe", CONFIG["topic"])
+                .option("startingOffsets", "earliest")
+                .option("failOnDataLoss", "false")
+                .load()
+            )
 
         parsed_df = (
             raw_df
@@ -1890,43 +1913,70 @@ if __name__ == "__main__":
             .filter(col("volume") > 0)
         )
 
-        query = (
-            parsed_df.writeStream
-            .foreachBatch(
-                lambda batch_df, batch_id:
-                    process_batch(batch_df, batch_id, positions_df)
-            )
-            .outputMode("append")
-            .option("checkpointLocation", CONFIG["checkpoint_dir"])
-            .start()
-        )
-
-        # Market-shutdown loop (live and backfill)
-        while True:
-            now = pendulum.now("America/New_York")
-
-            if (
-                now.hour   == CONFIG["market_shutdown_hour"]
-                and now.minute >= CONFIG["market_shutdown_minute"]
-            ):
-                log(
-                    "INFO",
-                    "Market shutdown time reached - stopping consumer cleanly",
-                    {
-                        "shutdown_time": (
-                            f"{CONFIG['market_shutdown_hour']}:"
-                            f"{CONFIG['market_shutdown_minute']:02d}"
-                        ),
-                        "run_mode": CONFIG["run_mode"],
-                    },
+        if IS_LIVE: 
+            query = (
+                parsed_df.writeStream
+                .foreachBatch(
+                    lambda batch_df, batch_id:
+                        process_batch(batch_df, batch_id, positions_df)
                 )
+                .outputMode("append")
+                .option("checkpointLocation", CONFIG["checkpoint_dir"])
+                .start()
+            )
 
-                try:
-                    _push_metrics()
-                except Exception:
-                    pass
+           # Market-shutdown loop (live mode only)
+            while True:
+                now = pendulum.now("America/New_York")
 
-                query.stop()
-                break
+                if (
+                    now.hour   == CONFIG["market_shutdown_hour"]
+                    and now.minute >= CONFIG["market_shutdown_minute"]
+                ):
+                    log(
+                        "INFO",
+                        "Market shutdown time reached - stopping consumer cleanly",
+                        {
+                            "shutdown_time": (
+                                f"{CONFIG['market_shutdown_hour']}:"
+                                f"{CONFIG['market_shutdown_minute']:02d}"
+                            ),
+                            "run_mode": CONFIG["run_mode"],
+                        },
+                    )
+                    
+                    query.stop()
 
-            time.sleep(30)
+                    try:
+                        _push_metrics()
+                    except Exception:
+                        pass
+
+                    # Sleep for minutes when market closes
+                    log("INFO", "Waiting 2 minutes before final exit")
+                    time.sleep(120)  # Only executes during shutdown
+
+                    break
+                time.sleep(30)
+        
+        else:
+            query = (
+                parsed_df.writeStream
+                .foreachBatch(
+                    lambda batch_df, batch_id:
+                        process_batch(batch_df, batch_id, positions_df)
+                )
+                .outputMode("append")
+                .option("checkpointLocation", CONFIG["checkpoint_dir"])
+                .trigger(availableNow=True)
+                .start()
+            )
+            # BACKFILL mode - await termination and push metrics at end
+            log("INFO", "Backfill mode - awaiting stream termination")
+            query.awaitTermination()
+            
+            # Push metrics once at completion
+            try:
+                _push_metrics()
+            except Exception:
+                pass
