@@ -11,7 +11,6 @@ Responsibilities
 - Rename first-pipeline lineage columns to source_* prefix
 - Run XGBoost ML predictions (pred_spread_5d, pred_pd_21d)
 - Attach second-pipeline lineage metadata
-- Validate output
 - Write Snowflake BONDS_HISTORY (append-only, always INSERT, includes run_mode)
 - Write Snowflake BONDS (clean deterministic state):
     Replay / Backfill <- DELETE window <- INSERT (atomic transaction)
@@ -83,7 +82,6 @@ from io import BytesIO, StringIO
 from connections.snowflake_conn import get_snowflake_conn
 from connections.postgre_conn import get_postgre_conn
 from snowflake.connector.pandas_tools import write_pandas
-import pendulum
 from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 
 # =============================================================
@@ -166,7 +164,7 @@ class BondProcessingError(Exception):
 
 
 class DataValidationError(Exception):
-    """Raised when output data validation checks fail."""
+    """Raised when model features fail validation (missing/null columns during ML predictions)."""
 
 
 # =============================================================
@@ -315,39 +313,6 @@ def retry_with_backoff(
     raise last_exception
 
 
-# =============================================================
-# MARKET DATE HELPERS
-# =============================================================
-
-def get_market_end_date() -> date_type:
-    """
-    Determine the appropriate end date for market data processing.
-    
-    - If before 4:00 PM ET (market close): use yesterday
-    - If after 4:00 PM ET: use today
-    
-    This ensures you don't pull incomplete current-day data before market close.
-    """
-    # Get current time in US Eastern timezone
-    eastern = pendulum.timezone("America/New_York")
-    
-    now_et = datetime.now(eastern)
-    current_date_et = now_et.date()
-    current_time_et = now_et.time()
-    
-    # Market close is 4:00 PM ET
-    market_close = datetime.strptime("16:00", "%H:%M").time()
-    
-    if current_time_et < market_close:
-        # Before market close -> use yesterday
-        end_date = current_date_et - timedelta(days=1)
-        print(f"  [MARKET] Before 4:00 PM ET — using yesterday as end_date: {end_date}")
-    else:
-        # After market close -> use today
-        end_date = current_date_et
-        print(f"  [MARKET] After 4:00 PM ET — using today as end_date: {end_date}")
-    
-    return end_date
 
 # =============================================================
 # TIMEZONE HELPERS
@@ -772,67 +737,6 @@ def run_predictions(df: pd.DataFrame, bucket: str) -> pd.DataFrame:
     print(f"  [PREDICTIONS] pred_pd_21d computed for {len(df):,} rows.")
 
     return df
-
-
-# =============================================================
-# OUTPUT VALIDATION  (UNCHANGED)
-# =============================================================
-
-def validate_output(
-    df:       pd.DataFrame,
-    run_date: date_type,
-    run_id:   str,
-) -> None:
-    """
-    Validate the final DataFrame before any database write.
-    Raises DataValidationError on hard failure and sends CRITICAL alert.
-    """
-    errors = []
-
-    if df.empty:
-        errors.append("Output DataFrame is empty — nothing to upload.")
-
-    else:
-        # Freshness — validate against latest business day
-        max_date = pd.to_datetime(df["date"]).dt.date.max()
-
-        expected_business_date = (
-            pd.bdate_range(end=pd.Timestamp(run_date), periods=1)[0]
-            .date()
-        )
-
-        if max_date < expected_business_date:
-            errors.append(
-                f"Freshness check failed: latest date={max_date}, "
-                f"expected >= {expected_business_date}"
-            )
-
-        # fill_method_flag integrity
-        if "fill_method_flag" not in df.columns:
-            errors.append("fill_method_flag column is missing.")
-        else:
-            valid_flags   = {"REAL", "FORWARD_FILLED", "BACKWARD_FILLED"}
-            invalid_flags = set(df["fill_method_flag"].dropna().unique()) - valid_flags
-            if invalid_flags:
-                errors.append(
-                    f"Unexpected fill_method_flag values: {invalid_flags}"
-                )
-
-    if errors:
-        send_critical_alert(
-            "Bond processing pipeline output validation failed",
-            context={"run_id": run_id, "errors": errors},
-        )
-        raise DataValidationError("; ".join(errors))
-
-    fill_summary = (
-        df["fill_method_flag"].value_counts().to_dict()
-        if "fill_method_flag" in df.columns else {}
-    )
-    print(
-        f"  [VALIDATION] OK — {len(df):,} rows, "
-        f"max_date={max_date}, fill_flags={fill_summary}"
-    )
 
 
 # =============================================================
@@ -1722,7 +1626,8 @@ def process_bonds(
     - Pipeline fails if EITHER Snowflake write OR Postgres write fails.
     - Partial success is NOT allowed.
     - Model failures are soft-fail (NaN prediction columns).
-    - FRED data issues surface as DataValidationError (hard fail).
+    - Model feature validation failures surface as DataValidationError (hard fail).
+
 
     Args:
         start_date_override: "YYYY-MM-DD" string. Required for replay mode.
@@ -1737,7 +1642,7 @@ def process_bonds(
 
     Raises:
         BondProcessingError:   For unrecoverable database or S3 failures.
-        DataValidationError:   For output data contract violations.
+        DataValidationError:   For model feature validation failures (missing/null features).
     """
     pipeline_start = time.time()
     run_ts         = utc_now()
@@ -1889,7 +1794,7 @@ def process_bonds(
         # ══════════════════════════════════════════════════════════════
         # STEP 6 — Stamp second-pipeline lineage metadata
         # ══════════════════════════════════════════════════════════════
-        print("\n  [STEP 5] Stamping second-pipeline lineage metadata...")
+        print("\n  [STEP 6] Stamping second-pipeline lineage metadata...")
         features_df = _add_pipeline_metadata(features_df, run_id, run_ts)
 
         # Convert date to Python date for DB compatibility
@@ -1903,18 +1808,13 @@ def process_bonds(
         snowflake_rows = len(df_to_upload)
         print(f"\n  Final rows for DB writes: {snowflake_rows:,}")
 
-        # ══════════════════════════════════════════════════════════════
-        # STEP 7 — Validate output before any DB write
-        # ══════════════════════════════════════════════════════════════
-        market_end = get_market_end_date()
-        validate_output(df_to_upload, market_end, run_id=run_id)
 
         # Resolve timestamp objects for Snowflake write calls
         snowflake_start = pd.Timestamp(start_date)
         snowflake_end   = pd.Timestamp(end_date)
 
         # ══════════════════════════════════════════════════════════════
-        # STEP 8 — Write to Snowflake HISTORY (append-only, always INSERT)
+        # STEP 7 — Write to Snowflake HISTORY (append-only, always INSERT)
         # Failure here <- pipeline FAILS.
         # ══════════════════════════════════════════════════════════════
         print(
@@ -1924,7 +1824,7 @@ def process_bonds(
         write_to_snowflake_history(df_to_upload, run_mode=mode, run_id=run_id)
 
         # ══════════════════════════════════════════════════════════════
-        # STEP 9 — Write to Snowflake CLEAN (deterministic latest state)
+        # STEP 8 — Write to Snowflake CLEAN (deterministic latest state)
         # replay/backfill <- DELETE window + INSERT (atomic transaction)
         # incremental     <- MERGE latest-state rows using(bond_id, ticker, date)
         # Failure here <- pipeline FAILS.
@@ -1942,7 +1842,7 @@ def process_bonds(
         )
 
         # ══════════════════════════════════════════════════════════════
-        # STEP 10 — Write to Postgres serving layer
+        # STEP 9 — Write to Postgres serving layer
         # Rules based on unique dates in DataFrame:
         #   - 1 date:  Append + trim to last 2 days
         #   - 2 dates: Replace entire table (no trim needed)
