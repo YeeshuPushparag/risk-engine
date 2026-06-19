@@ -387,32 +387,23 @@ def atomic_write_parquet_to_s3(df: pd.DataFrame, bucket: str, key: str) -> None:
 # Check if Timestamp is Within FX Market Hours
 # =============================================================
 def is_within_market_hours(timestamp) -> bool:
-    """
-    FX: Sunday 5 PM ET to Friday 5 PM ET
-    No "today" check - spans multiple days
-    """
     if isinstance(timestamp, str):
         dt = pendulum.parse(timestamp)
     else:
         dt = pendulum.instance(timestamp)
     
-    # Sunday = 6, Monday = 0, ..., Friday = 5, Saturday = 6
+    # Convert to ET
+    dt = dt.in_timezone("America/New_York")
+    
     weekday = dt.weekday()
     hour = dt.hour
     
-    # Sunday: valid only after 5 PM
     if weekday == 6:
         return hour >= 17
-    
-    # Monday - Thursday: valid all day
     if 0 <= weekday <= 3:
         return True
-    
-    # Friday: valid only before 5 PM
     if weekday == 4:
         return hour < 17
-    
-    # Saturday: not valid
     return False
 
 # =============================================================

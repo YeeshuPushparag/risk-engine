@@ -397,11 +397,12 @@ def is_within_market_hours(timestamp) -> bool:
     else:
         dt = pendulum.instance(timestamp)
     
-    # Check if it's today
+    # Convert to ET
+    dt = dt.in_timezone("America/New_York")
+    
     if dt.date() != _TODAY:
         return False
     
-    # Check if it's within market hours (9:30 AM to 3:59 PM)
     market_start = dt.start_of('day').add(hours=9, minutes=30)
     market_end = dt.start_of('day').add(hours=16, minutes=0)
     
