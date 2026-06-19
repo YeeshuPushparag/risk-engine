@@ -1488,7 +1488,7 @@ def process_batch(
     log("INFO", "ROW_LOOP_START")
     for i, (_, row) in enumerate(pdf.iterrows(), start=1):
         if IS_BACKFILL and i % 1000 == 0:
-        log("INFO", f"PROGRESS {i}/{len(pdf)}")
+            log("INFO", f"PROGRESS {i}/{len(pdf)}")
         try:
             ticker = row["ticker"]
 
