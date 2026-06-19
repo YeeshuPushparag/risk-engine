@@ -16,11 +16,11 @@ Three mutually exclusive run modes, selected via RUN_MODE environment variable:
   run_mode=backfill — consume from backfill Kafka topic (equity_stream_backfill)
   run_mode=replay   — read historical raw parquet from S3, no Kafka consumption
 
-Replay source selection (replay mode only), selected via REPLAY_MODE:
+Replay source selection (replay mode only), selected via REPLAY_PATH:
 
-  replay_mode=s3    — replay historical backfill raw files:
+  replay_path=backfill    — replay historical backfill raw files:
                         kafka_raw/equity/backfill/
-  replay_mode=kafka — replay historical live raw files:
+  replay_path=live — replay historical live raw files:
                         kafka_raw/equity/live/
 
 Processed output paths (writes, partitioned by date and hour)
@@ -58,11 +58,11 @@ DLQ paths (writes, partitioned by day)
 
 Raw Kafka storage paths (for replay source)
 --------------------------------------------
-  Backfill raw (replay_mode=s3 reads from here):
+  Backfill raw (replay_path=backfill reads from here):
       s3://risk-platform-pushparag-analytics/kafka_raw/equity/backfill/
           year=YYYY/month=MM/day=DD/hour=HH/batch_<batch_id>.parquet
 
-  Live raw (replay_mode=kafka reads from here):
+  Live raw (replay_path=live reads from here):
       s3://risk-platform-pushparag-analytics/kafka_raw/equity/live/
           year=YYYY/month=MM/day=DD/hour=HH/batch_<batch_id>.parquet
 
@@ -100,8 +100,8 @@ State rebuild policy
 
 Lineage on every output row
 ----------------------------
-  kafka_offset           — exact offset in source partition
-  kafka_partition        — source partition
+  offset           — exact offset in source partition
+  partition        — source partition
   producer_pipeline_name — value from event envelope
   consumer_pipeline_name — "equity_stream_consumer"
   pipeline_run_id        — UUID per batch (constant within one batch)
@@ -177,9 +177,8 @@ CONFIG: dict = {
     # Run mode — "live" | "backfill" | "replay"
     "run_mode":    os.getenv("RUN_MODE", "live").lower(),
 
-    # Replay source — "s3" (backfill raw) | "kafka" (live raw)
     # Only consulted when run_mode == "replay".
-    "replay_mode": os.getenv("REPLAY_MODE", "kafka").lower(),
+    "replay_path": os.getenv("REPLAY_PATH", "live").lower(),
 
     # Replay date/hour filter (replay mode only)
     "replay_date": os.getenv("REPLAY_DATE", ""),   # "YYYY-MM-DD"
@@ -314,10 +313,10 @@ def _replay_raw_prefix() -> str:
     """
     Return the S3 raw-data prefix for replay source selection.
 
-    replay_mode=s3    -> kafka_raw/equity/backfill/  (historical backfill data)
-    replay_mode=kafka -> kafka_raw/equity/live/      (historical live data)
+    replay_path=backfill    -> kafka_raw/equity/backfill/  (historical backfill data)
+    replay_path=live -> kafka_raw/equity/live/      (historical live data)
     """
-    if CONFIG["replay_mode"] == "s3":
+    if CONFIG["replay_path"] == "backfill":
         return CONFIG["raw_replay_backfill_prefix"]
     return CONFIG["raw_replay_live_prefix"]
 
@@ -916,8 +915,9 @@ def rebuild_state_from_s3() -> None:
     for hour in sorted(hours_to_scan):
         hour_prefix = f"{today_prefix}hour={hour:02d}/"
         try:
-            latest_files = get_latest_file_per_partition(CONFIG["write_bucket"], hour_prefix)
-            all_keys.extend(latest_files)
+            #  Loads ALL files in the hour
+            all_files = list_s3_files_with_prefix(CONFIG["write_bucket"], hour_prefix)
+            all_keys.extend(all_files)
         except Exception as exc:
             log("WARNING", "State rebuild: failed to list S3 prefix",
                 {"prefix": hour_prefix, "error": str(exc)})
@@ -1226,13 +1226,14 @@ def save_to_parquet(df: pd.DataFrame, batch_id: str) -> None:
     
     # Group by date and hour, writing each group to its own partitioned file
     for (date, hour), group in df.groupby(['_partition_date', '_partition_hour']):
-        # Generate unique filename using current timestamp (YYYYMMDD_HHMMSS_milliseconds)
-        # This ensures each run creates unique filenames, avoiding S3 overwrite conflicts
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]  # Remove last 3 digits of microseconds
+        # Derive batch_id from the group (all rows in this hour have same batch_id)
+        batch_id = group.iloc[0]["batch_id"]
+        
+        consumer_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]
         key = (
             f"{output_prefix}/"
             f"date={date}/hour={hour}/"
-            f"batch_{timestamp}.parquet"
+            f"batch_{batch_id}_{consumer_timestamp}.parquet"
         )
         
         # Drop temporary columns before writing
@@ -1332,10 +1333,10 @@ def add_lineage(
     Stamp lineage fields onto an output row dict.
     All required lineage fields are set here; values are constant
     within a batch (pipeline_run_id, processing_timestamp) or per-row
-    (kafka_offset, kafka_partition, producer_pipeline_name).
+    (offset, partition, producer_pipeline_name).
 
     run_mode is always set from CONFIG["run_mode"] directly —
-    "live", "backfill", or "replay" — never derived from replay_mode.
+    "live", "backfill", or "replay" — never derived from replay_path.
     """
     row_dict["consumer_pipeline_name"] = CONFIG["consumer_pipeline_name"]
     row_dict["pipeline_run_id"]        = pipeline_run_id
@@ -1387,7 +1388,6 @@ def process_batch(
       Failed rows are collected in dlq_buffer and written once at end.
       Successful rows are never rolled back by a subsequent row's failure.
     """
-    log("INFO", f"ENTER process_batch batch={batch_id}")  # <-- ADD THIS
     pipeline_run_id      = str(uuid.uuid4())
     processing_timestamp = pendulum.now("America/New_York").to_iso8601_string()
     metrics              = make_batch_metrics()
@@ -1402,10 +1402,9 @@ def process_batch(
             log("INFO", "Empty batch received",
                 {"batch_id": batch_id, "run_mode": CONFIG["run_mode"]})
             return
-        rows = batch_df.count()  # <-- ADD THIS
-        log("INFO", f"ROWS={rows}")  # <-- ADD THIS
         pdf = batch_df.toPandas()
-        log("INFO", "PANDAS_DONE")  # <-- ADD THIS
+        log("INFO", f"BACKFILL_ROWS={len(pdf)}")
+
     except Exception as exc:
         log("ERROR", "Failed to convert batch to pandas",
             {"batch_id": batch_id, "run_mode": CONFIG["run_mode"], "error": str(exc)})
@@ -1457,8 +1456,8 @@ def process_batch(
                     "ticker":            late_row.get("ticker", ""),
                     "timestamp":         late_row.get("timestamp", ""),
                     "current_time":      current_time.isoformat(),
-                    "kafka_offset":      int(late_row.get("offset", -1)),
-                    "kafka_partition":   int(late_row.get("partition", -1)),
+                    "offset":            int(late_row.get("offset", -1)),
+                    "partition":         int(late_row.get("partition", -1)),
                     "consumer_pipeline": CONFIG["consumer_pipeline_name"],
                     "batch_id":          str(batch_id),
                     "pipeline_run_id":   pipeline_run_id,
@@ -1486,8 +1485,10 @@ def process_batch(
     metrics["events_received"] = len(pdf)
 
     snapshot_rows: list = []
-
-    for _, row in pdf.iterrows():
+    log("INFO", "ROW_LOOP_START")
+    for i, (_, row) in enumerate(pdf.iterrows(), start=1):
+        if IS_BACKFILL and i % 1000 == 0:
+        log("INFO", f"PROGRESS {i}/{len(pdf)}")
         try:
             ticker = row["ticker"]
 
@@ -1533,8 +1534,6 @@ def process_batch(
                 pipeline_run_id      = pipeline_run_id,
                 processing_timestamp = processing_timestamp,
             )
-            row_dict["kafka_offset"]           = int(row["offset"])
-            row_dict["kafka_partition"]        = int(row["partition"])
             row_dict["producer_pipeline_name"] = row["producer_pipeline_name"]
             row_dict["producer_run_id"]        = row["producer_run_id"]
             row_dict["batch_id"]               = row["batch_id"]
@@ -1549,8 +1548,8 @@ def process_batch(
             error_payload = {
                 "error":             str(exc),
                 "ticker":            row.get("ticker", ""),
-                "kafka_offset":      int(row.get("offset", -1)),
-                "kafka_partition":   int(row.get("partition", -1)),
+                "offset":      int(row.get("offset", -1)),
+                "partition":   int(row.get("partition", -1)),
                 "original_event":    row.to_dict(),
                 "failed_at":         pendulum.now("America/New_York").to_iso8601_string(),
                 "consumer_pipeline": CONFIG["consumer_pipeline_name"],
@@ -1559,7 +1558,7 @@ def process_batch(
                 "run_mode":          CONFIG["run_mode"],
             }
             dlq_buffer.append(error_payload)
-
+    log("INFO", "ROW_LOOP_DONE")
     if not snapshot_rows:
         PROM_DLQ_TOTAL.inc(len(dlq_buffer))
         flush_dlq_to_s3(dlq_buffer, str(batch_id))
@@ -1575,17 +1574,16 @@ def process_batch(
 
     snapshot_df = pd.DataFrame(snapshot_rows)
 
+    log("INFO", "ENRICH_START")
     # Enrichment
     snapshot_df = enrich_intraday_with_positions(snapshot_df, positions_df)
     snapshot_df = snapshot_df.where(pd.notnull(snapshot_df), None)
-    log("INFO", "SAVE_START")  # <-- ADD THIS
+    log("INFO", "ENRICH_DONE")
+
+    log("INFO", "SAVE_START")
     # S3 write — mode-specific path; outputs are always isolated
     save_to_parquet(snapshot_df, str(batch_id))
-    log("INFO", "SAVE_DONE")  # <-- ADD THIS
-
-
-    # S3 write — mode-specific path; outputs are always isolated
-    save_to_parquet(snapshot_df, str(batch_id))
+    log("INFO", "SAVE_DONE")
 
     # Redis snapshot — LIVE ONLY
     # Backfill and replay must never overwrite the live snapshot with
@@ -1593,15 +1591,16 @@ def process_batch(
     if IS_LIVE:
         save_latest_snapshot_all_tickers(ticker_buffers, positions_df)
 
+    log("INFO", "DLQ_START")
     # Flush DLQ to mode-specific S3 DLQ path
     PROM_DLQ_TOTAL.inc(len(dlq_buffer))
     flush_dlq_to_s3(dlq_buffer, str(batch_id))
+    log("INFO", "DLQ_DONE")
 
     PROM_LAST_SUCCESS_TIMESTAMP.set(time.time())
     metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
     PROM_DURATION_SECONDS.observe(time.monotonic() - batch_start)
-    log("INFO", f"EXIT process_batch batch={batch_id}")  # <-- ADD THIS
-
+    log("INFO", "PROCESS_BATCH_DONE")
 
 # =============================================================
 # S3 REPLAY  (run_mode = "replay")
@@ -1616,9 +1615,9 @@ def load_s3_replay_partitions(
     Read raw event parquet files from S3 and process them through the same
     pipeline as the Kafka stream. Used when run_mode = "replay".
 
-    Replay source (controlled by replay_mode):
-      replay_mode=s3    -> kafka_raw/equity/backfill/  (historical backfill raw)
-      replay_mode=kafka -> kafka_raw/equity/live/      (historical live raw)
+    Replay source (controlled by replay_path):
+      replay_path=backfill    -> kafka_raw/equity/backfill/  (historical backfill raw)
+      replay_path=live -> kafka_raw/equity/live/      (historical live raw)
 
     Output isolation:
       All output is written to equity/data/replay/ — never mixed with live
@@ -1635,11 +1634,11 @@ def load_s3_replay_partitions(
       DISABLED during replay. Historical events are always older than the
       late-event threshold by wall clock.
 
-    Path pattern (replay_mode=s3, backfill raw):
+    Path pattern (replay_path=backfill, backfill raw):
         s3://risk-platform-pushparag-analytics/kafka_raw/equity/backfill/
             year=Y/month=MM/day=DD/<optional hour>/batch_*.parquet
 
-    Path pattern (replay_mode=kafka, live raw):
+    Path pattern (replay_path=live, live raw):
         s3://risk-platform-pushparag-analytics/kafka_raw/equity/live/
             year=Y/month=MM/day=DD/<optional hour>/batch_*.parquet
 
@@ -1679,7 +1678,7 @@ def load_s3_replay_partitions(
     log("INFO", "Starting S3 replay",
         {"date":          date_str,
          "hour":          hour_str,
-         "replay_mode":   CONFIG["replay_mode"],
+         "replay_path":   CONFIG["replay_path"],
          "prefix":        prefix,
          "output_prefix": CONFIG["output_prefix_replay"]})
 
@@ -1743,13 +1742,13 @@ def load_s3_replay_partitions(
     _push_metrics()
 
     send_alert(
-        f"EQUITY REPLAY COMPLETE: {date_str} | replay_mode={CONFIG['replay_mode']} "
+        f"EQUITY REPLAY COMPLETE: {date_str} | replay_path={CONFIG['replay_path']} "
         f"| {len(keys)} files | {round(replay_duration, 3)}s"
     )
 
     log("INFO", "S3 replay complete",
         {"date":            date_str,
-         "replay_mode":     CONFIG["replay_mode"],
+         "replay_path":     CONFIG["replay_path"],
          "files_processed": len(keys),
          "duration_s":      round(replay_duration, 3)})
 
@@ -1811,7 +1810,7 @@ if __name__ == "__main__":
 
     log("INFO", "Consumer starting",
         {"run_mode":    CONFIG["run_mode"],
-         "replay_mode": CONFIG["replay_mode"],
+         "replay_path": CONFIG["replay_path"],
          "run_id":      run_id})
 
     # Start /metrics HTTP server (background thread — live mode only)
@@ -1825,11 +1824,11 @@ if __name__ == "__main__":
         # ── REPLAY MODE ──────────────────────────────────────────────
         # Reads raw S3 parquet — no Kafka consumption.
         # State rebuild is NEVER called; buffers warm from replay records.
-        # Replay source: replay_mode=s3 -> backfill raw, replay_mode=kafka -> live raw
+        # Replay source: replay_path=backfill -> backfill raw, replay_path=live -> live raw
         log("INFO", "Starting replay — state rebuild skipped (replay mode)",
             {"replay_date": CONFIG["replay_date"],
              "replay_hour": CONFIG["replay_hour"],
-             "replay_mode": CONFIG["replay_mode"]})
+             "replay_path": CONFIG["replay_path"]})
 
         load_s3_replay_partitions(
             date_str     = CONFIG["replay_date"],
@@ -1990,3 +1989,8 @@ if __name__ == "__main__":
                 _push_metrics()
             except Exception:
                 pass
+ 
+            # Sleep 10 minutes after backfill completes before exiting
+            log("INFO", "Backfill complete - waiting 10 minutes before final exit")
+            time.sleep(600)  # 10 minutes = 600 seconds
+            log("INFO", "Exiting Backfill consumer")

@@ -381,6 +381,40 @@ def atomic_write_parquet_to_s3(df: pd.DataFrame, bucket: str, key: str) -> None:
         except Exception:
             pass
 
+
+
+# =============================================================
+# Check if Timestamp is Within FX Market Hours
+# =============================================================
+def is_within_market_hours(timestamp) -> bool:
+    """
+    FX: Sunday 5 PM ET to Friday 5 PM ET
+    No "today" check - spans multiple days
+    """
+    if isinstance(timestamp, str):
+        dt = pendulum.parse(timestamp)
+    else:
+        dt = pendulum.instance(timestamp)
+    
+    # Sunday = 6, Monday = 0, ..., Friday = 5, Saturday = 6
+    weekday = dt.weekday()
+    hour = dt.hour
+    
+    # Sunday: valid only after 5 PM
+    if weekday == 6:
+        return hour >= 17
+    
+    # Monday - Thursday: valid all day
+    if 0 <= weekday <= 3:
+        return True
+    
+    # Friday: valid only before 5 PM
+    if weekday == 4:
+        return hour < 17
+    
+    # Saturday: not valid
+    return False
+
 # =============================================================
 # KAFKA PRODUCER
 # =============================================================
@@ -629,9 +663,11 @@ def _extract_events_from_df(
     Each pair's last valid bar becomes one event in live mode. For backfill,
     every bar in the date becomes a separate event.
     """
+    is_backfill = CONFIG["backfill_mode"]
     symbol_map = {pair + "=X": pair for pair in pairs}
     events: List[dict] = []
-
+    skipped_outside_market = 0 
+    
     for symbol, pair in symbol_map.items():
         try:
             # Check if pair exists in response
@@ -674,6 +710,14 @@ def _extract_events_from_df(
             for row in bars:
                 ts = row.name
 
+                # ===== ADD THIS FILTER ONLY IN LIVE MODE =====
+                if not is_backfill:
+                    if not is_within_market_hours(ts):
+                        skipped_outside_market += 1
+                        log("DEBUG", "Skipping FX data outside market hours",
+                            {"pair": pair, "timestamp": ts.isoformat(), "batch_id": batch_id})
+                        continue
+                # ===== END FILTER =====
                 # FX validation: close must be positive; high >= low
                 if pd.isna(row["Close"]) or row["Close"] <= 0:
                     fetch_metrics["invalid_pairs"].append(pair)
@@ -726,6 +770,14 @@ def _extract_events_from_df(
                 "error": f"FX pair processing failed: {str(exc)}",
                 "stage": "yfinance_processing_error",
             })
+
+    # Log market hours filtering
+    if not is_backfill:
+        if skipped_outside_market > 0:
+            log("INFO", "Skipped FX data outside market hours",
+                {"batch_id": batch_id, 
+                "skipped_count": skipped_outside_market,
+                "kept_events": len(events)})
 
     # Log fetch health
     if fetch_metrics["missing_pairs"]:
@@ -1122,7 +1174,7 @@ def run_live(producer_run_id: str, producer: KafkaProducer) -> None:
             )
             break
 
-        batch_id          = str(uuid.uuid4())
+        batch_id          = datetime.now().strftime('%Y%m%d_%H%M%S')
         source_fetch_time = pendulum.now("America/New_York").to_iso8601_string()
         metrics           = make_batch_metrics()
         dlq_buffer:  list = []
@@ -1298,7 +1350,7 @@ def run_backfill(producer_run_id: str, producer: KafkaProducer) -> None:
 
     for target_date in dates:
         # Single batch_id for ALL events on this date (used for Kafka lineage)
-        batch_id    = str(uuid.uuid4())
+        batch_id    = datetime.now().strftime('%Y%m%d_%H%M%S')
         dlq_buffer: list = []
         metrics     = make_batch_metrics()
         cycle_start = time.monotonic()
@@ -1370,28 +1422,13 @@ def run_backfill(producer_run_id: str, producer: KafkaProducer) -> None:
                         tzinfo=pendulum.timezone("America/New_York"),
                     )
 
-                    events_by_minute = {}
-
-                    for event in hour_events:
-                        event_time = datetime.fromisoformat(event["event_time"])
-
-                        minute_key = event_time.strftime("%Y%m%d%H%M")
-
-                        events_by_minute.setdefault(minute_key, []).append(event)
-
-                    for minute_key, minute_events in sorted(events_by_minute.items()):
-
-                        minute_dt = datetime.fromisoformat(
-                            minute_events[0]["event_time"]
-                        )
-
-                        store_raw_events_parquet(
-                            minute_events,              # all FX pairs for one minute
-                            f"{batch_id}_{minute_key}",
-                            producer_run_id,
-                            partition_dt=minute_dt,
-                            source_type="backfill",
-                        )
+                    store_raw_events_parquet(
+                        hour_events,
+                        f"{batch_id}",
+                        producer_run_id,
+                        partition_dt=partition_dt,
+                        source_type="backfill",
+                    )
 
                     log(
                         "INFO",
@@ -1400,7 +1437,7 @@ def run_backfill(producer_run_id: str, producer: KafkaProducer) -> None:
                             "date": str(target_date),
                             "hour": hour,
                             "events": len(hour_events),
-                            "batch_id": f"{batch_id}_h{hour:02d}",
+                            "batch_id": f"{batch_id}",
                         },
                     )
 
@@ -1414,7 +1451,7 @@ def run_backfill(producer_run_id: str, producer: KafkaProducer) -> None:
 
                     combined_payload = {
                         "producer_run_id": producer_run_id,
-                        "batch_id": f"{batch_id}_h{hour:02d}",
+                        "batch_id": f"{batch_id}",
                         "source_fetch_time": hour_events[0]["source_fetch_time"],
                         "producer_pipeline_name": CONFIG["pipeline_name"],
                         "batch_ts": pendulum.now("America/New_York").isoformat(),

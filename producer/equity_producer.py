@@ -95,7 +95,8 @@ from prometheus_client import (
 
 
 
-
+_NOW = pendulum.now("America/New_York")
+_TODAY = _NOW.date()
 
 # =============================================================
 # CONFIG  —  single source of truth.  No magic numbers in code.
@@ -386,6 +387,25 @@ def write_json_to_s3(payload: dict, bucket: str, key: str) -> None:
     except Exception as exc:
         log("ERROR", "JSON S3 write failed",
             {"bucket": bucket, "key": key, "error": str(exc)})
+
+# =============================================================
+# Check if Timestamp is Within Today's Market Hours
+# =============================================================
+def is_within_market_hours(timestamp) -> bool:
+    if isinstance(timestamp, str):
+        dt = pendulum.parse(timestamp)
+    else:
+        dt = pendulum.instance(timestamp)
+    
+    # Check if it's today
+    if dt.date() != _TODAY:
+        return False
+    
+    # Check if it's within market hours (9:30 AM to 3:59 PM)
+    market_start = dt.start_of('day').add(hours=9, minutes=30)
+    market_end = dt.start_of('day').add(hours=16, minutes=0)
+    
+    return market_start <= dt < market_end
 
 # =============================================================
 # LOAD TICKERS  (read-only from equity-bucket)
@@ -859,8 +879,9 @@ def _extract_events_from_df(
     Each ticker's last valid bar becomes one event.  For backfill, every bar
     in the date becomes a separate event (one batch_id per date per call).
     """
+    is_backfill = CONFIG["backfill_mode"]   
     events: List[dict] = []
-
+    skipped_outside_market = 0 
     for ticker in tickers:
         try:
             if ticker not in df.columns.get_level_values(0):
@@ -900,6 +921,17 @@ def _extract_events_from_df(
 
             for row in bars:
                 ts = row.name
+
+                # ===== THIS IS THE NEW FILTER =====
+                if not is_backfill:
+                    if not is_within_market_hours(ts):
+                        skipped_outside_market += 1
+                        log("DEBUG", "Skipping data outside market hours",
+                            {"ticker": ticker, "timestamp": ts.isoformat(), 
+                            "batch_id": batch_id})
+                        continue
+                # ===== END NEW FILTER =====
+
 
                 if pd.isna(row["Close"]) or row["Volume"] <= 0:
                     fetch_metrics["invalid_tickers"].append(ticker)
@@ -944,6 +976,14 @@ def _extract_events_from_df(
                 "error": f"Ticker processing failed: {str(exc)}",
                 "stage": "yfinance_processing_error",
             })
+
+    # Log market hours filtering
+    if not is_backfill:
+        if skipped_outside_market > 0:
+            log("INFO", "Skipped data outside market hours",
+                {"batch_id": batch_id, 
+                "skipped_count": skipped_outside_market,
+                "kept_events": len(events)})
 
     # Log fetch health
     if fetch_metrics["missing_tickers"]:
@@ -1142,7 +1182,7 @@ def run_live(producer_run_id: str, tickers: list[str], producer: KafkaProducer) 
 
             break
 
-        batch_id = str(uuid.uuid4())
+        batch_id = datetime.now().strftime('%Y%m%d_%H%M%S')
         source_fetch_time = pendulum.now("America/New_York").to_iso8601_string()
         metrics           = make_batch_metrics()
         dlq_buffer:  list[dict] = []
@@ -1310,7 +1350,7 @@ def run_backfill(producer_run_id: str, tickers: list[str], producer: KafkaProduc
         },
     )
 
-    batch_id = str(uuid.uuid4())
+    batch_id = datetime.now().strftime('%Y%m%d_%H%M%S')
     dlq_buffer: list[dict] = []
     metrics = make_batch_metrics()
     cycle_start = time.monotonic()
@@ -1356,32 +1396,17 @@ def run_backfill(producer_run_id: str, tickers: list[str], producer: KafkaProduc
                     tzinfo=pendulum.timezone("America/New_York"),
                 )
                 
-                events_by_minute = {}
-
-                for event in hour_events:
-                    event_time = datetime.fromisoformat(event["event_time"])
-
-                    minute_key = event_time.strftime("%Y%m%d%H%M")
-
-                    events_by_minute.setdefault(minute_key, []).append(event)
-
-                for minute_key, minute_events in sorted(events_by_minute.items()):
-
-                    minute_dt = datetime.fromisoformat(
-                        minute_events[0]["event_time"]
-                    )
-
-                    store_raw_events_parquet(
-                        minute_events,   # all tickers for ONE minute
-                        f"{batch_id}_{minute_key}",
-                        producer_run_id,
-                        partition_dt=minute_dt,
-                        source_type="backfill",
-                    )
+                store_raw_events_parquet(
+                    hour_events,
+                    f"{batch_id}",  # Unique batch_id per hour
+                    producer_run_id,
+                    partition_dt=partition_dt,
+                    source_type="backfill",
+                )
                 
                 combined_payload = {
                     "producer_run_id": producer_run_id,
-                    "batch_id": f"{batch_id}_h{hour:02d}",
+                    "batch_id": f"{batch_id}",
                     "source_fetch_time": hour_events[0]["source_fetch_time"],
                     "producer_pipeline_name": CONFIG["pipeline_name"],
                     "batch_ts": pendulum.now("America/New_York").isoformat(),
