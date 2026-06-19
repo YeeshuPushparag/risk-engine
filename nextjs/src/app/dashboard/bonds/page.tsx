@@ -3,14 +3,14 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import TickerSearch from "@/components/TickerSearch";
-import { 
-  ShieldAlert, 
-  TrendingUp, 
-  Activity, 
-  Search, 
-  BarChart3, 
+import {
+  ShieldAlert,
+  TrendingUp,
+  Activity,
+  Search,
+  BarChart3,
   ArrowRight,
-  MoveHorizontal 
+  MoveHorizontal
 } from "lucide-react";
 
 /* ---------------- TYPES ---------------- */
@@ -31,9 +31,21 @@ type BondsOverviewResponse = {
 /* ---------------- FORMATTERS ---------------- */
 const pctRaw = (n?: number | null) => n == null ? "—" : `${n.toFixed(2)}%`;
 const pctDec = (n?: number | null) => n == null ? "—" : `${(n * 100).toFixed(2)}%`;
-const fmt = (n?: number | null) => n == null ? "—" : new Intl.NumberFormat("en-US", {
-  style: "currency", currency: "USD", maximumFractionDigits: 0,
-}).format(n);
+const fmt = (n?: number | null) => {
+  if (n == null) return "—";
+
+  const absN = Math.abs(n);
+  const sign = n < 0 ? "-" : "";
+
+  if (absN >= 1.0e12) return `${sign}$${(absN / 1.0e12).toFixed(2)}T`;
+  if (absN >= 1.0e9) return `${sign}$${(absN / 1.0e9).toFixed(2)}B`;
+  if (absN >= 1.0e6) return `${sign}$${(absN / 1.0e6).toFixed(2)}M`;
+  if (absN >= 1.0e3) return `${sign}$${(absN / 1.0e3).toFixed(2)}K`;
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency", currency: "USD", maximumFractionDigits: 0,
+  }).format(n);
+};
 
 /* ---------------- MAIN PAGE ---------------- */
 export default function BondsMasterPage() {
@@ -57,7 +69,7 @@ export default function BondsMasterPage() {
   const { summary, top_default_risk, top_spreads, top_maturity } = data;
 
   // ---- HUMAN READABLE DATE ----
-  const displayDate = data.date 
+  const displayDate = data.date
     ? new Date(data.date).toDateString().toUpperCase()
     : "N/A";
 
@@ -65,64 +77,64 @@ export default function BondsMasterPage() {
 
   return (
     <main className="min-h-screen bg-[#020617] text-slate-300 p-4 sm:p-6 lg:p-12 space-y-10 selection:bg-indigo-500/30">
-      
-     {/* HEADER SECTION */}
-<header className="space-y-6">
-  <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6">
-    <div className="space-y-4">
-      {/* Title & Icon Group */}
-      <div className="flex items-center gap-4">
-        <div className="bg-indigo-600 text-white p-2.5 rounded-xl shadow-lg shadow-indigo-500/20 border border-indigo-400/30">
-          <ShieldAlert className="w-6 h-6 md:w-8 md:h-8" />
+
+      {/* HEADER SECTION */}
+      <header className="space-y-6">
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6">
+          <div className="space-y-4">
+            {/* Title & Icon Group */}
+            <div className="flex items-center gap-4">
+              <div className="bg-indigo-600 text-white p-2.5 rounded-xl shadow-lg shadow-indigo-500/20 border border-indigo-400/30">
+                <ShieldAlert className="w-6 h-6 md:w-8 md:h-8" />
+              </div>
+              <h1 className="text-4xl sm:text-6xl font-black text-white uppercase italic tracking-[-0.05em] leading-none">
+                Fixed Income
+              </h1>
+            </div>
+
+            {/* NEW METADATA STRIP: Aggregates & Date */}
+            <div className="flex flex-wrap items-center gap-y-2 gap-x-4">
+              {/* Aggregate Status Badge */}
+              <div className="flex items-center gap-2 px-3 py-1 bg-slate-800/50 border border-slate-700 rounded-full">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
+                </span>
+                <span className="text-[10px] font-black text-slate-300 uppercase tracking-wider">
+                  Credit Risk & Bond Aggregates
+                </span>
+              </div>
+
+              {/* Separator Line (Hidden on mobile) */}
+              <div className="hidden sm:block h-4 w-px bg-slate-800" />
+
+              {/* Terminal Date Display */}
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
+                  Terminal Date:
+                </span>
+                <span className="text-xs font-mono font-bold text-indigo-400 bg-indigo-400/10 px-2 py-0.5 rounded">
+                  {displayDate}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Search Box */}
+          <div className="w-full md:w-80 space-y-2">
+            <div className="flex items-center justify-between px-1">
+              <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-2">
+                <Search className="w-3 h-3" /> Quick Bond Access
+              </p>
+              <span className="text-[9px] font-mono text-slate-600">ISIN/CUSIP</span>
+            </div>
+            <TickerSearch ticker_url="bonds" />
+          </div>
         </div>
-        <h1 className="text-4xl sm:text-6xl font-black text-white uppercase italic tracking-[ -0.05em] leading-none">
-          Fixed Income
-        </h1>
-      </div>
-
-      {/* NEW METADATA STRIP: Aggregates & Date */}
-      <div className="flex flex-wrap items-center gap-y-2 gap-x-4">
-        {/* Aggregate Status Badge */}
-        <div className="flex items-center gap-2 px-3 py-1 bg-slate-800/50 border border-slate-700 rounded-full">
-          <span className="relative flex h-2 w-2">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
-          </span>
-          <span className="text-[10px] font-black text-slate-300 uppercase tracking-wider">
-            Credit Risk & Bond Aggregates
-          </span>
-        </div>
-
-        {/* Separator Line (Hidden on mobile) */}
-        <div className="hidden sm:block h-4 w-px bg-slate-800" />
-
-        {/* Terminal Date Display */}
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
-            Terminal Date:
-          </span>
-          <span className="text-xs font-mono font-bold text-indigo-400 bg-indigo-400/10 px-2 py-0.5 rounded">
-            {displayDate}
-          </span>
-        </div>
-      </div>
-    </div>
-
-    {/* Search Box */}
-    <div className="w-full md:w-80 space-y-2">
-      <div className="flex items-center justify-between px-1">
-        <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-2">
-          <Search className="w-3 h-3" /> Quick Bond Access
-        </p>
-        <span className="text-[9px] font-mono text-slate-600">ISIN/CUSIP</span>
-      </div>
-      <TickerSearch ticker_url="bonds" />
-    </div>
-  </div>
-</header>
+      </header>
 
       {/* CORE METRICS GRID */}
-      <section className="grid grid-cols-2 md:grid-cols-7 gap-3 sm:gap-5">
+      <section className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3 sm:gap-5">
         <MetricCard label="Total Bonds" value={summary.bond_count} />
         <MetricCard label="Tickers" value={summary.ticker_count} />
         <MetricCard label="Avg Spread" value={pctRaw(summary.weighted_credit_spread)} />
@@ -134,7 +146,7 @@ export default function BondsMasterPage() {
 
       {/* RISK TABLES SECTION */}
       <div className="grid grid-cols-1 gap-12">
-        
+
         {/* TABLE 1: DEFAULT RISK */}
         <TableWrapper title="Top Default Risk (PD)" icon={<ShieldAlert className="w-4 h-4 text-red-500" />}>
           <table className="w-full text-sm text-left min-w-[650px]">
