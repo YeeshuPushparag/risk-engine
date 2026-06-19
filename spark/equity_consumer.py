@@ -1345,6 +1345,7 @@ def add_lineage(
     row_dict["transformation"]         = CONFIG["transformation"]
     row_dict["record_created_at"]      = processing_timestamp
     row_dict["run_mode"]               = CONFIG["run_mode"]
+    row_dict["batch_id"]               = batch_id
     return row_dict
 
 # =============================================================
@@ -1536,7 +1537,6 @@ def process_batch(
             )
             row_dict["producer_pipeline_name"] = row["producer_pipeline_name"]
             row_dict["producer_run_id"]        = row["producer_run_id"]
-            row_dict["batch_id"]               = row["batch_id"]
             row_dict["source_fetch_time"]      = row["source_fetch_time"]
 
             snapshot_rows.append(row_dict)

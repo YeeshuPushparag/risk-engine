@@ -1531,6 +1531,7 @@ def add_lineage(
     row_dict["record_created_at"]      = processing_timestamp
     row_dict["run_mode"]               = run_mode_label
     row_dict["producer_pipeline_name"] = producer_pipeline
+    row_dict["batch_id"]               = batch_id
     return row_dict
 
 
