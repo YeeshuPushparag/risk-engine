@@ -194,7 +194,7 @@ SCHEMA_HASH: str = hashlib.md5(
 # =============================================================
 # MACRO 
 # =============================================================
-MACRO_BUCKET = "yeeshu-loan-bucket"
+MACRO_BUCKET = "pushpa-loan-bucket"
 MACRO_KEY   = "macro_data.csv"
 
 
@@ -1532,7 +1532,7 @@ def push_pipeline_metrics(
 # =============================================================
 
 def update_fx_pipeline(
-    bucket:              str       = "yeeshu-fx-bucket",
+    bucket:              str       = "pushpa-fx-bucket",
     prefix:              str       = "historical-fx/",
     input_key:           str       = "historical-fx/final_merged.parquet",
     airflow_metadata:    dict      = None,
@@ -1998,7 +1998,7 @@ def update_fx_pipeline(
 
 def replay_fx_from_raw(
     start_date: str,
-    bucket:     str = "yeeshu-fx-bucket",
+    bucket:     str = "pushpa-fx-bucket",
     prefix:     str = "historical-fx/",
 ) -> tuple[pd.DataFrame | None, str]:
     """

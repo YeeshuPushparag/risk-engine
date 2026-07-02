@@ -17,7 +17,7 @@ resource "aws_iam_role" "jenkins_role" {
       {
         Effect = "Allow"
         Principal = {
-          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:user/yeeshu"
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:user/pushparag"
         }
         Action = "sts:AssumeRole"
       }

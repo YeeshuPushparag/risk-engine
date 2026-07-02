@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: 369598751710.dkr.ecr.us-east-1.amazonaws.com/django
+  repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/django
   tag: "7"
   pullPolicy: IfNotPresent
 
@@ -18,5 +18,5 @@ envFrom:
 ingress:
   enabled: true
   host: api.pushparag.online
-  certificateArn: arn:aws:acm:us-east-1:369598751710:certificate/67ead6d7-4c24-4a1e-b976-e7aa9ba4aff4
+  certificateArn: arn:aws:acm:us-east-1:363267429137:certificate/67ead6d7-4c24-4a1e-b976-e7aa9ba4aff4
   groupName: risk-engine

@@ -6,7 +6,7 @@ Reads OHLCV snapshots from yfinance and publishes to Kafka.
 
 Storage rules
 -------------
-READ-ONLY  : s3://yeeshu-equity-bucket   (tickers list only)
+READ-ONLY  : s3://pushpa-equity-bucket   (tickers list only)
 ALL WRITES : s3://risk-platform-pushparag-analytics  (raw events, DLQ)
 
 Storage layout (writes)
@@ -79,6 +79,7 @@ import uuid
 import hashlib
 import os
 import pendulum
+import pandas_market_calendars as mcal
 from datetime import datetime, timedelta, date
 from io import BytesIO, StringIO
 from typing import List, Dict, Tuple, Optional
@@ -97,6 +98,8 @@ from prometheus_client import (
 
 _NOW = pendulum.now("America/New_York")
 _TODAY = _NOW.date()
+NYSE_CALENDAR = mcal.get_calendar("NYSE")
+
 
 # =============================================================
 # CONFIG  —  single source of truth.  No magic numbers in code.
@@ -139,7 +142,7 @@ CONFIG: dict = {
     "backfill_interval":          os.getenv("BACKFILL_INTERVAL", "1m"),
 
     # S3
-    "read_bucket":                "yeeshu-equity-bucket",
+    "read_bucket":                "pushpa-equity-bucket",
     "write_bucket":               "risk-platform-pushparag-analytics",
     "ticker_key":                 "historical-equity/tickers50.csv",
     "raw_event_prefix":           "kafka_raw/equity/",
@@ -387,6 +390,20 @@ def write_json_to_s3(payload: dict, bucket: str, key: str) -> None:
     except Exception as exc:
         log("ERROR", "JSON S3 write failed",
             {"bucket": bucket, "key": key, "error": str(exc)})
+
+# =============================================================
+# Check if It is Market Holiday
+# =============================================================
+def is_market_holiday() -> bool:
+    now = pendulum.now("America/New_York")
+    today = now.date()
+
+    schedule = NYSE_CALENDAR.schedule(
+        start_date=today,
+        end_date=today
+    )
+
+    return schedule.empty
 
 # =============================================================
 # Check if Timestamp is Within Today's Market Hours
@@ -1574,6 +1591,11 @@ def main():
          "mode":            "backfill" if is_backfill else "live",
          "broker":          CONFIG["kafka_broker"],
          "topic":           CONFIG["topic_name"]})
+
+    if not is_backfill and is_market_holiday():
+        log("INFO", "NYSE closed today. Waiting for holiday scaler CronJob.")
+        time.sleep(300)
+        return
 
     # Start /metrics HTTP server (background thread — non-fatal if it fails)
     if not is_backfill:

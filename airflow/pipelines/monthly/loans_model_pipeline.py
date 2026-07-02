@@ -15,7 +15,7 @@ from connections.postgre_conn import get_postgre_conn
 from datetime import datetime, timedelta
 from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 
-S3_BUCKET = "yeeshu-loan-bucket"
+S3_BUCKET = "pushpa-loan-bucket"
 OUTPUT_TABLE = "LOANS"
 HISTORY_TABLE = "LOANS_HISTORY"
 s3 = boto3.client("s3")

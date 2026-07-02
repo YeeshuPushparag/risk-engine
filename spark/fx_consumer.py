@@ -5,7 +5,7 @@ Production-grade Spark Structured Streaming consumer for real-time FX ticks.
 
 Storage rules
 -------------
-READ-ONLY  : s3://yeeshu-fx-bucket                      (FX universe / positions)
+READ-ONLY  : s3://pushpa-fx-bucket                      (FX universe / positions)
 ALL WRITES : s3://risk-platform-pushparag-analytics      (parquet output, DLQ)
 
 Storage layout (writes)
@@ -183,7 +183,7 @@ CONFIG: dict = {
     "replay_end_date":       os.getenv("REPLAY_END_DATE", ""),     # "YYYY-MM-DD"
 
     # S3
-    "read_bucket":           "yeeshu-fx-bucket",
+    "read_bucket":           "pushpa-fx-bucket",
     "write_bucket":          "risk-platform-pushparag-analytics",
     "universe_key":          "historical-fx/final_merged.parquet",
 

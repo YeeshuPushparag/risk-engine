@@ -90,10 +90,10 @@ from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 
 CONFIG: dict = {
     # S3 bucket
-    "s3_bucket": "yeeshu-bond-bucket",
+    "s3_bucket": "pushpa-bond-bucket",
 
     # Macro Data Source
-    "macro_bucket": "yeeshu-loan-bucket",
+    "macro_bucket": "pushpa-loan-bucket",
     "macro_key":    "macro_data.csv",
 
 

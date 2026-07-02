@@ -1,0 +1,35 @@
+{{- range $holiday := .Values.marketHolidays }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: stop-equity-producer-holiday-{{ replace " " "-" $holiday }}
+  namespace: streaming
+  annotations:
+    argocd.argoproj.io/sync-options: Replace=true
+
+spec:
+  schedule: "26 9 {{ $holiday }} *"
+
+  timeZone: "America/New_York"
+
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          nodeSelector:
+            {{- toYaml $.Values.nodeSelector | nindent 12 }}
+
+          restartPolicy: OnFailure
+          serviceAccountName: streaming-sa
+
+          containers:
+            - name: holiday-scaler
+              image: "{{ $.Values.image.kubectl.repository }}:{{ $.Values.image.kubectl.tag }}"
+              imagePullPolicy: {{ $.Values.image.pullPolicy }}
+
+              command:
+                - /bin/sh
+                - -c
+                - kubectl -n streaming scale deployment equity-producer --replicas=0
+{{- end }}

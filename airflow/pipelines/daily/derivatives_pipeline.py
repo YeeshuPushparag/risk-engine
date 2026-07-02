@@ -78,8 +78,8 @@ from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 # ============================================================
 # CONSTANTS
 # ============================================================
-DERIVATIVES_BUCKET = "yeeshu-derivatives-bucket"
-MACRO_BUCKET       = "yeeshu-loan-bucket"
+DERIVATIVES_BUCKET = "pushpa-derivatives-bucket"
+MACRO_BUCKET       = "pushpa-loan-bucket"
 MACRO_KEY          = "macro_data.csv"
 
 s3 = boto3.client("s3")

@@ -1,6 +1,6 @@
 terraform {
   backend "s3" {
-    bucket         = "risk-tf-state-platform-yeeshu"
+    bucket         = "risk-tf-state-platform-pushpa"
     key            = "platform/bootstrap/terraform.tfstate"
     region         = "us-east-1"
     dynamodb_table = "risk-tf-locks"

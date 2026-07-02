@@ -8,7 +8,7 @@ Reads 1-minute OHLC snapshots from yfinance and publishes to Kafka.
 
 Storage rules
 -------------
-READ-ONLY  : s3://yeeshu-fx-bucket       (universe / positions)
+READ-ONLY  : s3://pushpa-fx-bucket       (universe / positions)
 ALL WRITES : s3://risk-platform-pushparag-analytics  (raw events, DLQ)
 
 Storage layout (writes)
@@ -144,7 +144,6 @@ CONFIG: dict = {
     ],
 
     # S3
-    "read_bucket":                "yeeshu-fx-bucket",
     "write_bucket":               "risk-platform-pushparag-analytics",
     "raw_event_prefix":           "kafka_raw/fx/",
     "dlq_prefix_live":            "kafka_dlq/fx/producer/live/",

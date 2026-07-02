@@ -264,7 +264,7 @@ function MetricCard({ label, value }: { label: string; value: string | number })
   return (
     <div className="p-4 sm:p-5 border border-slate-800 rounded-2xl bg-slate-900/40 backdrop-blur-md">
       <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">{label}</p>
-      <p className="text-xl sm:text-2xl font-mono font-bold text-white tracking-tighter">{value}</p>
+      <p className="text-base sm:text-lg lg:text-xl xl:text-2xl font-mono font-bold text-white tracking-tighter">{value}</p>
     </div>
   );
 }

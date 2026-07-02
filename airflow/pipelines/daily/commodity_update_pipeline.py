@@ -1586,7 +1586,7 @@ def push_pipeline_metrics(
 # =============================================================
 
 def update_commodity_pipeline(
-    bucket:              str        = "yeeshu-commodity-bucket",
+    bucket:              str        = "pushpa-commodity-bucket",
     prefix:              str        = "historical-commodity/",
     airflow_metadata:    dict       = None,
     tickers:             list[str]  = None,
@@ -2062,7 +2062,7 @@ def update_commodity_pipeline(
 
 def replay_commodities_from_raw(
     start_date: str,
-    bucket:     str  = "yeeshu-commodity-bucket",
+    bucket:     str  = "pushpa-commodity-bucket",
     prefix:     str  = "historical-commodity/",
     tickers:    list[str] = None,
 ) -> tuple[pd.DataFrame | None, str]:

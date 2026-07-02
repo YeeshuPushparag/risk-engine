@@ -1574,7 +1574,7 @@ def push_pipeline_metrics(
 
 def update_market_features(
     input_filename:      str        = "final_tickers.csv",
-    bucket:              str        = "yeeshu-equity-bucket",
+    bucket:              str        = "pushpa-equity-bucket",
     prefix:              str        = "historical-equity/",
     airflow_metadata:    dict       = None,
     start_date_override: str        = None,   # "YYYY-MM-DD" -> backfill mode
@@ -2050,7 +2050,7 @@ def update_market_features(
 
 def replay_features_from_raw(
     start_date: str,
-    bucket:     str  = "yeeshu-equity-bucket",
+    bucket:     str  = "pushpa-equity-bucket",
     prefix:     str  = "historical-equity/",
 ) -> tuple[pd.DataFrame | None, str]:
     """

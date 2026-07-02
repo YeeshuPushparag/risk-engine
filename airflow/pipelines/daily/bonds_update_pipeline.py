@@ -119,7 +119,7 @@ CONFIG: dict = {
     "window_days": 30,   # market days retained in bonds_features_30d.parquet
 
     # S3 bucket
-    "s3_bucket": "yeeshu-bond-bucket",
+    "s3_bucket": "pushpa-bond-bucket",
 
     # S3 reference files
     "base_bond_key": "synthetic_bond.csv",
@@ -1616,7 +1616,11 @@ def update_bonds_pipeline(
         )
 
         # ── STEP 8 : Compute derived bond columns ────────────────────────
-        daily["market_value"] = daily["bond_price"] * daily["units_outstanding"]
+        daily["market_value"] = (
+            daily["bond_price"] / 100
+            * 1000
+            * daily["units_outstanding"]
+        )
         daily["outstanding_pct"] = np.where(
             daily["units_issued"] > 0,
             (daily["units_outstanding"] / daily["units_issued"]) * 100,

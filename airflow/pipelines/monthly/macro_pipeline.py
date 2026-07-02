@@ -14,7 +14,7 @@ from fredapi import Fred
 # CONFIG
 # ============================================================
 
-S3_BUCKET = "yeeshu-loan-bucket"
+S3_BUCKET = "pushpa-loan-bucket"
 S3_KEY = "macro_data.csv"
 
 s3 = boto3.client("s3")

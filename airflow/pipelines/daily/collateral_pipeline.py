@@ -83,8 +83,8 @@ from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 # ============================================================
 # CONSTANTS
 # ============================================================
-COLLATERAL_BUCKET = "yeeshu-collateral-bucket"
-MACRO_BUCKET      = "yeeshu-loan-bucket"
+COLLATERAL_BUCKET = "pushpa-collateral-bucket"
+MACRO_BUCKET      = "pushpa-loan-bucket"
 MACRO_KEY         = "macro_data.csv"
 
 s3 = boto3.client("s3")

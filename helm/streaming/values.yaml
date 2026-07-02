@@ -2,7 +2,7 @@ namespace: streaming
 
 serviceAccount:
   name: streaming-sa
-  roleArn: arn:aws:iam::369598751710:role/risk-eks-streaming-s3-irsa-role
+  roleArn: arn:aws:iam::363267429137:role/risk-eks-streaming-s3-irsa-role
 
 envFrom:
   secretName: streaming-infra-secret
@@ -11,23 +11,23 @@ image:
   pullPolicy: IfNotPresent
 
   producer:
-    repository: 369598751710.dkr.ecr.us-east-1.amazonaws.com/producer
+    repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/producer
     tag: "23"
 
   spark:
-    repository: 369598751710.dkr.ecr.us-east-1.amazonaws.com/spark
+    repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/spark
     tag: "32"
 
   zookeeper:
-    repository: 369598751710.dkr.ecr.us-east-1.amazonaws.com/zookeeper
+    repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/zookeeper
     tag: "4"
 
   kafka:
-    repository: 369598751710.dkr.ecr.us-east-1.amazonaws.com/kafka
+    repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/kafka
     tag: "4"
 
   kubectl:
-    repository: 369598751710.dkr.ecr.us-east-1.amazonaws.com/kubectl
+    repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/kubectl
     tag: "4"
 
 replicas:
@@ -39,6 +39,19 @@ replicas:
 
   sparkEquity: 0
   sparkFx: 0
+
+marketHolidays:
+  # NYSE holidays for 2026
+  - "1 1"
+  - "1 19"
+  - "2 16"
+  - "4 3"
+  - "5 25"
+  - "6 19"
+  - "7 3"
+  - "9 7"
+  - "11 26"
+  - "12 25"
 
 storageClassName: gp3
 kafkaStorageSize: 10Gi

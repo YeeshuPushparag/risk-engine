@@ -74,8 +74,8 @@ MIN_VaR_99     = 0.01
 MIN_CVaR_95    = 0.007
 MIN_CVaR_99    = 0.015
 
-S3_BUCKET = "yeeshu-equity-bucket"
-MACRO_BUCKET = "yeeshu-loan-bucket"
+S3_BUCKET = "pushpa-equity-bucket"
+MACRO_BUCKET = "pushpa-loan-bucket"
 s3 = boto3.client("s3")
 
 # Snowflake table names — single source of truth for table identifiers

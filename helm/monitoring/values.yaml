@@ -14,7 +14,7 @@ kube-prometheus-stack:
       create: true
       name: prometheus
       annotations:
-        eks.amazonaws.com/role-arn: arn:aws:iam::369598751710:role/risk-eks-prometheus-irsa-role
+        eks.amazonaws.com/role-arn: arn:aws:iam::363267429137:role/risk-eks-prometheus-irsa-role
 
     prometheusSpec:
       retention: 90d
@@ -75,7 +75,7 @@ kube-prometheus-stack:
         alb.ingress.kubernetes.io/scheme: internet-facing
         alb.ingress.kubernetes.io/target-type: ip
         alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
-        alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:369598751710:certificate/67ead6d7-4c24-4a1e-b976-e7aa9ba4aff4
+        alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:363267429137:certificate/67ead6d7-4c24-4a1e-b976-e7aa9ba4aff4
         alb.ingress.kubernetes.io/ssl-redirect: "443"
         alb.ingress.kubernetes.io/group.name: risk-engine
         alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=3600

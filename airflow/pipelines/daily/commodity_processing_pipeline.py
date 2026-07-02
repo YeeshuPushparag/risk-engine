@@ -69,7 +69,7 @@ from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 # =============================================================
 # CONSTANTS
 # =============================================================
-S3_BUCKET = "yeeshu-commodity-bucket"
+S3_BUCKET = "pushpa-commodity-bucket"
 s3 = boto3.client("s3")
 
 BASE_PREFIX    = "historical-commodity/"
@@ -79,7 +79,7 @@ MODEL_PREFIX   = "models/"
 INPUT_COMMOD = ROLLING_PREFIX + "commodities_70d.parquet"
 SYM          = BASE_PREFIX + "unique_tickers_sector.csv"
 
-MACRO_BUCKET   = "yeeshu-loan-bucket"
+MACRO_BUCKET   = "pushpa-loan-bucket"
 MACRO_KEY        = "macro_data.csv"
 
 MODEL_FILE   = MODEL_PREFIX + "commodities_model_vol21_xgb.json"

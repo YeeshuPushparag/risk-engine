@@ -5,7 +5,7 @@ Production-grade Spark Structured Streaming consumer for real-time equity ticks.
 
 Storage rules
 -------------
-READ-ONLY  : s3://yeeshu-equity-bucket                    (static positions)
+READ-ONLY  : s3://pushpa-equity-bucket                    (static positions)
 ALL WRITES : s3://risk-platform-pushparag-analytics        (parquet output, DLQ, snapshots)
 
 Execution modes
@@ -185,7 +185,7 @@ CONFIG: dict = {
     "replay_hour": os.getenv("REPLAY_HOUR", ""),   # "HH" optional
 
     # S3
-    "read_bucket":   "yeeshu-equity-bucket",
+    "read_bucket":   "pushpa-equity-bucket",
     "write_bucket":  "risk-platform-pushparag-analytics",
     "positions_key": "historical-equity/final_merged.parquet",
 

@@ -75,7 +75,7 @@ from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 # =============================================================
 # CONSTANTS
 # =============================================================
-S3_BUCKET = "yeeshu-fx-bucket"
+S3_BUCKET = "pushpa-fx-bucket"
 s3 = boto3.client("s3")
 
 TRADING_DAYS       = 252
