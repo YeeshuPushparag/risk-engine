@@ -10,7 +10,7 @@ import {
   ArrowUpRight, ArrowDownRight, ExternalLink,
   UserCheck, ChevronRight, Search
 } from "lucide-react";
-
+import { MARKET_HOLIDAYS } from "@/lib/marketHolidays";
 /* ---------------- FORMATTERS ---------------- */
 const currencyFormatter = new Intl.NumberFormat("en-US", {
   style: "currency", currency: "USD", maximumFractionDigits: 2,
@@ -42,6 +42,7 @@ const getSeverityClass = (severity: string) => {
   if (s === "high") return "bg-orange-500/10 border-orange-500/40 text-orange-500";
   return "bg-blue-500/10 border-blue-500/40 text-blue-400";
 };
+
 
 /* ---------------- ANIMATION WRAPPER ---------------- */
 function FlashValue({ value, children, className = "" }: any) {
@@ -115,6 +116,7 @@ export default function IntradayEquityOverview() {
   // FX-style change
   const [equityEnabled, setEquityEnabled] = useState<boolean | null>(null);
   const [marketOpen, setMarketOpen] = useState<boolean | null>(null);
+  const [marketHoliday, setMarketHoliday] = useState(false);
   const [wsBaseUrl, setWsBaseUrl] = useState<string | null>(null);
 
   const updateState = (data: any) => {
@@ -126,6 +128,23 @@ export default function IntradayEquityOverview() {
     setTickers(data.top_tickers_agg);
     setManagers(data.top_managers_agg);
   };
+
+  function isMarketHoliday() {
+    const now = new Date();
+
+    const dateParts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(now);
+
+    const year = dateParts.find(p => p.type === "year")!.value;
+    const month = dateParts.find(p => p.type === "month")!.value;
+    const day = dateParts.find(p => p.type === "day")!.value;
+
+    return MARKET_HOLIDAYS.includes(`${year}-${month}-${day}`);
+  }
 
   function isMarketTradingTime() {
     const now = new Date();
@@ -181,11 +200,11 @@ useEffect(() => {
     try {
       const res = await fetch("/api/config");
       const config = await res.json();
-
+      const holiday = isMarketHoliday();
       const open = isMarketTradingTime();
-      const ready = config.forceStream || isMarketReady();
-
-      setMarketOpen(open);
+      const ready = config.forceStream || (!holiday && isMarketReady());
+      setMarketHoliday(holiday);
+      setMarketOpen(open && !holiday);
       setEquityEnabled(ready);
 
       if (!ready) return;
@@ -223,8 +242,10 @@ useEffect(() => {
       <div className="min-h-screen bg-[#020617] flex items-center justify-center p-12 text-center">
         <div className="space-y-4 max-w-md">
           <Clock className="w-12 h-12 text-slate-700 mx-auto" />
-          <h2 className="text-xl font-black text-white uppercase tracking-tight">Market Closed</h2>
-          <p className="text-slate-400 text-sm leading-relaxed">U.S. equity markets operate Mon-Fri, 9:30 AM to 4:00 PM (New York Time).</p>
+          <h2 className="text-xl font-black text-white uppercase tracking-tight"> {marketHoliday ? "Market Holiday" : "Market Closed"}</h2>
+          <p className="text-slate-400 text-sm leading-relaxed">{marketHoliday
+    ? "Market is closed today due to NYSE holiday."
+    : "U.S. equity markets operate Mon-Fri, 9:30 AM to 4:00 PM (New York Time)."}</p>
           <Link href="/dashboard/equity/daily" className="inline-block mt-4 text-blue-500 text-[10px] font-black uppercase tracking-widest border border-blue-500/30 px-6 py-2 rounded-lg hover:bg-blue-500/10 transition">
             ← View Daily Equity Data
           </Link>
