@@ -26,7 +26,7 @@ ingress:
   targetType: ip
   listenPorts: '[{"HTTP":80},{"HTTPS":443}]'
   sslRedirect: "443"
-  certificateArn: arn:aws:acm:us-east-1:363267429137:certificate/67ead6d7-4c24-4a1e-b976-e7aa9ba4aff4
+  certificateArn: arn:aws:acm:us-east-1:363267429137:certificate/96bea5e5-6646-4921-8328-0577cfb4f91d
 
 # Environment injection
 envFrom:

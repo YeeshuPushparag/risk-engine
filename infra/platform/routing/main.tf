@@ -43,6 +43,18 @@ locals {
   name_prefix = "${local.project}-${local.environment}"
 }
 
+locals {
+  acm_records_list = data.terraform_remote_state.compute.outputs.acm_validation_records
+
+  # dedupe by record name (keep first occurrence)
+  acm_records_dedup = {
+    for r in local.acm_records_list :
+    r.resource_record_name => r...
+  }
+}
+
+
+
 # -------------------------
 # Route53 Hosted Zone
 # -------------------------
@@ -124,8 +136,27 @@ resource "aws_lb_listener" "https" {
   }
 }
 
+
+resource "aws_route53_record" "acm_validation" {
+  for_each = local.acm_records_dedup
+
+  zone_id = aws_route53_zone.main.zone_id
+  name    = each.key
+  type    = "CNAME"
+  ttl     = 60
+
+  # take first value from grouped list
+  records = [each.value[0].resource_record_value]
+
+  allow_overwrite = true
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 # -------------------------
-# EKS ALB Lookup (FIXED)
+# EKS ALB Lookup
 # -------------------------
 data "aws_lbs" "all" {}
 

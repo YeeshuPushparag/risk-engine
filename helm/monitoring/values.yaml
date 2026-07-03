@@ -39,7 +39,7 @@ kube-prometheus-stack:
         - job_name: "jenkins-ec2"
           static_configs:
             - targets:
-                - "ip-10-0-1-177.ec2.internal:9100"
+                - "ip-10-0-1-220.ec2.internal:9100"
         - job_name: pushgateway
           static_configs:
             - targets:
@@ -75,7 +75,7 @@ kube-prometheus-stack:
         alb.ingress.kubernetes.io/scheme: internet-facing
         alb.ingress.kubernetes.io/target-type: ip
         alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
-        alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:363267429137:certificate/67ead6d7-4c24-4a1e-b976-e7aa9ba4aff4
+        alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:363267429137:certificate/96bea5e5-6646-4921-8328-0577cfb4f91d
         alb.ingress.kubernetes.io/ssl-redirect: "443"
         alb.ingress.kubernetes.io/group.name: risk-engine
         alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=3600

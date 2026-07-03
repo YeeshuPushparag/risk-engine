@@ -1,13 +1,8 @@
 replicaCount: 1
 
 image:
-<<<<<<< HEAD
   repository: 369598751710.dkr.ecr.us-east-1.amazonaws.com/nextjs
   tag: "21"
-=======
-  repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/nextjs
-  tag: "20"
->>>>>>> e241df6 (migrated to another aws account)
   pullPolicy: IfNotPresent
 
 service:
@@ -22,5 +17,5 @@ envFrom:
 ingress:
   enabled: true
   host: app.pushparag.online
-  certificateArn: arn:aws:acm:us-east-1:363267429137:certificate/67ead6d7-4c24-4a1e-b976-e7aa9ba4aff4
+  certificateArn: arn:aws:acm:us-east-1:363267429137:certificate/96bea5e5-6646-4921-8328-0577cfb4f91d
   groupName: risk-engine
