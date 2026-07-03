@@ -9,16 +9,16 @@ Reads 1-minute OHLC snapshots from yfinance and publishes to Kafka.
 Storage rules
 -------------
 READ-ONLY  : s3://pushpa-fx-bucket       (universe / positions)
-ALL WRITES : s3://risk-platform-pushparag-analytics  (raw events, DLQ)
+ALL WRITES : s3://risk-platform-pushpa-analytics  (raw events, DLQ)
 
 Storage layout (writes)
 -----------------------
 Raw events (parquet, partitioned):
-    s3://risk-platform-pushparag-analytics/kafka_raw/fx/
+    s3://risk-platform-pushpa-analytics/kafka_raw/fx/
         year=Y/month=MM/day=DD/hour=HH/batch_<batch_id>.parquet
 
 DLQ (parquet, partitioned by day):
-    s3://risk-platform-pushparag-analytics/kafka_dlq/fx/mode/
+    s3://risk-platform-pushpa-analytics/kafka_dlq/fx/mode/
         year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
 
 Lineage on every event
@@ -144,7 +144,7 @@ CONFIG: dict = {
     ],
 
     # S3
-    "write_bucket":               "risk-platform-pushparag-analytics",
+    "write_bucket":               "risk-platform-pushpa-analytics",
     "raw_event_prefix":           "kafka_raw/fx/",
     "dlq_prefix_live":            "kafka_dlq/fx/producer/live/",
     "dlq_prefix_backfill":        "kafka_dlq/fx/producer/backfill/",
@@ -492,7 +492,7 @@ def store_raw_events_parquet(
     """
     Persist raw FX events to S3 as parquet for replay and audit.
 
-    Path: s3://risk-platform-pushparag-analytics/kafka_raw/fx/source_type
+    Path: s3://risk-platform-pushpa-analytics/kafka_raw/fx/source_type
               year=Y/month=MM/day=DD/hour=HH/batch_<batch_id>.parquet
 
     Partitions by hour (not just date) because FX markets operate 24/5 and
@@ -574,7 +574,7 @@ def flush_dlq_buffer(
     Write all failed events from the current batch to S3 DLQ in a single
     atomic write. Parquet format for queryability.
 
-    Path: s3://risk-platform-pushparag-analytics/kafka_dlq/fx/mode/
+    Path: s3://risk-platform-pushpa-analytics/kafka_dlq/fx/mode/
               year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
     """
     if not dlq_buffer:

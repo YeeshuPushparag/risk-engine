@@ -6,20 +6,20 @@ Production-grade Spark Structured Streaming consumer for real-time FX ticks.
 Storage rules
 -------------
 READ-ONLY  : s3://pushpa-fx-bucket                      (FX universe / positions)
-ALL WRITES : s3://risk-platform-pushparag-analytics      (parquet output, DLQ)
+ALL WRITES : s3://risk-platform-pushpa-analytics      (parquet output, DLQ)
 
 Storage layout (writes)
 -----------------------
 Processed output — LIVE (parquet, partitioned by date + hour):
-    s3://risk-platform-pushparag-analytics/fx/data/live/
+    s3://risk-platform-pushpa-analytics/fx/data/live/
         date=YYYY-MM-DD/hour=HH/batch_<batch_id>.parquet
 
 Processed output — BACKFILL (parquet, partitioned by date + hour):
-    s3://risk-platform-pushparag-analytics/fx/data/backfill/
+    s3://risk-platform-pushpa-analytics/fx/data/backfill/
         date=YYYY-MM-DD/hour=HH/batch_<batch_id>.parquet
 
 Processed output — REPLAY (parquet, partitioned by date + hour):
-    s3://risk-platform-pushparag-analytics/fx/data/replay/
+    s3://risk-platform-pushpa-analytics/fx/data/replay/
         date=YYYY-MM-DD/hour=HH/batch_<batch_id>.parquet
 
     Each mode writes to its own isolated prefix. Modes never share output paths.
@@ -27,26 +27,26 @@ Processed output — REPLAY (parquet, partitioned by date + hour):
 
 Consumer DLQ (S3, parquet, partitioned by day) — mode-isolated:
     LIVE:
-        s3://risk-platform-pushparag-analytics/fx/dlq/live/
+        s3://risk-platform-pushpa-analytics/fx/dlq/live/
             year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
     BACKFILL:
-        s3://risk-platform-pushparag-analytics/fx/dlq/backfill/
+        s3://risk-platform-pushpa-analytics/fx/dlq/backfill/
             year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
     REPLAY:
-        s3://risk-platform-pushparag-analytics/fx/dlq/replay/
+        s3://risk-platform-pushpa-analytics/fx/dlq/replay/
             year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
 
     DLQ is S3-only. There is NO Kafka DLQ topic.
 
 Raw Kafka storage (for state rebuild and replay source):
     LIVE state rebuild:
-        s3://risk-platform-pushparag-analytics/kafka_raw/fx/live/
+        s3://risk-platform-pushpa-analytics/kafka_raw/fx/live/
             year=YYYY/month=MM/day=DD/hour=HH/batch_<batch_id>.parquet
     REPLAY source (replay_path=backfill — historical backfill raw):
-        s3://risk-platform-pushparag-analytics/kafka_raw/fx/backfill/
+        s3://risk-platform-pushpa-analytics/kafka_raw/fx/backfill/
             year=YYYY/month=MM/day=DD/hour=HH/batch_<batch_id>.parquet
     REPLAY source (replay_path=live — historical live raw):
-        s3://risk-platform-pushparag-analytics/kafka_raw/fx/live/
+        s3://risk-platform-pushpa-analytics/kafka_raw/fx/live/
             year=YYYY/month=MM/day=DD/hour=HH/batch_<batch_id>.parquet
 
 Kafka topics
@@ -184,7 +184,7 @@ CONFIG: dict = {
 
     # S3
     "read_bucket":           "pushpa-fx-bucket",
-    "write_bucket":          "risk-platform-pushparag-analytics",
+    "write_bucket":          "risk-platform-pushpa-analytics",
     "universe_key":          "historical-fx/final_merged.parquet",
 
     # Mode-isolated output prefixes — NEVER mix modes
@@ -208,7 +208,7 @@ CONFIG: dict = {
 
     # Spark checkpoint (live and backfill)
     "checkpoint_dir": (
-        os.getenv("CHECKPOINT_DIR", "s3a://risk-platform-pushparag-analytics")
+        os.getenv("CHECKPOINT_DIR", "s3a://risk-platform-pushpa-analytics")
          + f"/fx/checkpoints/{os.getenv('RUN_MODE', 'live').lower()}"
     ),
 
@@ -1899,10 +1899,10 @@ def load_s3_replay_partitions(
 
     Source path pattern — selected by replay_path:
         replay_path=backfill    (historical backfill raw):
-            s3://risk-platform-pushparag-analytics/kafka_raw/fx/backfill/
+            s3://risk-platform-pushpa-analytics/kafka_raw/fx/backfill/
                 year=Y/month=MM/day=DD/batch_*.parquet
         replay_path=live (historical live raw):
-            s3://risk-platform-pushparag-analytics/kafka_raw/fx/live/
+            s3://risk-platform-pushpa-analytics/kafka_raw/fx/live/
                 year=Y/month=MM/day=DD/batch_*.parquet
 
     Each parquet file is treated as one "batch" for consistency.

@@ -6,7 +6,7 @@ Production-grade Spark Structured Streaming consumer for real-time equity ticks.
 Storage rules
 -------------
 READ-ONLY  : s3://pushpa-equity-bucket                    (static positions)
-ALL WRITES : s3://risk-platform-pushparag-analytics        (parquet output, DLQ, snapshots)
+ALL WRITES : s3://risk-platform-pushpa-analytics        (parquet output, DLQ, snapshots)
 
 Execution modes
 ---------------
@@ -26,15 +26,15 @@ Replay source selection (replay mode only), selected via REPLAY_PATH:
 Processed output paths (writes, partitioned by date and hour)
 --------------------------------------------------------------
   LIVE:
-      s3://risk-platform-pushparag-analytics/equity/data/live/
+      s3://risk-platform-pushpa-analytics/equity/data/live/
           date=YYYY-MM-DD/hour=HH/batch_<batch_id>.parquet
 
   BACKFILL:
-      s3://risk-platform-pushparag-analytics/equity/data/backfill/
+      s3://risk-platform-pushpa-analytics/equity/data/backfill/
           date=YYYY-MM-DD/hour=HH/batch_<batch_id>.parquet
 
   REPLAY:
-      s3://risk-platform-pushparag-analytics/equity/data/replay/
+      s3://risk-platform-pushpa-analytics/equity/data/replay/
           date=YYYY-MM-DD/hour=HH/batch_<batch_id>.parquet
 
   Outputs from different modes are fully isolated and never mixed.
@@ -42,15 +42,15 @@ Processed output paths (writes, partitioned by date and hour)
 DLQ paths (writes, partitioned by day)
 ---------------------------------------
   LIVE:
-      s3://risk-platform-pushparag-analytics/equity/dlq/live/
+      s3://risk-platform-pushpa-analytics/equity/dlq/live/
           year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
 
   BACKFILL:
-      s3://risk-platform-pushparag-analytics/equity/dlq/backfill/
+      s3://risk-platform-pushpa-analytics/equity/dlq/backfill/
           year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
 
   REPLAY:
-      s3://risk-platform-pushparag-analytics/equity/dlq/replay/
+      s3://risk-platform-pushpa-analytics/equity/dlq/replay/
           year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
 
   DLQ records from different modes are never mixed. DLQ is S3-only.
@@ -59,11 +59,11 @@ DLQ paths (writes, partitioned by day)
 Raw Kafka storage paths (for replay source)
 --------------------------------------------
   Backfill raw (replay_path=backfill reads from here):
-      s3://risk-platform-pushparag-analytics/kafka_raw/equity/backfill/
+      s3://risk-platform-pushpa-analytics/kafka_raw/equity/backfill/
           year=YYYY/month=MM/day=DD/hour=HH/batch_<batch_id>.parquet
 
   Live raw (replay_path=live reads from here):
-      s3://risk-platform-pushparag-analytics/kafka_raw/equity/live/
+      s3://risk-platform-pushpa-analytics/kafka_raw/equity/live/
           year=YYYY/month=MM/day=DD/hour=HH/batch_<batch_id>.parquet
 
 Late event handling
@@ -186,7 +186,7 @@ CONFIG: dict = {
 
     # S3
     "read_bucket":   "pushpa-equity-bucket",
-    "write_bucket":  "risk-platform-pushparag-analytics",
+    "write_bucket":  "risk-platform-pushpa-analytics",
     "positions_key": "historical-equity/final_merged.parquet",
 
     # Processed output paths — one per mode, fully isolated
@@ -208,7 +208,7 @@ CONFIG: dict = {
 
     # Spark checkpoint (live and backfill)
     "checkpoint_dir": (
-        os.getenv("CHECKPOINT_DIR", "s3a://risk-platform-pushparag-analytics")
+        os.getenv("CHECKPOINT_DIR", "s3a://risk-platform-pushpa-analytics")
          + f"/equity/checkpoints/{os.getenv('RUN_MODE', 'live').lower()}"
     ),
 
@@ -679,9 +679,9 @@ def flush_dlq_to_s3(
     Called once per batch — not per failed event.
 
     Path:
-      LIVE:     s3://risk-platform-pushparag-analytics/equity/dlq/live/
-      BACKFILL: s3://risk-platform-pushparag-analytics/equity/dlq/backfill/
-      REPLAY:   s3://risk-platform-pushparag-analytics/equity/dlq/replay/
+      LIVE:     s3://risk-platform-pushpa-analytics/equity/dlq/live/
+      BACKFILL: s3://risk-platform-pushpa-analytics/equity/dlq/backfill/
+      REPLAY:   s3://risk-platform-pushpa-analytics/equity/dlq/replay/
           year=Y/month=MM/day=DD/dlq_<batch_id>.parquet
 
     DLQ is S3-only across all modes. Records from different modes are
@@ -1635,11 +1635,11 @@ def load_s3_replay_partitions(
       late-event threshold by wall clock.
 
     Path pattern (replay_path=backfill, backfill raw):
-        s3://risk-platform-pushparag-analytics/kafka_raw/equity/backfill/
+        s3://risk-platform-pushpa-analytics/kafka_raw/equity/backfill/
             year=Y/month=MM/day=DD/<optional hour>/batch_*.parquet
 
     Path pattern (replay_path=live, live raw):
-        s3://risk-platform-pushparag-analytics/kafka_raw/equity/live/
+        s3://risk-platform-pushpa-analytics/kafka_raw/equity/live/
             year=Y/month=MM/day=DD/<optional hour>/batch_*.parquet
 
     Each parquet file is treated as one batch for process_batch consistency.
