@@ -153,6 +153,7 @@ from datetime import datetime, timedelta
 from typing import List
 import requests
 import pendulum
+from kafka import KafkaConsumer
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json, explode
 from pyspark.sql.types import (
@@ -773,6 +774,62 @@ def update_ticker_buffer(ticker: str, row_dict: dict) -> None:
     if len(ticker_buffers[ticker]) > cap:
         overflow = len(ticker_buffers[ticker]) - cap
         ticker_buffers[ticker] = ticker_buffers[ticker][overflow:]
+
+
+# =============================================================
+# WAIT FOR KAFKA TOPIC
+# =============================================================
+def wait_for_topic(timeout_seconds: int = 600) -> None:
+    start = time.time()
+
+    while True:
+        consumer = None
+        try:
+            consumer = KafkaConsumer(
+                bootstrap_servers=CONFIG["kafka_broker"],
+            )
+
+            if CONFIG["topic"] in consumer.topics():
+                log(
+                    "INFO",
+                    "Kafka topic is available",
+                    {"topic": CONFIG["topic"]},
+                )
+                consumer.close()
+                return
+
+        except Exception as exc:
+            log(
+                "WARNING",
+                "Unable to connect to Kafka",
+                {"error": str(exc)},
+            )
+
+        finally:
+            if consumer is not None:
+                consumer.close()
+
+        if time.time() - start >= timeout_seconds:
+            log(
+                "ERROR",
+                "Kafka topic not found within timeout",
+                {
+                    "topic": CONFIG["topic"],
+                    "timeout_seconds": timeout_seconds,
+                },
+            )
+
+            raise RuntimeError(
+                f"Kafka topic '{CONFIG['topic']}' not found after {timeout_seconds} seconds"
+            )
+
+        log(
+            "WARNING",
+            "Kafka topic does not exist yet. Retrying in 10 seconds...",
+            {"topic": CONFIG["topic"]},
+        )
+
+        time.sleep(10)
 
 # =============================================================
 # STATE REBUILD  —  LIVE MODE RECOVERY ONLY
@@ -1853,6 +1910,7 @@ if __name__ == "__main__":
 
         spark = build_spark_session()
         spark.sparkContext.setLogLevel("WARN")
+        wait_for_topic()
 
         if IS_LIVE:   
             raw_df = (
