@@ -21,6 +21,7 @@ interface MarketStatus {
   isOpen: boolean;
   day: string;
   time: string;
+  message: string;
 }
 
 const Feature = ({ text }: { text: string }) => (
@@ -32,6 +33,19 @@ const Feature = ({ text }: { text: string }) => (
 
 /* ---------------- MARKET LOGIC ---------------- */
 
+const MARKET_HOLIDAYS = [
+  "2026-01-01",
+  "2026-01-19",
+  "2026-02-16",
+  "2026-04-03",
+  "2026-05-25",
+  "2026-06-19",
+  "2026-07-03",
+  "2026-09-07",
+  "2026-11-26",
+  "2026-12-25",
+];
+
 const checkMarketOpen = (): MarketStatus => {
   const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
@@ -41,6 +55,8 @@ const checkMarketOpen = (): MarketStatus => {
     weekday: "long",
   });
 
+ 
+
   const parts = formatter.formatToParts(new Date());
   const getValue = (type: string) => parts.find((p) => p.type === type)?.value;
   
@@ -48,17 +64,43 @@ const checkMarketOpen = (): MarketStatus => {
   const hour = parseInt(getValue("hour") ?? "0");
   const minute = parseInt(getValue("minute") ?? "0");
 
+  const dateParts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+
+  const year = dateParts.find((p) => p.type === "year")?.value;
+  const month = dateParts.find((p) => p.type === "month")?.value;
+  const dayOfMonth = dateParts.find((p) => p.type === "day")?.value;
+
+  const today = `${year}-${month}-${dayOfMonth}`;
+
+  const isHoliday = MARKET_HOLIDAYS.includes(today);
+
   const isWeekend = day === "Saturday" || day === "Sunday";
   const currentTimeInMinutes = hour * 60 + minute;
   const openTime = 9 * 60 + 30; // 09:30 AM
   const closeTime = 16 * 60;    // 04:00 PM
 
-  const isOpen = !isWeekend && currentTimeInMinutes >= openTime && currentTimeInMinutes < closeTime;
+  const isOpen =
+  !isWeekend &&
+  !isHoliday &&
+  currentTimeInMinutes >= openTime &&
+  currentTimeInMinutes < closeTime;
   
   return {
     isOpen,
     day,
-    time: `${hour}:${minute < 10 ? "0" + minute : minute} EST`
+    time: `${hour}:${minute < 10 ? "0" + minute : minute} EST`,
+    message: isHoliday
+      ? "Market is closed today due to NYSE holiday"
+      : isWeekend
+        ? "Market is closed today (Weekend)"
+        : isOpen
+          ? "Market is open"
+          : "Market is currently closed",
   };
 };
 
@@ -86,7 +128,8 @@ export default function EquityLandingPage() {
   const [marketStatus, setMarketStatus] = useState<MarketStatus>({ 
     isOpen: false, 
     day: "Detecting...", 
-    time: "00:00 EST" 
+    time: "00:00 EST",
+    message: "Detecting...", 
   });
  const [nextOpenIST, setNextOpenIST] = useState("");
   const [nextCloseIST, setNextCloseIST] = useState("");
@@ -259,7 +302,7 @@ export default function EquityLandingPage() {
                 <div className="p-4 bg-slate-900 rounded-full mb-4 border border-slate-800 shadow-2xl">
                   <Lock className="w-8 h-8 text-red-500" />
                 </div>
-                <h4 className="text-sm font-black text-white uppercase tracking-widest mb-2">Market is Offline</h4>
+                <h4 className="text-sm font-black text-white uppercase tracking-widest mb-2">{marketStatus.message}</h4>
                 <p className="text-[10px] text-slate-500 font-bold uppercase leading-relaxed max-w-[200px]">
                   US Markets are open Mon–Fri <br/> 
                   <span className="text-white">09:30 – 16:00 EST</span>
