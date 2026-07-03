@@ -12,23 +12,23 @@ image:
 
   producer:
     repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/producer
-    tag: "23"
+    tag: "24"
 
   spark:
     repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/spark
-    tag: "32"
+    tag: "33"
 
   zookeeper:
     repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/zookeeper
-    tag: "4"
+    tag: "5"
 
   kafka:
     repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/kafka
-    tag: "4"
+    tag: "5"
 
   kubectl:
     repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/kubectl
-    tag: "4"
+    tag: "5"
 
 replicas:
   zookeeper: 1
