@@ -37,17 +37,61 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            # Required so the Spark driver (running in THIS pod) can set
+            # spark.kubernetes.driver.pod.name correctly. Executor pods
+            # created by the driver use this as their owner reference, so
+            # they are automatically garbage-collected by Kubernetes when
+            # this driver pod terminates — no manual executor cleanup needed.
+            - name: SPARK_DRIVER_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
 
           command: ["/bin/bash", "-lc"]
 
+          # -----------------------------------------------------------
+          # CLUSTER MODE (was: --master local[*])
+          # -----------------------------------------------------------
+          # local[*] never created executors — one JVM did everything on
+          # whatever single node this pod landed on. --master k8s://...
+          # makes this pod's Spark driver dynamically create REAL executor
+          # pods (spark.executor.instances=10) via the Kubernetes API,
+          # using the streaming-sa service account's existing RBAC
+          # (pods/services/configmaps create/delete — see rbac-streaming.tf).
+          #
+          # deploy-mode is intentionally left as the default (client):
+          # the driver stays in THIS long-running Deployment pod, exactly
+          # as today, and only executor pods are created/destroyed
+          # dynamically. This matches the existing RBAC comments
+          # ("Spark Executor Pods", "Driver Service") which assume the
+          # driver already has a stable identity to create executors from.
+          #
+          # spark.executor.instances is STATIC (10), not dynamic allocation
+          # — the cluster-autoscaler (already configured on the streaming
+          # node group, main.tf, max_size=4) handles scaling NODES 1->4 in
+          # response to these 10 executor pods being unschedulable on a
+          # single node; Spark itself just asks for a fixed 10.
+          #
+          # NOTE: .Values.spark.k8sMasterUrl and .Values.spark.executors.*
+          # do not exist in values.yaml yet — these must be added there
+          # before this template will render. Not done in this step.
           args:
             - >
               spark-submit
-              --master local[*]
+              --master {{ .Values.spark.k8sMasterUrl }}
+              --deploy-mode client
+              --conf spark.kubernetes.namespace={{ .Values.namespace }}
+              --conf spark.kubernetes.authenticate.driver.serviceAccountName=streaming-sa
+              --conf spark.kubernetes.container.image={{ .Values.image.spark.repository }}:{{ .Values.image.spark.tag }}
+              --conf spark.kubernetes.driver.pod.name=$(SPARK_DRIVER_POD_NAME)
               --conf spark.driver.host=$(SPARK_LOCAL_IP)
               --conf spark.driver.bindAddress=0.0.0.0
               --conf spark.blockManager.port=7079
               --conf spark.network.timeout=600s
+              --conf spark.executor.instances={{ .Values.spark.executors.backfillReplay }}
+              --conf spark.executor.cores={{ .Values.spark.executorCores }}
+              --conf spark.executor.memory={{ .Values.spark.executorMemory }}
+              --conf spark.kubernetes.executor.podNamePrefix=equity-historical-exec
               --repositories https://repo.maven.apache.org/maven2
               --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.7,org.apache.kafka:kafka-clients:3.5.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.696
               /app/equity_consumer.py

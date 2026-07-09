@@ -28,12 +28,19 @@ resource "aws_eks_node_group" "streaming" {
   scaling_config {
     min_size     = 1
     desired_size = 1
-    max_size     = 1
+    max_size     = 4
   }
 
   labels = {
     role = "streaming"
   }
+
+  tags = {
+    "k8s.io/cluster-autoscaler/enabled" = "true"
+    "k8s.io/cluster-autoscaler/${var.cluster_name}" = "owned"
+    "k8s.io/cluster-autoscaler/node-template/label/role" = "streaming"
+  }
+
   depends_on = [
   kubernetes_config_map_v1.aws_auth
 ]

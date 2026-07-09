@@ -70,3 +70,17 @@ pvc:
     
 nodeSelector:
   role: streaming
+
+
+spark:
+  k8sMasterUrl: k8s://https://kubernetes.default.svc
+
+  executors:
+    live: 1
+    backfillReplay: 10
+
+  executorCores: 1
+  executorMemory: 2g
+
+  driverCores: 1
+  driverMemory: 2g

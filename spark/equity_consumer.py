@@ -155,7 +155,7 @@ import requests
 import pendulum
 from kafka import KafkaConsumer
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, explode
+from pyspark.sql.functions import col, from_json, explode, lit, monotonically_increasing_id
 from pyspark.sql.types import (
     StructType, StructField, StringType, FloatType, ArrayType
 )
@@ -1091,48 +1091,83 @@ def compute_metrics(buffer: list) -> dict:
     """
     Compute intraday rolling metrics from the per-ticker buffer.
     Business logic preserved exactly from original pipeline.
+
+    PERFORMANCE NOTE (backfill/replay fast path):
+    If a buffer entry already carries a precomputed integer "_ts_epoch_min"
+    key (set by run_ticker_engine() for backfill/replay), that integer is
+    used directly for window comparisons instead of re-parsing the
+    timestamp string with pd.to_datetime() on every call. This avoids
+    millions of redundant scalar datetime parses when this function is
+    called once per row against a buffer of up to max_buffer_per_ticker
+    entries.
+
+    LIVE MODE IS UNAFFECTED: live-mode buffer dicts never contain
+    "_ts_epoch_min", so the exact original pd.to_datetime()-based logic
+    below still runs for live mode, unchanged, with identical output.
     """
     closes  = np.array([r["close"]  for r in buffer])
     highs   = np.array([r["high"]   for r in buffer])  # noqa: F841
     lows    = np.array([r["low"]    for r in buffer])   # noqa: F841
     volumes = np.array([r["volume"] for r in buffer])   # noqa: F841
 
-    # Time-based windows
-    try:
-        latest_ts = pd.to_datetime(
-            buffer[-1].get("timestamp"), utc=True, errors="coerce"
-        ).floor("min")
-
-        if pd.isna(latest_ts):
-            latest_ts = None
-    except Exception:
-        latest_ts = None
+    use_fast_path = "_ts_epoch_min" in buffer[-1]
 
     window_1m  = []
     window_5m  = []
     window_15m = []
 
-    if latest_ts is not None:
-        cutoff_1m  = latest_ts - pd.Timedelta(minutes=1)
-        cutoff_5m  = latest_ts - pd.Timedelta(minutes=5)
-        cutoff_15m = latest_ts - pd.Timedelta(minutes=15)
+    if use_fast_path:
+        # ── FAST PATH: integer minute comparisons, no datetime parsing ──
+        latest_min = buffer[-1]["_ts_epoch_min"]
 
-        for r in buffer:
-            ts = pd.to_datetime(
-                r.get("timestamp"), utc=True, errors="coerce"
+        if latest_min is not None:
+            cutoff_1m  = latest_min - 1
+            cutoff_5m  = latest_min - 5
+            cutoff_15m = latest_min - 15
+
+            for r in buffer:
+                m = r.get("_ts_epoch_min")
+                if m is None:
+                    continue
+                if m >= cutoff_1m:
+                    window_1m.append(r)
+                if m >= cutoff_5m:
+                    window_5m.append(r)
+                if m >= cutoff_15m:
+                    window_15m.append(r)
+    else:
+        # ── ORIGINAL PATH (live mode) — untouched, byte-for-byte ────────
+        try:
+            latest_ts = pd.to_datetime(
+                buffer[-1].get("timestamp"), utc=True, errors="coerce"
             ).floor("min")
 
-            if pd.isna(ts):
-                continue
+            if pd.isna(latest_ts):
+                latest_ts = None
+        except Exception:
+            latest_ts = None
 
-            if ts >= cutoff_1m:
-                window_1m.append(r)
+        if latest_ts is not None:
+            cutoff_1m  = latest_ts - pd.Timedelta(minutes=1)
+            cutoff_5m  = latest_ts - pd.Timedelta(minutes=5)
+            cutoff_15m = latest_ts - pd.Timedelta(minutes=15)
 
-            if ts >= cutoff_5m:
-                window_5m.append(r)
+            for r in buffer:
+                ts = pd.to_datetime(
+                    r.get("timestamp"), utc=True, errors="coerce"
+                ).floor("min")
 
-            if ts >= cutoff_15m:
-                window_15m.append(r)
+                if pd.isna(ts):
+                    continue
+
+                if ts >= cutoff_1m:
+                    window_1m.append(r)
+
+                if ts >= cutoff_5m:
+                    window_5m.append(r)
+
+                if ts >= cutoff_15m:
+                    window_15m.append(r)
 
     metrics = {
         "return_1m":         np.nan,
@@ -1208,6 +1243,191 @@ def compute_metrics(buffer: list) -> dict:
             metrics["volume_burst"] = float(vols[-1] / avg_volume)
 
     return metrics
+
+
+# Canonical list of columns run_ticker_engine() adds on top of whatever
+# input columns it receives. Used in two places that must stay in sync:
+#   1. run_ticker_engine()'s own reindex step (guarantees these columns
+#      always exist in its output, even if a whole ticker-partition has
+#      zero valid rows).
+#   2. build_backfill_output_schema() (tells Spark's applyInPandas what
+#      schema to expect back from run_ticker_engine()).
+BACKFILL_ENGINE_EXTRA_COLUMNS = [
+    "prev_open", "prev_high", "prev_low", "prev_close", "prev_volume",
+    "return_1m", "return_5m", "vol_15m", "range_pct_1m",
+    "rolling_vwap_5m", "close_diff", "rolling_high_5m",
+    "rolling_low_5m", "trend_slope_5m", "breakout_strength",
+    "volume_burst", "_engine_error",
+]
+
+
+def update_ticker_buffer_local(buffer: list, row: dict, cap: int) -> None:
+    """
+    Same trim semantics as update_ticker_buffer(), but operates on a
+    plain local list instead of the global ticker_buffers dict.
+
+    Used ONLY by run_ticker_engine() below, for backfill/replay.
+    Each backfill/replay ticker-partition gets its own fresh local buffer
+    that starts empty and is discarded when the partition finishes —
+    this matches the documented behavior that backfill/replay buffers
+    always start empty (no state carried between runs or across tickers).
+    """
+    buffer.append(row)
+    if len(buffer) > cap:
+        del buffer[: len(buffer) - cap]
+
+
+def run_ticker_engine(pdf: pd.DataFrame) -> pd.DataFrame:
+    """
+    BACKFILL/REPLAY ONLY. Never called from live mode.
+
+    Given all rows for ONE ticker (Spark guarantees this via
+    groupBy("ticker").applyInPandas(run_ticker_engine, ...)), rebuilds
+    that ticker's rolling buffer from scratch and calls the exact same
+    compute_metrics() function that live mode uses — same business
+    logic, same output columns, no Spark SQL window functions involved.
+
+    This function runs on a Spark executor. Spark's groupBy() only
+    controls WHICH rows land together (all rows for this ticker) and
+    WHERE they run (in parallel with every other ticker's partition) —
+    it does not compute any metric itself.
+
+    Two performance changes vs. the live-mode row loop, both purely
+    mechanical (no business-logic change):
+      1. pdf.to_dict("records") instead of pdf.iterrows() — avoids
+         constructing a pandas Series per row.
+      2. Timestamps are parsed ONCE for the whole ticker (vectorized),
+         producing an integer "_ts_epoch_min" column, instead of once
+         per buffer element per row. compute_metrics() then uses its
+         fast integer path automatically because that key is present.
+    """
+    pdf = pdf.sort_values("timestamp").reset_index(drop=True)
+    
+    # Get ticker name for logging (will be the same for all rows in this partition)
+    ticker = pdf.iloc[0]["ticker"] if len(pdf) > 0 else "unknown"
+    total_rows = len(pdf)
+    
+    # ── ADD THIS: Start logging for replay mode ──────────────────────
+    if IS_REPLAY and total_rows > 0:
+        log("INFO", "REPLAY_TICKER_START", {
+            "ticker": ticker,
+            "total_rows": total_rows,
+            "run_mode": CONFIG["run_mode"]
+        })
+
+    # Vectorized timestamp parse — ONE call for this ticker's entire
+    # history, instead of one scalar pd.to_datetime() call per buffer
+    # element per row (which is what made the original loop slow).
+    parsed = pd.to_datetime(pdf["timestamp"], utc=True, errors="coerce")
+    epoch_min = (parsed.view("int64") // 60_000_000_000)
+    epoch_min = epoch_min.where(parsed.notna(), other=None)
+    pdf = pdf.assign(_ts_epoch_min=epoch_min)
+
+    cap = CONFIG["max_buffer_per_ticker"]
+    buffer: list = []
+    out_rows: list = []
+
+    for i, row in enumerate(pdf.to_dict("records"), start=1):
+        # ── ADD THIS: Progress logging every 1000 rows for replay ────
+        if IS_REPLAY and total_rows > 0 and i % 1000 == 0:
+            pct_complete = round((i / total_rows) * 100, 1)
+            log("INFO", "REPLAY_PROGRESS", {
+                "ticker": ticker,
+                "processed": i,
+                "total": total_rows,
+                "pct": pct_complete,
+                "run_mode": CONFIG["run_mode"]
+            })
+
+        ticker = row.get("ticker")
+
+        # Same validation as the live-mode loop — invalid rows are
+        # skipped here and handled by the caller's DLQ pass separately
+        # (see run_ticker_engine's caller in process_batch).
+        try:
+            if row["close"] <= 0 or row["high"] < row["low"]:
+                row["_engine_error"] = (
+                    f"Invalid market data: close={row['close']}, "
+                    f"high={row['high']}, low={row['low']}"
+                )
+                out_rows.append(row)
+                continue
+        except Exception as exc:
+            row["_engine_error"] = f"Validation error: {exc}"
+            out_rows.append(row)
+            continue
+
+        update_ticker_buffer_local(buffer, row, cap)
+
+        if len(buffer) >= 2:
+            prev = buffer[-2]
+            row.update({
+                "prev_open":   prev.get("open",   np.nan),
+                "prev_high":   prev.get("high",   np.nan),
+                "prev_low":    prev.get("low",    np.nan),
+                "prev_close":  prev.get("close",  np.nan),
+                "prev_volume": prev.get("volume", np.nan),
+            })
+        else:
+            row.update({
+                "prev_open":   np.nan,
+                "prev_high":   np.nan,
+                "prev_low":    np.nan,
+                "prev_close":  np.nan,
+                "prev_volume": np.nan,
+            })
+
+        # ── SAME FUNCTION live mode uses — no duplicated business logic ──
+        computed = compute_metrics(buffer)
+        row.update(computed)
+        row["_engine_error"] = None
+
+        out_rows.append(row)
+
+    # ── ADD THIS: Completion logging for replay mode ──────────────────
+    if IS_REPLAY and total_rows > 0:
+        valid_rows = len([r for r in out_rows if r.get("_engine_error") is None])
+        error_rows = len([r for r in out_rows if r.get("_engine_error") is not None])
+        log("INFO", "REPLAY_TICKER_DONE", {
+            "ticker": ticker,
+            "total_rows": total_rows,
+            "valid_rows": valid_rows,
+            "error_rows": error_rows,
+            "output_rows": len(out_rows),
+            "run_mode": CONFIG["run_mode"]
+        })
+
+    result = pd.DataFrame(out_rows)
+    if "_ts_epoch_min" in result.columns:
+        result = result.drop(columns=["_ts_epoch_min"])
+
+    # Guarantee every expected output column exists, even if this
+    # ticker-partition had zero valid rows (all _engine_error) or was
+    # otherwise empty. Spark's applyInPandas requires the returned
+    # DataFrame to match the declared schema exactly — missing columns
+    # would raise at the executor rather than degrade gracefully.
+    for col in BACKFILL_ENGINE_EXTRA_COLUMNS:
+        if col not in result.columns:
+            result[col] = None
+
+    return result
+
+
+def build_backfill_output_schema(input_schema: StructType) -> StructType:
+    """
+    Build the Spark schema required by applyInPandas() for
+    run_ticker_engine()'s output: the input batch's columns plus
+    BACKFILL_ENGINE_EXTRA_COLUMNS. Derived from the input schema rather
+    than hardcoded so it stays correct if upstream Kafka/S3 columns
+    change. BACKFILL/REPLAY ONLY — live mode never calls this.
+    """
+    fields = list(input_schema.fields)
+    existing_names = {f.name for f in fields}
+    for name in BACKFILL_ENGINE_EXTRA_COLUMNS:
+        if name not in existing_names:
+            dtype = StringType() if name == "_engine_error" else FloatType()
+            fields.append(StructField(name, dtype, True))
+    return StructType(fields)
 
 
 def enrich_intraday_with_positions(
@@ -1405,6 +1625,132 @@ def add_lineage(
     row_dict["batch_id"]               = batch_id
     return row_dict
 
+
+# =============================================================
+# BACKFILL / REPLAY — TRUE SPARK-DISTRIBUTED PATH
+# =============================================================
+#
+# BACKFILL/REPLAY ONLY. Live mode never calls this function, and this
+# function never touches ticker_buffers (the live-mode global dict) or
+# any live-only behavior (Redis, late-event filtering, state rebuild).
+#
+# WHY THIS IS A SEPARATE FUNCTION, NOT A BRANCH INSIDE process_batch's
+# EXISTING BODY:
+# process_batch()'s live-mode path calls batch_df.toPandas() almost
+# immediately — that's fine for live mode, where each micro-batch is
+# small. For backfill/replay, doing that FIRST and only distributing
+# work afterward (an earlier version of this fix did exactly that) means
+# everything still collapses onto the driver before any distribution
+# happens — the 10 executor pods requested in the deploy YAML would sit
+# idle. This function is called BEFORE any toPandas(), directly on the
+# Spark DataFrame, so groupBy("ticker").applyInPandas(...) actually ships
+# each ticker's full row history to a separate executor task.
+#
+# NO SPARK SQL WINDOW FUNCTIONS ARE USED HERE. groupBy("ticker") is a
+# shuffle/routing key only — all rolling-window math still happens
+# inside compute_metrics(), the exact same function live mode calls,
+# executed via run_ticker_engine() as plain Python/Pandas on whichever
+# executor that ticker's partition lands on.
+def process_batch_backfill_replay(
+    batch_df,
+    batch_id,
+    positions_df:          pd.DataFrame,
+    pipeline_run_id:       str,
+    processing_timestamp:  str,
+    batch_start:           float,
+    metrics:               dict,
+    dlq_buffer:            list,
+) -> None:
+    # Step 1: Deduplicate by (ticker, timestamp) — at the Spark level,
+    # not pandas, so this itself is distributed rather than driver-local.
+    original_count = batch_df.count()
+    deduped_df     = batch_df.dropDuplicates(["ticker", "timestamp"])
+    deduped_count  = deduped_df.count()
+    metrics["events_deduped"] = original_count - deduped_count
+    PROM_DEDUPED_EVENTS.set(metrics["events_deduped"])
+
+    if deduped_count == 0:
+        log("INFO", "All events in batch were duplicates",
+            {"batch_id": batch_id, "original_count": original_count})
+        metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
+        log_batch_metrics(str(batch_id), metrics)
+        return
+
+    metrics["events_received"] = deduped_count
+
+    log("INFO", "BACKFILL_REPLAY_ENGINE_START",
+        {"batch_id": str(batch_id), "rows": deduped_count,
+         "run_mode": CONFIG["run_mode"]})
+
+    output_schema = build_backfill_output_schema(deduped_df.schema)
+
+    # THE ACTUAL DISTRIBUTION. This is what spark.executor.instances=10
+    # (set in the deploy YAML for backfill/replay) is actually used for —
+    # Spark ships each ticker's full row history to a separate executor
+    # task, in parallel, and run_ticker_engine() runs there unchanged.
+    result_sdf = deduped_df.groupBy("ticker").applyInPandas(
+        run_ticker_engine, schema=output_schema
+    )
+
+    # ONE collection to the driver — on the already-computed, much
+    # smaller output (post-dedup, post-validation), not the raw input.
+    result_pdf = result_sdf.toPandas()
+
+    snapshot_rows: list = []
+    for row_dict in result_pdf.to_dict("records"):
+        if row_dict.get("_engine_error"):
+            metrics["events_failed"] += 1
+            dlq_buffer.append({
+                "error":             row_dict["_engine_error"],
+                "ticker":            row_dict.get("ticker", ""),
+                "offset":            int(row_dict.get("offset", -1) or -1),
+                "partition":         int(row_dict.get("partition", -1) or -1),
+                "original_event":    row_dict,
+                "failed_at":         pendulum.now("America/New_York").to_iso8601_string(),
+                "consumer_pipeline": CONFIG["consumer_pipeline_name"],
+                "batch_id":          str(batch_id),
+                "pipeline_run_id":   pipeline_run_id,
+                "run_mode":          CONFIG["run_mode"],
+            })
+            continue
+
+        row_dict.pop("_engine_error", None)
+        row_dict = add_lineage(
+            row_dict             = row_dict,
+            batch_id             = str(batch_id),
+            pipeline_run_id      = pipeline_run_id,
+            processing_timestamp = processing_timestamp,
+        )
+        snapshot_rows.append(row_dict)
+        metrics["events_processed"] += 1
+        PROM_RECORDS_PROCESSED_TOTAL.inc()
+
+    PROM_FAILED_EVENTS.set(metrics["events_failed"])
+    log("INFO", "BACKFILL_REPLAY_ENGINE_DONE",
+        {"batch_id": str(batch_id), "rows_out": len(snapshot_rows)})
+
+    if not snapshot_rows:
+        PROM_DLQ_TOTAL.inc(len(dlq_buffer))
+        flush_dlq_to_s3(dlq_buffer, str(batch_id))
+        metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
+        log_batch_metrics(str(batch_id), metrics)
+        return
+
+    snapshot_df = pd.DataFrame(snapshot_rows)
+    snapshot_df = enrich_intraday_with_positions(snapshot_df, positions_df)
+    snapshot_df = snapshot_df.where(pd.notnull(snapshot_df), None)
+
+    save_to_parquet(snapshot_df, str(batch_id))
+
+    PROM_DLQ_TOTAL.inc(len(dlq_buffer))
+    flush_dlq_to_s3(dlq_buffer, str(batch_id))
+
+    PROM_LAST_SUCCESS_TIMESTAMP.set(time.time())
+    metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
+    PROM_DURATION_SECONDS.observe(time.monotonic() - batch_start)
+    log_batch_metrics(str(batch_id), metrics)
+
+
 # =============================================================
 # PROCESS BATCH  (core consumer logic — all modes share this)
 # =============================================================
@@ -1454,6 +1800,30 @@ def process_batch(
 
     PROM_BATCHES_TOTAL.inc()
 
+    # =========================================================
+    # BACKFILL / REPLAY — branch out to the Spark-distributed path
+    # =========================================================
+    # Must happen BEFORE toPandas() below — that conversion is what
+    # collapses everything onto the driver. Live mode (IS_LIVE) never
+    # enters this branch. process_batch_backfill_replay() does its own
+    # count()==0 / deduped-count checks internally (not identical wording
+    # to live mode's, since this is new code — but it does not touch or
+    # alter live mode's own check below in any way).
+    if IS_BACKFILL or IS_REPLAY:
+        process_batch_backfill_replay(
+            batch_df              = batch_df,
+            batch_id              = batch_id,
+            positions_df          = positions_df,
+            pipeline_run_id       = pipeline_run_id,
+            processing_timestamp  = processing_timestamp,
+            batch_start           = batch_start,
+            metrics               = metrics,
+            dlq_buffer            = dlq_buffer,
+        )
+        return
+
+    # ── LIVE MODE — everything below is the ORIGINAL code, byte for
+    # byte unchanged, including this exact try/except block. ──────────
     # Convert Spark batch to pandas
     try:
         if batch_df.count() == 0:
@@ -1664,13 +2034,31 @@ def process_batch(
 # =============================================================
 
 def load_s3_replay_partitions(
+    spark,
     date_str:     str,
     hour_str:     str = "",
     positions_df: pd.DataFrame = None,
 ) -> None:
     """
-    Read raw event parquet files from S3 and process them through the same
-    pipeline as the Kafka stream. Used when run_mode = "replay".
+    Read raw event parquet files from S3 via Spark and process them
+    through the same pipeline as the Kafka stream. Used when
+    run_mode = "replay".
+
+    CHANGED FROM EARLIER VERSION: previously this function read each
+    file individually via boto3 + pd.read_parquet(), then called
+    process_batch() once per file, sequentially, wrapped in a
+    _MockBatch shim — meaning replay never used Spark at all, and the
+    per-file loop was itself a sequential bottleneck (paid once per S3
+    file, regardless of how few rows each file has).
+
+    Now: ALL matched files are read in ONE spark.read.parquet(*paths)
+    call (Spark parallelizes the actual reads across executors), and
+    process_batch() is called ONCE on the resulting Spark DataFrame.
+    Because IS_REPLAY is True, process_batch() routes internally to
+    process_batch_backfill_replay(), which distributes the per-ticker
+    metric computation across executors via
+    groupBy("ticker").applyInPandas(run_ticker_engine, ...) — this is
+    what spark.executor.instances=10 (deploy YAML) is actually used for.
 
     Replay source (controlled by replay_path):
       replay_path=backfill    -> kafka_raw/equity/backfill/  (historical backfill raw)
@@ -1684,27 +2072,18 @@ def load_s3_replay_partitions(
       NEVER touched during replay. process_batch enforces this via IS_REPLAY.
 
     State rebuild:
-      NEVER called during replay. ticker_buffers start empty and warm
-      naturally from the replay records themselves, in chronological order.
+      NEVER called during replay. ticker_buffers (live mode's global dict)
+      is never touched by replay at all now — run_ticker_engine() uses
+      its own local per-partition buffer, which always starts empty.
 
     Late event filtering:
-      DISABLED during replay. Historical events are always older than the
-      late-event threshold by wall clock.
-
-    Path pattern (replay_path=backfill, backfill raw):
-        s3://risk-platform-pushpa-analytics/kafka_raw/equity/backfill/
-            year=Y/month=MM/day=DD/<optional hour>/batch_*.parquet
-
-    Path pattern (replay_path=live, live raw):
-        s3://risk-platform-pushpa-analytics/kafka_raw/equity/live/
-            year=Y/month=MM/day=DD/<optional hour>/batch_*.parquet
-
-    Each parquet file is treated as one batch for process_batch consistency.
+      DISABLED during replay — process_batch_backfill_replay() never
+      applies it (that logic lives only in live mode's code path).
 
     Prometheus replay metrics:
         replay_jobs_total              — once per invocation
-        replay_records_processed_total — per-record across all partitions
-        replay_failures_total          — per failed partition
+        replay_records_processed_total — total rows across all files
+        replay_failures_total          — on read or processing failure
         replay_duration_seconds        — total wall-clock time
     """
     if not date_str:
@@ -1739,60 +2118,65 @@ def load_s3_replay_partitions(
          "prefix":        prefix,
          "output_prefix": CONFIG["output_prefix_replay"]})
 
-    # Get ONLY the latest file per partition
+    # S3 listing is metadata-only (cheap regardless of file count) — still
+    # done via boto3, unchanged. Only the actual DATA read changes below.
     keys = get_latest_file_per_partition(CONFIG["write_bucket"], prefix)
     if not keys:
         log("WARNING", "No raw parquet files found for replay",
             {"prefix": prefix})
         return
 
-    if not keys:
-        log("WARNING", "No raw parquet files found for replay",
-            {"prefix": prefix})
+    log("INFO", "Replay partitions found", {"count": len(keys)})
+
+    s3_paths = [f"s3a://{CONFIG['write_bucket']}/{k}" for k in keys]
+
+    try:
+        batch_df = spark.read.parquet(*s3_paths)
+    except Exception as exc:
+        log("ERROR", "Failed to read replay parquet files via Spark",
+            {"error": str(exc), "file_count": len(s3_paths)})
+        PROM_REPLAY_FAILURES_TOTAL.inc()
         return
 
-    log("INFO", "Replay partitions found", {"count": len(keys)})
-    
-    s3 = get_s3()
-    for batch_num, key in enumerate(keys, start=1):
-        try:
-            obj = s3.get_object(Bucket=CONFIG["write_bucket"], Key=key)
-            pdf = pd.read_parquet(BytesIO(obj["Body"].read()))
+    # Synthesize Kafka metadata columns if absent — same fields as before,
+    # now added via Spark withColumn (distributed) instead of pandas.
+    existing_cols = set(batch_df.columns)
+    if "topic" not in existing_cols:
+        batch_df = batch_df.withColumn("topic", lit(CONFIG["topic"]))
+    if "partition" not in existing_cols:
+        batch_df = batch_df.withColumn("partition", lit(0))
+    if "offset" not in existing_cols:
+        # synthetic, non-colliding — same intent as the old
+        # "batch_num * 10000" scheme, expressed at the Spark level
+        batch_df = batch_df.withColumn(
+            "offset", (monotonically_increasing_id() + 1) * 10000
+        )
 
-            if pdf.empty:
-                continue
+    try:
+        total_rows = batch_df.count()
+    except Exception as exc:
+        log("ERROR", "Failed to count replay batch", {"error": str(exc)})
+        PROM_REPLAY_FAILURES_TOTAL.inc()
+        return
 
-            # Synthesize Kafka metadata columns if absent (S3 raw files
-            # may not carry Kafka partition/offset metadata)
-            if "topic" not in pdf.columns:
-                pdf["topic"] = CONFIG["topic"]
-            if "partition" not in pdf.columns:
-                pdf["partition"] = 0
-            if "offset" not in pdf.columns:
-                pdf["offset"] = batch_num * 10000  # synthetic, non-colliding
+    if total_rows == 0:
+        log("INFO", "Replay dataset is empty after read", {"prefix": prefix})
+        return
 
-            log("INFO", "Replaying S3 partition",
-                {"key": key, "rows": len(pdf), "batch_num": batch_num})
+    log("INFO", "Replaying S3 partitions via Spark",
+        {"files": len(keys), "rows": total_rows})
+    PROM_REPLAY_RECORDS_TOTAL.inc(total_rows)
 
-            PROM_REPLAY_RECORDS_TOTAL.inc(len(pdf))
-
-            class _MockBatch:
-                """Thin wrapper so replay reuses process_batch unchanged."""
-                def __init__(self, df):
-                    self._df = df
-                def count(self):
-                    return len(self._df)
-                def toPandas(self):
-                    return self._df.copy()
-
-            # IS_REPLAY=True: writes to equity/data/replay/, skips Redis,
-            # routes DLQ to equity/dlq/replay/, skips late-event filtering
-            process_batch(_MockBatch(pdf), batch_num, positions_df)
-
-        except Exception as exc:
-            log("ERROR", "S3 replay partition failed",
-                {"key": key, "error": str(exc)})
-            PROM_REPLAY_FAILURES_TOTAL.inc()
+    # ONE call. IS_REPLAY routes process_batch() to
+    # process_batch_backfill_replay(), which does its own
+    # groupBy("ticker").applyInPandas(...) distribution across the
+    # entire dataset at once — this also removes the old sequential
+    # per-file Python loop entirely.
+    try:
+        process_batch(batch_df, 1, positions_df)
+    except Exception as exc:
+        log("ERROR", "S3 replay batch failed", {"error": str(exc)})
+        PROM_REPLAY_FAILURES_TOTAL.inc()
 
     replay_duration = time.monotonic() - replay_start
     PROM_REPLAY_DURATION_SECONDS.observe(replay_duration)
@@ -1877,9 +2261,22 @@ if __name__ == "__main__":
     # Load static positions once at startup (read-only bucket)
     positions_df = load_positions()
 
+    # SparkSession is now built ONCE here, before the mode branch, so
+    # replay mode can use it too (previously replay never created a
+    # SparkSession at all — it read via boto3/pandas only, meaning
+    # spark.executor.instances configured in the deploy YAML was never
+    # actually used). Live/backfill's own spark.readStream setup below
+    # is unaffected — it's the same build_spark_session() call, just
+    # relocated earlier instead of duplicated.
+    spark = build_spark_session()
+    spark.sparkContext.setLogLevel("WARN")
+
     if IS_REPLAY:
         # ── REPLAY MODE ──────────────────────────────────────────────
-        # Reads raw S3 parquet — no Kafka consumption.
+        # Reads raw S3 parquet via Spark (spark.read.parquet, inside
+        # load_s3_replay_partitions) — no Kafka consumption, no
+        # streaming. Spark here is used purely as a distributed batch
+        # compute engine for run_ticker_engine() via applyInPandas.
         # State rebuild is NEVER called; buffers warm from replay records.
         # Replay source: replay_path=backfill -> backfill raw, replay_path=live -> live raw
         log("INFO", "Starting replay — state rebuild skipped (replay mode)",
@@ -1888,6 +2285,7 @@ if __name__ == "__main__":
              "replay_path": CONFIG["replay_path"]})
 
         load_s3_replay_partitions(
+            spark        = spark,
             date_str     = CONFIG["replay_date"],
             hour_str     = CONFIG["replay_hour"],
             positions_df = positions_df,
@@ -1907,9 +2305,6 @@ if __name__ == "__main__":
         # pre-market startups, and weekends. Previous trading session data
         # is NEVER loaded.
         rebuild_state_from_s3()
-
-        spark = build_spark_session()
-        spark.sparkContext.setLogLevel("WARN")
         wait_for_topic()
 
         if IS_LIVE:   

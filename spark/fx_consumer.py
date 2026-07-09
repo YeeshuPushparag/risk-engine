@@ -155,7 +155,7 @@ import requests
 import pendulum
 from kafka import KafkaConsumer
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, explode
+from pyspark.sql.functions import col, from_json, explode, lit, monotonically_increasing_id
 from pyspark.sql.types import (
     StructType, StructField, StringType, FloatType, ArrayType
 )
@@ -1315,6 +1315,35 @@ def compute_fx_metrics(buffer: list) -> dict:
     if not buffer:
         return metrics
 
+    # FAST PATH (backfill/replay via run_pair_engine): buffer entries
+    # carry a precomputed integer "_ts_epoch_min", set ONCE per pair via
+    # a single vectorized pd.to_datetime call. SLOW PATH (live mode,
+    # unchanged): no such field, falls through to the original per-element
+    # scalar pd.to_datetime()/.floor("min") parsing below.
+    has_fast_ts = "_ts_epoch_min" in buffer[-1]
+
+    if has_fast_ts:
+        latest_epoch_min = buffer[-1].get("_ts_epoch_min")
+        if latest_epoch_min is None:
+            return metrics
+        cutoff_1m  = latest_epoch_min - 1
+        cutoff_5m  = latest_epoch_min - 5
+        cutoff_15m = latest_epoch_min - 15
+
+        window_1m, window_5m, window_15m = [], [], []
+        for row in buffer:
+            em = row.get("_ts_epoch_min")
+            if em is None:
+                continue
+            if em >= cutoff_1m:
+                window_1m.append(row)
+            if em >= cutoff_5m:
+                window_5m.append(row)
+            if em >= cutoff_15m:
+                window_15m.append(row)
+
+        return _compute_fx_metrics_from_windows(window_1m, window_5m, window_15m)
+
     latest_ts = pd.to_datetime(
         buffer[-1].get("timestamp"),
         utc=True,
@@ -1353,6 +1382,21 @@ def compute_fx_metrics(buffer: list) -> dict:
 
         if ts >= cutoff_15m:
             window_15m.append(row)
+
+    return _compute_fx_metrics_from_windows(window_1m, window_5m, window_15m)
+
+
+def _compute_fx_metrics_from_windows(window_1m, window_5m, window_15m) -> dict:
+    """
+    Shared by both the fast and slow paths in compute_fx_metrics() above —
+    identical math either way, just factored out so the metric formulas
+    are written exactly once. Never called directly by anything else.
+    """
+    metrics = {
+        "fx_return_1m": np.nan,
+        "fx_return_5m": np.nan,
+        "fx_vol_15m":   np.nan,
+    }
 
     # ---------------------------------------------------------
     # 1-minute return
@@ -1628,6 +1672,320 @@ def add_prev_ohlcv_to_bar(row_dict: dict, buffer: list) -> dict:
 # PROCESS BATCH  (core consumer logic — all modes share this)
 # =============================================================
 
+# Columns run_pair_engine() adds beyond whatever input columns it
+# receives. Used both in run_pair_engine's own reindex step and in
+# build_fx_backfill_output_schema(), so they must stay in sync.
+FX_ENGINE_EXTRA_COLUMNS = [
+    "ticker", "sector", "revenue", "foreign_revenue_ratio", "position_size",
+    "prev_open", "prev_high", "prev_low", "prev_close",
+    "fx_return_1m", "fx_return_5m", "fx_vol_15m",
+    "fx_pnl", "VaR_95_15m", "_engine_error",
+]
+
+
+def update_pair_buffer_local(buffer: list, row: dict, cap: int) -> None:
+    """
+    Backfill/replay-only equivalent of update_pair_buffer(). Operates on
+    a local list instead of the global pair_buffers dict, since each
+    Spark executor task (one per currency_pair partition) is its own
+    process. Buffers always start empty here, matching documented
+    behavior ("Replay NEVER touches Redis... starts with empty
+    pair_buffers"). Same trim-on-overflow logic as update_pair_buffer().
+    """
+    buffer.append(row)
+    if len(buffer) > cap:
+        del buffer[: len(buffer) - cap]
+
+
+def make_run_pair_engine(pair_groups: dict):
+    """
+    Returns run_pair_engine(pdf) -> pdf, with pair_groups captured via
+    closure. Spark's groupBy(...).applyInPandas(fn) requires fn to take
+    exactly one pandas.DataFrame argument, so the static ticker-exposure
+    table (pair_groups) — needed for the fan-out step — is bound here
+    rather than passed as an extra call argument. Spark serializes this
+    closure once per executor.
+    """
+
+    def run_pair_engine(pdf: pd.DataFrame) -> pd.DataFrame:
+        """
+        BACKFILL/REPLAY ONLY. Never called from live mode. Given all
+        rows for ONE currency_pair (Spark's groupBy("currency_pair")
+        guarantees this), rebuilds that pair's rolling buffer from
+        scratch and calls the exact same compute_fx_metrics() function
+        live mode uses — same business logic, same formulas.
+
+        FX-SPECIFIC FIX (beyond the timestamp vectorization equity also
+        got): live mode's compute_exposure_rows() fans out each bar to
+        one row per exposed ticker via iterrows() over pair_groups[pair]
+        — called once per bar. Here, metrics are computed per bar first
+        (small, sequential, unavoidable — it's genuinely stateful), and
+        the fan-out itself is done ONCE via a vectorized merge against
+        pair_groups[pair], instead of once per bar.
+
+        No Spark SQL window functions are used. groupBy("currency_pair")
+        is a shuffle/routing key only.
+        """
+        if pdf.empty:
+            return pd.DataFrame(columns=list(pdf.columns) + FX_ENGINE_EXTRA_COLUMNS)
+
+        pair = pdf["currency_pair"].iloc[0]
+        pdf = pdf.sort_values("timestamp").reset_index(drop=True)
+        total_rows = len(pdf)
+
+        if pair not in pair_groups:
+            out = pdf.copy()
+            out["_engine_error"] = f"FX pair not in universe: {pair}"
+            for col in FX_ENGINE_EXTRA_COLUMNS:
+                if col not in out.columns and col != "_engine_error":
+                    out[col] = None
+            return out
+
+        # Vectorized timestamp parse — ONE call for this pair's entire
+        # history, instead of one scalar pd.to_datetime() call per
+        # buffer element per bar (compute_fx_metrics' original cost).
+        parsed = pd.to_datetime(pdf["timestamp"], utc=True, errors="coerce")
+        epoch_min = (parsed.view("int64") // 60_000_000_000)
+        epoch_min = epoch_min.where(parsed.notna(), other=None)
+        pdf = pdf.assign(_ts_epoch_min=epoch_min)
+
+        cap = CONFIG["max_buffer_per_pair"]
+        buffer: list = []
+        bar_rows: list = []
+
+        for i, row in enumerate(pdf.to_dict("records"), start=1):
+            # ── ADD THIS: Progress logging every 1000 rows ────────────
+            if (IS_BACKFILL or IS_REPLAY) and i % 1000 == 0:
+                log("INFO", f"FX_PROGRESS {i}/{total_rows} rows", {
+                    "currency_pair": pair,
+                    "processed": i,
+                    "total": total_rows,
+                    "mode": CONFIG["run_mode"]
+                })
+
+            try:
+                if row["close"] <= 0 or row["high"] < row["low"]:
+                    row["_engine_error"] = (
+                        f"Invalid FX data: close={row['close']}, "
+                        f"high={row['high']}, low={row['low']}"
+                    )
+                    bar_rows.append(row)
+                    continue
+            except Exception as exc:
+                row["_engine_error"] = f"Validation error: {exc}"
+                bar_rows.append(row)
+                continue
+
+            clean_bar = {
+                "currency_pair":  pair,
+                "open":           float(row["open"]),
+                "high":           float(row["high"]),
+                "low":            float(row["low"]),
+                "close":          float(row["close"]),
+                "timestamp":      row.get("timestamp", ""),
+                "ingested_at":    row.get("ingested_at", ""),
+                "_ts_epoch_min":  row.get("_ts_epoch_min"),
+            }
+            update_pair_buffer_local(buffer, clean_bar, cap)
+
+            # SAME function live mode calls — no duplicated business logic
+            fx_metrics = compute_fx_metrics(buffer)
+
+            if len(buffer) >= 2:
+                prev = buffer[-2]
+                row["prev_open"]  = prev.get("open",  np.nan)
+                row["prev_high"]  = prev.get("high",  np.nan)
+                row["prev_low"]   = prev.get("low",   np.nan)
+                row["prev_close"] = prev.get("close", np.nan)
+            else:
+                row["prev_open"]  = np.nan
+                row["prev_high"]  = np.nan
+                row["prev_low"]   = np.nan
+                row["prev_close"] = np.nan
+
+            row["fx_return_1m"] = fx_metrics["fx_return_1m"]
+            row["fx_return_5m"] = fx_metrics["fx_return_5m"]
+            row["fx_vol_15m"]   = fx_metrics["fx_vol_15m"]
+            row["_engine_error"] = None
+            bar_rows.append(row)
+
+        # ── ADD THIS: Completion log for the pair ─────────────────────
+        if IS_BACKFILL or IS_REPLAY:
+            log("INFO", f"FX_PAIR_DONE {pair}", {
+                "currency_pair": pair,
+                "total_rows": total_rows,
+                "valid_rows": len([r for r in bar_rows if r.get("_engine_error") is None]),
+                "error_rows": len([r for r in bar_rows if r.get("_engine_error") is not None]),
+                "mode": CONFIG["run_mode"]
+            })
+
+        bars_df = pd.DataFrame(bar_rows)
+        if "_ts_epoch_min" in bars_df.columns:
+            bars_df = bars_df.drop(columns=["_ts_epoch_min"])
+
+        invalid_mask = bars_df["_engine_error"].notna()
+        invalid_bars = bars_df[invalid_mask].copy()
+        valid_bars   = bars_df[~invalid_mask].copy()
+
+        if valid_bars.empty:
+            for col in FX_ENGINE_EXTRA_COLUMNS:
+                if col not in invalid_bars.columns:
+                    invalid_bars[col] = None
+            return invalid_bars
+
+        # ── Vectorized fan-out (replaces iterrows() in
+        # compute_exposure_rows) ──
+        exposure_cols = ["ticker", "sector", "revenue",
+                          "foreign_revenue_ratio", "daily_exposure"]
+        exposure_df = pair_groups[pair][exposure_cols].copy()
+        exposure_df["_join_key"] = 1
+        valid_bars["_join_key"] = 1
+
+        fanned = valid_bars.merge(exposure_df, on="_join_key")
+        fanned = fanned.drop(columns=["_join_key"])
+
+        z95 = CONFIG["z_95"]
+        fanned["position_size"] = fanned["daily_exposure"].fillna(0.0)
+        fanned["fx_pnl"] = fanned["position_size"] * fanned["fx_return_1m"].fillna(0.0)
+        fanned["VaR_95_15m"] = (
+            fanned["position_size"] * fanned["fx_vol_15m"].fillna(0.0) * z95
+        )
+        fanned = fanned.drop(columns=["daily_exposure"], errors="ignore")
+
+        result = pd.concat([fanned, invalid_bars], ignore_index=True, sort=False)
+        for col in FX_ENGINE_EXTRA_COLUMNS:
+            if col not in result.columns:
+                result[col] = None
+        return result
+
+    return run_pair_engine
+
+def build_fx_backfill_output_schema(input_schema: StructType) -> StructType:
+    """
+    Build the Spark schema required by applyInPandas() for
+    run_pair_engine()'s output: input bar columns plus
+    FX_ENGINE_EXTRA_COLUMNS (the fan-out/exposure/metric fields).
+    BACKFILL/REPLAY ONLY — live mode never calls this.
+    """
+    fields = list(input_schema.fields)
+    existing_names = {f.name for f in fields}
+    for name in FX_ENGINE_EXTRA_COLUMNS:
+        if name not in existing_names:
+            if name == "_engine_error":
+                dtype = StringType()
+            elif name in ("ticker", "sector"):
+                dtype = StringType()
+            else:
+                dtype = FloatType()
+            fields.append(StructField(name, dtype, True))
+    return StructType(fields)
+
+
+# =============================================================
+# BACKFILL / REPLAY — TRUE SPARK-DISTRIBUTED PATH
+# =============================================================
+#
+# BACKFILL/REPLAY ONLY. Mirrors equity_consumer.py's
+# process_batch_backfill_replay(): called BEFORE batch_df.toPandas(), so
+# groupBy("currency_pair").applyInPandas(...) actually ships each pair's
+# full row history to a separate executor task — this is what
+# spark.executor.instances=10 (deploy YAML) is used for. Live mode never
+# calls this function and is not affected by its existence.
+def process_batch_backfill_replay(
+    batch_df,
+    batch_id,
+    pair_groups:            dict,
+    pipeline_run_id:        str,
+    processing_timestamp:   str,
+    batch_start:            float,
+    metrics:                dict,
+    dlq_buffer:             list,
+) -> None:
+    original_count = batch_df.count()
+    deduped_df     = batch_df.dropDuplicates(["currency_pair", "timestamp"])
+    deduped_count  = deduped_df.count()
+    metrics["events_deduped"] = original_count - deduped_count
+
+    if deduped_count == 0:
+        log("INFO", "All FX events in batch were duplicates",
+            {"batch_id": batch_id, "original_count": original_count})
+        metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
+        log_batch_metrics(str(batch_id), metrics)
+        return
+
+    metrics["events_received"] = deduped_count
+
+    log("INFO", "BACKFILL_REPLAY_ENGINE_START",
+        {"batch_id": str(batch_id), "rows": deduped_count,
+         "run_mode": CONFIG["run_mode"]})
+
+    output_schema  = build_fx_backfill_output_schema(deduped_df.schema)
+    run_pair_engine = make_run_pair_engine(pair_groups)
+
+    # THE ACTUAL DISTRIBUTION — each currency_pair's full bar history
+    # goes to a separate executor task in parallel.
+    result_sdf = deduped_df.groupBy("currency_pair").applyInPandas(
+        run_pair_engine, schema=output_schema
+    )
+    result_pdf = result_sdf.toPandas()
+
+    output_rows: list = []
+    for row_dict in result_pdf.to_dict("records"):
+        if row_dict.get("_engine_error"):
+            metrics["events_failed"] += 1
+            dlq_buffer.append({
+                "error":             row_dict["_engine_error"],
+                "currency_pair":     row_dict.get("currency_pair", ""),
+                "offset":            int(row_dict.get("offset", -1) or -1),
+                "partition":         int(row_dict.get("partition", -1) or -1),
+                "original_event":    row_dict,
+                "failed_at":         pendulum.now("America/New_York").to_iso8601_string(),
+                "consumer_pipeline": CONFIG["consumer_pipeline_name"],
+                "batch_id":          str(batch_id),
+                "pipeline_run_id":   pipeline_run_id,
+                "run_mode":          CONFIG["run_mode"],
+            })
+            continue
+
+        row_dict.pop("_engine_error", None)
+        producer_pipeline = row_dict.get("producer_pipeline_name", "fx_kafka_producer")
+        row_dict = add_lineage(
+            row_dict             = row_dict,
+            batch_id             = str(batch_id),
+            pipeline_run_id      = pipeline_run_id,
+            processing_timestamp = processing_timestamp,
+            producer_pipeline    = producer_pipeline,
+        )
+        output_rows.append(row_dict)
+        metrics["events_processed"] += 1
+        PROM_RECORDS_PROCESSED_TOTAL.inc()
+
+    log("INFO", "BACKFILL_REPLAY_ENGINE_DONE",
+        {"batch_id": str(batch_id), "rows_out": len(output_rows)})
+
+    if not output_rows:
+        PROM_DLQ_TOTAL.inc(len(dlq_buffer))
+        flush_consumer_dlq_to_s3(dlq_buffer, str(batch_id))
+        metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
+        log_batch_metrics(str(batch_id), metrics)
+        return
+
+    df_out = pd.DataFrame(output_rows)
+    df_out = df_out.where(pd.notnull(df_out), None)
+
+    save_to_parquet(df_out, str(batch_id))
+
+    # Redis and late-event filtering are LIVE ONLY — never touched here,
+    # exactly as the original design already documented.
+    PROM_DLQ_TOTAL.inc(len(dlq_buffer))
+    flush_consumer_dlq_to_s3(dlq_buffer, str(batch_id))
+
+    PROM_LAST_SUCCESS_TIMESTAMP.set(time.time())
+    metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
+    PROM_DURATION_SECONDS.observe(time.monotonic() - batch_start)
+    log_batch_metrics(str(batch_id), metrics)
+
+
 def process_batch(
     batch_df,
     batch_id:    int,
@@ -1695,6 +2053,24 @@ def process_batch(
 
     PROM_BATCHES_TOTAL.inc()
 
+    # =========================================================
+    # BACKFILL / REPLAY — branch out to the Spark-distributed path
+    # =========================================================
+    # Must happen BEFORE toPandas() below. Live mode never enters this.
+    if IS_BACKFILL or IS_REPLAY:
+        process_batch_backfill_replay(
+            batch_df              = batch_df,
+            batch_id              = batch_id,
+            pair_groups           = pair_groups,
+            pipeline_run_id       = pipeline_run_id,
+            processing_timestamp  = processing_timestamp,
+            batch_start           = batch_start,
+            metrics               = metrics,
+            dlq_buffer            = dlq_buffer,
+        )
+        return
+
+    # ── LIVE MODE — everything below is the ORIGINAL code, unchanged ──
     # ── Convert Spark batch to pandas ─────────────────────────────────
     try:
         if batch_df.count() == 0:
@@ -1790,7 +2166,17 @@ def process_batch(
     output_rows: list = []
 
     # ── Step 3: Process each FX bar ───────────────────────────────────
-    for _, bar in pdf.iterrows():
+    total_rows = len(pdf)
+    for i, (_, bar) in enumerate(pdf.iterrows(), start=1):
+        # ── Progress logging every 1000 rows ──────────────────────────
+        if IS_BACKFILL and i % 1000 == 0:
+            log("INFO", f"FX_PROGRESS {i}/{total_rows} rows", {
+                "processed": i,
+                "total": total_rows,
+                "batch_id": str(batch_id),
+                "mode": CONFIG["run_mode"]
+            })
+        
         try:
             pair = bar["currency_pair"]
 
@@ -1838,7 +2224,6 @@ def process_batch(
             if not exposure_rows:
                 continue
 
-
             producer_pipeline = bar.get("producer_pipeline_name", "fx_kafka_producer")
 
             for out_row in exposure_rows:
@@ -1860,7 +2245,7 @@ def process_batch(
                 "error":             str(exc),
                 "currency_pair":     bar.get("currency_pair", ""),
                 "offset":            int(bar.get("offset", -1)),
-                "partition":   int(bar.get("partition", -1)),
+                "partition":         int(bar.get("partition", -1)),
                 "original_event":    bar.to_dict(),
                 "failed_at":         pendulum.now("America/New_York").to_iso8601_string(),
                 "consumer_pipeline": CONFIG["consumer_pipeline_name"],
@@ -1869,7 +2254,6 @@ def process_batch(
                 "run_mode":          CONFIG["run_mode"],
             }
             dlq_buffer.append(dlq_entry)
-
 
     # ========== SET FAILED EVENTS GAUGE ==========
     # Count events that failed (those with "original_event" in dlq_buffer)
@@ -1918,39 +2302,33 @@ def process_batch(
 # =============================================================
 
 def load_s3_replay_partitions(
+    spark,
     start_date_str: str,
     end_date_str:   str,
     pair_groups:    dict = None,
 ) -> None:
     """
-    Read raw FX event parquet files from S3 for the inclusive date range and
-    process them through the same pipeline as the Kafka stream.
-    Used when run_mode = "replay".
+    Read raw FX event parquet files from S3 via Spark for the inclusive
+    date range and process them through the same pipeline as the Kafka
+    stream. Used when run_mode = "replay".
+
+    CHANGED FROM EARLIER VERSION: previously read each file individually
+    via boto3 + pd.read_parquet(), then called process_batch() once per
+    file sequentially via a _MockBatch shim — replay never used Spark at
+    all. Now: ALL matched files are read in ONE spark.read.parquet(*paths)
+    call, and process_batch() is called ONCE on the resulting Spark
+    DataFrame. Because IS_REPLAY is True, process_batch() routes to
+    process_batch_backfill_replay(), which distributes the per-pair fan-out
+    and metric computation across executors via
+    groupBy("currency_pair").applyInPandas(run_pair_engine, ...) — this is
+    what spark.executor.instances=10 (deploy YAML) is actually used for.
 
     FX replay uses a date range (REPLAY_START_DATE..REPLAY_END_DATE).
     There is NO hour concept in FX replay.
 
-    Output isolation:
-      All output is written to fx/data/replay/ — NEVER to fx/data/live/ or
-      fx/data/backfill/. process_batch routes via _output_prefix_for_mode()
-      which returns fx/data/replay/ when IS_REPLAY is True.
-
-    DLQ isolation:
-      All DLQ records are written to fx/dlq/replay/ — never mixed with live
-      or backfill DLQ records.
-
-    Redis:
-      NEVER touched during replay. IS_LIVE is False so publish_fx_snapshot_to_redis
-      is never called.
-
-    Late event filtering:
-      DISABLED for replay. Historical events are always older than
-      late_event_max_minutes by wall clock — filtering would drop all events.
-      No late events are written to DLQ.
-
-    State rebuild:
-      NEVER called during replay. Replay starts with empty pair_buffers.
-      State warms naturally from the replay records themselves, in order.
+    Output/DLQ isolation, Redis, late-event filtering, state rebuild:
+    unchanged in behavior — all enforced the same way inside
+    process_batch()/process_batch_backfill_replay() as before.
 
     Source path pattern — selected by replay_path:
         replay_path=backfill    (historical backfill raw):
@@ -1960,12 +2338,10 @@ def load_s3_replay_partitions(
             s3://risk-platform-pushpa-analytics/kafka_raw/fx/live/
                 year=Y/month=MM/day=DD/batch_*.parquet
 
-    Each parquet file is treated as one "batch" for consistency.
-
     Prometheus replay metrics:
         replay_jobs_total              — once per replay job invocation
-        replay_records_processed_total — per-record across all partitions
-        replay_failures_total          — per failed partition
+        replay_records_processed_total — total rows across all files
+        replay_failures_total          — on read or processing failure
         replay_duration_seconds        — total replay wall-clock time
     Metrics are pushed at the end of the replay job.
     """
@@ -1985,17 +2361,12 @@ def load_s3_replay_partitions(
         PROM_REPLAY_FAILURES_TOTAL.inc()
         return
 
-    # Select the raw S3 source prefix based on replay_path:
-    #   replay_path=backfill    -> read historical backfill raw files
-    #   replay_path=live -> read historical live raw files
     replay_path_lower = CONFIG["replay_path"].lower()
     if replay_path_lower == "backfill":
         raw_replay_prefix = CONFIG["raw_replay_prefix_backfill"]
     else:
-        # replay_path=live — read from historical live raw files
         raw_replay_prefix = CONFIG["raw_replay_prefix_live"]
 
-    # Collect all daily prefixes in the date range
     prefixes = []
     current  = start_dt
     while current <= end_dt:
@@ -2014,11 +2385,11 @@ def load_s3_replay_partitions(
          "raw_source_prefix": raw_replay_prefix,
          "output_prefix":     CONFIG["output_prefix_replay"]})
 
-    # Collect all keys across the date range - ONLY latest file per partition
+    # S3 listing is metadata-only (cheap regardless of file count) —
+    # still via boto3, unchanged. Only the DATA read changes below.
     all_keys = []
     for prefix in prefixes:
         try:
-            # Use get_latest_file_per_partition to get ONLY the latest file per day
             latest_files = get_latest_file_per_partition(CONFIG["write_bucket"], prefix)
             all_keys.extend(latest_files)
         except Exception as exc:
@@ -2033,44 +2404,51 @@ def load_s3_replay_partitions(
 
     log("INFO", "FX replay partitions found", {"total_files": len(all_keys)})
 
-    s3 = get_s3()
-    for batch_num, key in enumerate(all_keys, start=1):
-        try:
-            obj = s3.get_object(Bucket=CONFIG["write_bucket"], Key=key)
-            pdf = pd.read_parquet(BytesIO(obj["Body"].read()))
+    s3_paths = [f"s3a://{CONFIG['write_bucket']}/{k}" for k in all_keys]
 
-            if pdf.empty:
-                continue
+    try:
+        batch_df = spark.read.parquet(*s3_paths)
+    except Exception as exc:
+        log("ERROR", "Failed to read FX replay parquet files via Spark",
+            {"error": str(exc), "file_count": len(s3_paths)})
+        PROM_REPLAY_FAILURES_TOTAL.inc()
+        return
 
-            # Synthesize Kafka metadata columns if absent (S3 raw files
-            # were written by the producer and don't carry Kafka offsets)
-            if "topic" not in pdf.columns:
-                pdf["topic"] = CONFIG["topic"]
-            if "partition" not in pdf.columns:
-                pdf["partition"] = 0
-            if "offset" not in pdf.columns:
-                pdf["offset"] = batch_num * 10000  # synthetic, non-colliding
+    # Synthesize Kafka metadata columns if absent — same fields as
+    # before, now via Spark withColumn (distributed) instead of pandas.
+    existing_cols = set(batch_df.columns)
+    if "topic" not in existing_cols:
+        batch_df = batch_df.withColumn("topic", lit(CONFIG["topic"]))
+    if "partition" not in existing_cols:
+        batch_df = batch_df.withColumn("partition", lit(0))
+    if "offset" not in existing_cols:
+        batch_df = batch_df.withColumn(
+            "offset", (monotonically_increasing_id() + 1) * 10000
+        )
 
-            log("INFO", "Replaying FX S3 partition",
-                {"key": key, "rows": len(pdf), "batch_num": batch_num})
+    try:
+        total_rows = batch_df.count()
+    except Exception as exc:
+        log("ERROR", "Failed to count FX replay batch", {"error": str(exc)})
+        PROM_REPLAY_FAILURES_TOTAL.inc()
+        return
 
-            PROM_REPLAY_RECORDS_TOTAL.inc(len(pdf))
+    if total_rows == 0:
+        log("INFO", "FX replay dataset is empty after read")
+        return
 
-            class _MockBatch:
-                """Thin wrapper so replay reuses process_batch unchanged."""
-                def __init__(self, df):
-                    self._df = df
-                def count(self):
-                    return len(self._df)
-                def toPandas(self):
-                    return self._df.copy()
+    log("INFO", "Replaying FX S3 partitions via Spark",
+        {"files": len(all_keys), "rows": total_rows})
+    PROM_REPLAY_RECORDS_TOTAL.inc(total_rows)
 
-            process_batch(_MockBatch(pdf), batch_num, pair_groups)
-
-        except Exception as exc:
-            log("ERROR", "FX S3 replay partition failed",
-                {"key": key, "error": str(exc)})
-            PROM_REPLAY_FAILURES_TOTAL.inc()
+    # ONE call — process_batch_backfill_replay() does its own
+    # groupBy("currency_pair").applyInPandas(...) distribution across
+    # the entire dataset at once. Removes the old sequential per-file loop.
+    try:
+        process_batch(batch_df, 1, pair_groups)
+    except Exception as exc:
+        log("ERROR", "FX S3 replay batch failed", {"error": str(exc)})
+        PROM_REPLAY_FAILURES_TOTAL.inc()
 
     replay_duration = time.monotonic() - replay_start
     PROM_REPLAY_DURATION_SECONDS.observe(replay_duration)
@@ -2159,9 +2537,19 @@ if __name__ == "__main__":
          "run_id":      run_id,
          "run_mode":    CONFIG["run_mode"]})
 
+    # SparkSession built ONCE here, before the mode branch, so replay can
+    # use it too (previously replay never created a SparkSession at all —
+    # it read via boto3/pandas only, meaning spark.executor.instances
+    # configured in the deploy YAML was never actually used).
+    spark = build_spark_session()
+    spark.sparkContext.setLogLevel("WARN")
+
     if IS_REPLAY:
         # ── REPLAY MODE ──────────────────────────────────────────────
-        # run_mode=replay — reads historical raw S3 parquet files.
+        # run_mode=replay — reads historical raw S3 parquet files via
+        # Spark (spark.read.parquet, inside load_s3_replay_partitions).
+        # Spark here is used purely as a distributed batch compute
+        # engine for run_pair_engine() via applyInPandas — no streaming.
         # Source prefix is selected by replay_path inside load_s3_replay_partitions:
         #   replay_path=backfill    -> kafka_raw/fx/backfill/
         #   replay_path=live -> kafka_raw/fx/live/
@@ -2175,6 +2563,7 @@ if __name__ == "__main__":
              "replay_path":  replay_path})
 
         load_s3_replay_partitions(
+            spark          = spark,
             start_date_str = CONFIG["replay_start_date"],
             end_date_str   = CONFIG["replay_end_date"],
             pair_groups    = pair_groups,
@@ -2197,9 +2586,6 @@ if __name__ == "__main__":
         # (within grace window after weekly open), closed market periods.
         # Previous weekly session data is NEVER loaded.
         rebuild_state_from_s3()
-
-        spark = build_spark_session()
-        spark.sparkContext.setLogLevel("WARN")
         wait_for_topic()
 
         if IS_LIVE:

@@ -1,20 +1,26 @@
 apiVersion: apps/v1
 kind: Deployment
+
 metadata:
   name: spark-fx
   namespace: streaming
+
 spec:
   replicas: {{ .Values.replicas.sparkFx }}
+
   selector:
     matchLabels:
       app: spark-fx
+
   template:
     metadata:
       labels:
         app: spark-fx
+
     spec:
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
+
       serviceAccountName: streaming-sa
 
       initContainers:
@@ -41,22 +47,40 @@ spec:
           env:
             - name: FX_MODE
               value: "live"
+
             - name: SPARK_LOCAL_IP
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
 
+            # Required so the Spark driver can own dynamically created
+            # executor pods.
+            - name: SPARK_DRIVER_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
           command: ["/bin/bash", "-lc"]
+
           args:
             - >
               spark-submit
-              --master local[*]
+              --master {{ .Values.spark.k8sMasterUrl }}
+              --deploy-mode client
+              --conf spark.kubernetes.namespace={{ .Values.namespace }}
+              --conf spark.kubernetes.authenticate.driver.serviceAccountName=streaming-sa
+              --conf spark.kubernetes.container.image={{ .Values.image.spark.repository }}:{{ .Values.image.spark.tag }}
+              --conf spark.kubernetes.driver.pod.name=$(SPARK_DRIVER_POD_NAME)
               --conf spark.driver.host=$(SPARK_LOCAL_IP)
               --conf spark.driver.bindAddress=0.0.0.0
               --conf spark.driver.port=7077
               --conf spark.ui.port=4041
               --conf spark.blockManager.port=7080
               --conf spark.network.timeout=600s
+              --conf spark.executor.instances={{ .Values.spark.executors.live }}
+              --conf spark.executor.cores={{ .Values.spark.executorCores }}
+              --conf spark.executor.memory={{ .Values.spark.executorMemory }}
+              --conf spark.kubernetes.executor.podNamePrefix=spark-fx-exec
               --repositories https://repo.maven.apache.org/maven2
               --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.7,org.apache.kafka:kafka-clients:3.5.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.696
               /app/fx_consumer.py
