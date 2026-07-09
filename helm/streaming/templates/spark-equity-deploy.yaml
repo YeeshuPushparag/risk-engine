@@ -40,6 +40,20 @@ spec:
           image: "{{ .Values.image.spark.repository }}:{{ .Values.image.spark.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
 
+
+          ports:
+            - name: driver-rpc
+              containerPort: 7078
+
+            - name: blockmanager
+              containerPort: 7079
+
+            - name: ui
+              containerPort: 4040
+
+            - name: metrics
+              containerPort: 8000
+
           envFrom:
             - secretRef:
                 name: streaming-infra-secret
