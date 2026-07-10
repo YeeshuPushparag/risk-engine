@@ -100,6 +100,7 @@ spec:
                 --conf spark.driver.cores={{ .Values.spark.driverCores }} \
                 --conf spark.driver.memory={{ .Values.spark.driverMemory }} \
                 --conf spark.kubernetes.executor.podNamePrefix=spark-equity-exec \
+                --conf spark.local.dir=/tmp/spark
                 --repositories https://repo.maven.apache.org/maven2 \
                 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.7,org.apache.kafka:kafka-clients:3.5.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.696 \
                 /app/test_spark.py
