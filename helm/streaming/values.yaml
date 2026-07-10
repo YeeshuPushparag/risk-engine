@@ -16,7 +16,7 @@ image:
 
   spark:
     repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/spark
-    tag: "38"
+    tag: "39"
 
   zookeeper:
     repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/zookeeper
