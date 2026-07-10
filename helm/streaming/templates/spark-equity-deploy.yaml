@@ -89,6 +89,7 @@ spec:
                 --conf spark.driver.bindAddress=0.0.0.0 \
                 --conf spark.driver.port=7078 \
                 --conf spark.blockManager.port=7079 \
+                --conf spark.ui.port=4040 \
                 --conf spark.network.timeout=600s \
                 --conf spark.dynamicAllocation.enabled=false \
                 --conf spark.pyspark.python=/usr/bin/python3 \
@@ -101,16 +102,7 @@ spec:
                 --conf spark.driver.memory={{ .Values.spark.driverMemory }} \
                 --conf spark.kubernetes.executor.podNamePrefix=spark-equity-exec \
                 --conf spark.local.dir=/tmp/spark \
-                /app/test_spark.py
-
-          volumeMounts:
-            - name: ivy-cache
-              mountPath: /root/.ivy2
-
-      volumes:
-        - name: ivy-cache
-          persistentVolumeClaim:
-            claimName: spark-ivy-cache-pvc
+                /app/equity_consumer.py
 
 ---
 apiVersion: v1
@@ -129,10 +121,6 @@ spec:
     - name: ui
       port: 4040
       targetPort: 4040
-
-    - name: blockmanager
-      port: 7079
-      targetPort: 7079
 
     - name: metrics
       port: 8000

@@ -22,6 +22,7 @@ resource "kubernetes_role" "streaming_scaler" {
     verbs = [
       "create",
       "delete",
+      "deletecollection",
       "get",
       "list",
       "watch",
@@ -39,6 +40,7 @@ resource "kubernetes_role" "streaming_scaler" {
     verbs = [
       "create",
       "delete",
+      "deletecollection",      
       "get",
       "list",
       "watch",
@@ -56,6 +58,7 @@ resource "kubernetes_role" "streaming_scaler" {
     verbs = [
       "create",
       "delete",
+      "deletecollection",
       "get",
       "list",
       "watch",

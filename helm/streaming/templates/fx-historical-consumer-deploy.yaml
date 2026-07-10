@@ -23,10 +23,35 @@ spec:
 
       serviceAccountName: streaming-sa
 
+      initContainers:
+        - name: wait-for-kafka
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z kafka 9092; do
+                echo "Waiting for Kafka..."
+                sleep 5
+              done
+
       containers:
         - name: fx-historical-consumer
           image: "{{ .Values.image.spark.repository }}:{{ .Values.image.spark.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+          ports:
+            - name: driver-rpc
+              containerPort: 7075
+
+            - name: blockmanager
+              containerPort: 7082
+
+            - name: ui
+              containerPort: 4043
+
+            - name: metrics
+              containerPort: 8000
 
           envFrom:
             - secretRef:
@@ -47,37 +72,28 @@ spec:
 
           args:
             - >
-              spark-submit
-              --master {{ .Values.spark.k8sMasterUrl }}
-              --deploy-mode client
-              --conf spark.kubernetes.namespace={{ .Values.namespace }}
-              --conf spark.kubernetes.authenticate.driver.serviceAccountName=streaming-sa
-              --conf spark.kubernetes.container.image={{ .Values.image.spark.repository }}:{{ .Values.image.spark.tag }}
-              --conf spark.kubernetes.driver.pod.name=$(SPARK_DRIVER_POD_NAME)
-              --conf spark.driver.host=$(SPARK_LOCAL_IP)
-              --conf spark.driver.bindAddress=0.0.0.0
-              --conf spark.driver.port=7077
-              --conf spark.ui.port=4041
-              --conf spark.blockManager.port=7080
-              --conf spark.network.timeout=600s
-              --conf spark.pyspark.python=/usr/bin/python3
-              --conf spark.pyspark.driver.python=/usr/bin/python3
-              --conf spark.executorEnv.PYSPARK_PYTHON=/usr/bin/python3
-              --conf spark.executor.instances={{ .Values.spark.executors.backfillReplay }}
-              --conf spark.executor.cores={{ .Values.spark.executorCores }}
-              --conf spark.executor.memory={{ .Values.spark.executorMemory }}
-              --conf spark.driver.cores={{ .Values.spark.driverCores }}
-              --conf spark.driver.memory={{ .Values.spark.driverMemory }} 
-              --conf spark.kubernetes.executor.podNamePrefix=fx-historical-exec
-              --repositories https://repo.maven.apache.org/maven2
-              --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.7,org.apache.kafka:kafka-clients:3.5.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.696
-              /app/fx_consumer.py
-
-          volumeMounts:
-            - name: ivy-cache
-              mountPath: /root/.ivy2
-
-      volumes:
-        - name: ivy-cache
-          persistentVolumeClaim:
-            claimName: spark-ivy-cache-pvc
+              spark-submit \
+                --master {{ .Values.spark.k8sMasterUrl }} \
+                --deploy-mode client \
+                --conf spark.kubernetes.namespace={{ .Values.namespace }} \
+                --conf spark.kubernetes.authenticate.driver.serviceAccountName=streaming-sa \
+                --conf spark.kubernetes.container.image={{ .Values.image.spark.repository }}:{{ .Values.image.spark.tag }} \
+                --conf spark.kubernetes.driver.pod.name=$(SPARK_DRIVER_POD_NAME) \
+                --conf spark.driver.host=fx-historical-driver \
+                --conf spark.driver.bindAddress=0.0.0.0 \
+                --conf spark.driver.port=7075 \
+                --conf spark.ui.port=4043 \
+                --conf spark.blockManager.port=7082 \
+                --conf spark.network.timeout=600s \
+                --conf spark.dynamicAllocation.enabled=false \
+                --conf spark.pyspark.python=/usr/bin/python3 \
+                --conf spark.pyspark.driver.python=/usr/bin/python3 \
+                --conf spark.executorEnv.PYSPARK_PYTHON=/usr/bin/python3 \
+                --conf spark.executor.instances={{ .Values.spark.executors.backfillReplay }} \
+                --conf spark.executor.cores={{ .Values.spark.executorCores }} \
+                --conf spark.executor.memory={{ .Values.spark.executorMemory }} \
+                --conf spark.driver.cores={{ .Values.spark.driverCores }} \
+                --conf spark.driver.memory={{ .Values.spark.driverMemory }} \
+                --conf spark.kubernetes.executor.podNamePrefix=fx-historical-exec \
+                --conf spark.local.dir=/tmp/spark \
+                /app/fx_consumer.py

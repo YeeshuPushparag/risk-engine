@@ -41,10 +41,10 @@ spec:
         name: zookeeper-data
       spec:
         accessModes: ["ReadWriteOnce"]
-        storageClassName: gp3
+        storageClassName: {{ .Values.storageClassName }}
         resources:
           requests:
-            storage: 5Gi
+            storage: {{ .Values.zookeeperStorageSize }}
 ---
 apiVersion: v1
 kind: Service

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: fx-historical-driver
+  namespace: {{ .Values.namespace }}
+
+spec:
+  clusterIP: None
+
+  selector:
+    app: fx-historical-consumer
+
+  ports:
+    - name: driver-rpc
+      port: 7075
+      targetPort: 7075

@@ -42,35 +42,24 @@ replicas:
 
 marketHolidays:
   # NYSE holidays for 2026
-  - "1 1"     # Jan 1
-  - "19 1"    # Jan 19
-  - "16 2"    # Feb 16
-  - "3 4"     # Apr 3
-  - "25 5"    # May 25
-  - "19 6"    # Jun 19
-  - "3 7"     # Jul 3
-  - "7 9"     # Sep 7
-  - "26 11"   # Nov 26
-  - "25 12"   # Dec 25
+  - "1 1"      # Jan 1
+  - "19 1"     # Jan 19
+  - "16 2"     # Feb 16
+  - "3 4"      # Apr 3
+  - "25 5"     # May 25
+  - "19 6"     # Jun 19
+  - "3 7"      # Jul 3
+  - "7 9"      # Sep 7
+  - "26 11"    # Nov 26
+  - "25 12"    # Dec 25
 
 storageClassName: gp3
-kafkaStorageSize: 10Gi
 
-pvc:
-  ivyCache:
-    enabled: true
-    name: spark-ivy-cache-pvc
-    storageClassName: gp3
-    size: 5Gi
-  zookeeperData:
-    enabled: true
-    name: zookeeper-data
-    storageClassName: gp3
-    size: 5Gi
-    
+kafkaStorageSize: 10Gi
+zookeeperStorageSize: 5Gi
+
 nodeSelector:
   role: streaming
-
 
 spark:
   k8sMasterUrl: k8s://https://kubernetes.default.svc

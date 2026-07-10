@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: equity-historical-driver
+  namespace: {{ .Values.namespace }}
+
+spec:
+  clusterIP: None
+
+  selector:
+    app: equity-historical-consumer
+
+  ports:
+    - name: driver-rpc
+      port: 7076
+      targetPort: 7076
