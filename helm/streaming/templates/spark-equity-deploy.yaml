@@ -101,6 +101,7 @@ spec:
                 --conf spark.driver.memory={{ .Values.spark.driverMemory }} \
                 --conf spark.kubernetes.executor.podNamePrefix=spark-equity-exec \
                 --conf spark.local.dir=/tmp/spark \
+                --packages org.slf4j:slf4j-api:2.0.7 \
                 /app/test_spark.py
 
           volumeMounts:
