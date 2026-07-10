@@ -17,8 +17,15 @@ export async function GET() {
     const formattedSegments = data.segments.map((s: any) => ({
       ...s,
       exposure: formatFinancial(s.exposure),
-      pnl: `${s.pnl >= 0 ? "+" : ""}${formatFinancial(s.pnl)}`,
-      // Logic for color
+
+      pnl: s.pnl !== undefined
+        ? `${s.pnl >= 0 ? "+" : ""}${formatFinancial(s.pnl)}`
+        : undefined,
+
+      netExposure: s.netExposure !== undefined
+        ? formatFinancial(s.netExposure)
+        : undefined,
+
       riskColor: Number(s.alerts) === 0 ? "green" : s.riskColor,
     }));
 
