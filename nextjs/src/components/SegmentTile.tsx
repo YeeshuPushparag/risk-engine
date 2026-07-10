@@ -14,7 +14,8 @@ interface SegmentProps {
   name: string;
   exposure: string;
   link: string;
-  pnl: string;
+  pnl?: string;
+  netExposure?: string;
   riskColor: "green" | "yellow" | "red";
   alerts: number;
 }
@@ -34,10 +35,12 @@ export default function SegmentTile({
   link,
   exposure,
   pnl,
+  netExposure,
   riskColor,
   alerts
 }: SegmentProps) {
-  const isLoss = pnl.includes("-");
+  const value = link === "collateral" ? netExposure : pnl;
+  const isLoss = link === "collateral" ? false : (value?.includes("-") ?? false);
   const isLoans = link === "loans";
 
   const effectiveRiskColor = alerts === 0 ? "green" : riskColor;
@@ -48,7 +51,12 @@ export default function SegmentTile({
     red: "Breach"
   }[effectiveRiskColor];
 
-  const pnlLabel = isLoans ? "Monthly P&L" : "Daily P&L";
+  const pnlLabel =
+    link === "collateral"
+      ? "Net Exposure"
+      : isLoans
+        ? "Monthly P&L"
+        : "Daily P&L";
   const segmentLabel = SEGMENT_LABELS[link] ?? "";
 
   return (
@@ -73,13 +81,12 @@ export default function SegmentTile({
 
             <div className="flex items-center gap-1.5 mt-2">
               <div
-                className={`w-1.5 h-1.5 rounded-full ${
-                  effectiveRiskColor === "green"
-                    ? "bg-emerald-500"
-                    : effectiveRiskColor === "yellow"
+                className={`w-1.5 h-1.5 rounded-full ${effectiveRiskColor === "green"
+                  ? "bg-emerald-500"
+                  : effectiveRiskColor === "yellow"
                     ? "bg-amber-500"
                     : "bg-red-600"
-                }`}
+                  }`}
               />
               <span className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em]">
                 {statusLabel}
@@ -89,14 +96,15 @@ export default function SegmentTile({
 
           {/* ALERT BADGE — always shown */}
           <div
-            className={`px-2 py-1 rounded flex items-center gap-1.5 shadow-lg ${
-              alerts > 0
-                ? "bg-red-600 text-white shadow-red-100"
-                : "bg-emerald-500/10 text-emerald-600 shadow-emerald-100"
-            }`}
+            className={`px-2 py-1 rounded flex items-center gap-1.5 shadow-lg ${alerts > 0
+              ? "bg-red-600 text-white shadow-red-100"
+              : "bg-emerald-500/10 text-emerald-600 shadow-emerald-100"
+              }`}
           >
             <AlertCircle size={12} className="shrink-0" />
-            <span className="text-[10px] font-black">{alerts}</span>
+            <span className="text-[10px] font-black">
+              {alerts === 0 ? "0 ALERTS" : alerts}
+            </span>
           </div>
         </div>
       </div>
@@ -118,16 +126,16 @@ export default function SegmentTile({
           </p>
 
           <div
-            className={`flex items-center gap-0.5 font-black ${
-              isLoss ? "text-red-600" : "text-emerald-500"
-            }`}
+            className={`flex items-center gap-0.5 font-black ${isLoss ? "text-red-600" : "text-emerald-500"
+              }`}
           >
-            <span className="text-sm font-mono">{pnl}</span>
-            {isLoss ? (
-              <ArrowDownRight size={16} />
-            ) : (
-              <ArrowUpRight size={16} />
-            )}
+            <span className="text-sm font-mono">{value}</span>
+            {link !== "collateral" &&
+              (isLoss ? (
+                <ArrowDownRight size={16} />
+              ) : (
+                <ArrowUpRight size={16} />
+              ))}
           </div>
         </div>
       </div>

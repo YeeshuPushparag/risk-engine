@@ -80,7 +80,7 @@ export default function DashboardPage() {
               key={segment.id}
               {...segment}
               // Force 0 Alerts to be Green
-              alerts={Number(segment.alerts) === 0 ? "0 ALERTS" : segment.alerts}
+              alerts={Number(segment.alerts)}
               riskColor={Number(segment.alerts) === 0 ? "green" : segment.riskColor}
             />
           ))}

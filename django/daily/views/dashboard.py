@@ -109,19 +109,22 @@ def global_risk_dashboard(request):
     )
 
     cl = cl_qs.aggregate(
-        exp=Sum("collateral_value"),
-        pnl=Sum("net_exposure"),
-        risk_val=Avg("haircut"),
-        alerts=Sum(
-            Case(
-                When(
-                    Q(margin_call_flag=True) |
-                    Q(collateral_ratio__lt=1.0),
-                    then=1
-                ),
-                default=0,
-                output_field=IntegerField()
-            )
+        exp=Coalesce(Sum("collateral_value"), 0.0),
+        net_exposure=Coalesce(Sum("net_exposure"), 0.0),
+        risk_val=Coalesce(Avg("haircut"), 0.0),
+        alerts=Coalesce(
+            Sum(
+                Case(
+                    When(
+                        Q(margin_call_flag=True) |
+                        Q(collateral_ratio__lt=1.0),
+                        then=1
+                    ),
+                    default=0,
+                    output_field=IntegerField()
+                )
+            ),
+            0
         ),
     )
 
@@ -187,10 +190,11 @@ def global_risk_dashboard(request):
          "metric": f"Delta: {dr['risk_val']:.2f}" if dr["risk_val"] else "N/A"},
 
         {"id": "cl", "name": "Collateral", "link": "collateral",
-         "exposure": cl["exp"] or 0, "pnl": cl["pnl"] or 0,
-         "riskColor": get_risk_status(cl["pnl"], cl["alerts"]),
-         "alerts": cl["alerts"] or 0,
-         "metric": f"Haircut: {cl['risk_val']:.2%}" if cl["risk_val"] else "N/A"},
+        "exposure": cl["exp"],
+        "netExposure": cl["net_exposure"],
+        "riskColor": get_risk_status(0, cl["alerts"]),
+        "alerts": cl["alerts"],
+        "metric": f"Haircut: {cl['risk_val']:.2%}" if cl["risk_val"] else "N/A"},
 
         {"id": "ln", "name": "Loans", "link": "loans",
          "exposure": ln["exp"] or 0, "pnl": ln["pnl"] or 0,
