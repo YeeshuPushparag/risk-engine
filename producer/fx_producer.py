@@ -744,7 +744,6 @@ def _extract_events_from_df(
 
                 event = build_event(record, producer_run_id, batch_id, source_fetch_time, is_backfill=(not exclude_in_progress_bar))
                 events.append(event)
-                print(f"[PRODUCER] {pair} -> {record['close']}")
 
             if (pair not in fetch_metrics["missing_pairs"]
                     and pair not in fetch_metrics["empty_pairs"]

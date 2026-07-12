@@ -155,7 +155,7 @@ import requests
 import pendulum
 from kafka import KafkaConsumer
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, explode, lit, monotonically_increasing_id
+from pyspark.sql.functions import col, from_json, explode, lit, monotonically_increasing_id, broadcast
 from pyspark.sql.types import (
     StructType, StructField, StringType, FloatType, ArrayType
 )
@@ -1676,10 +1676,17 @@ def add_prev_ohlcv_to_bar(row_dict: dict, buffer: list) -> dict:
 # receives. Used both in run_pair_engine's own reindex step and in
 # build_fx_backfill_output_schema(), so they must stay in sync.
 FX_ENGINE_EXTRA_COLUMNS = [
-    "ticker", "sector", "revenue", "foreign_revenue_ratio", "position_size",
     "prev_open", "prev_high", "prev_low", "prev_close",
     "fx_return_1m", "fx_return_5m", "fx_vol_15m",
-    "fx_pnl", "VaR_95_15m", "_engine_error",
+    "_engine_error",
+]
+
+# Columns added by the Spark-level broadcast join / withColumn step
+# AFTER run_pair_engine (metrics-only) returns — this is the fan-out
+# that used to happen inside the pandas UDF and caused executor OOMs.
+FX_FANOUT_EXTRA_COLUMNS = [
+    "ticker", "sector", "revenue", "foreign_revenue_ratio",
+    "position_size", "fx_pnl", "VaR_95_15m",
 ]
 
 
@@ -1715,13 +1722,17 @@ def make_run_pair_engine(pair_groups: dict):
         scratch and calls the exact same compute_fx_metrics() function
         live mode uses — same business logic, same formulas.
 
-        FX-SPECIFIC FIX (beyond the timestamp vectorization equity also
-        got): live mode's compute_exposure_rows() fans out each bar to
-        one row per exposed ticker via iterrows() over pair_groups[pair]
-        — called once per bar. Here, metrics are computed per bar first
-        (small, sequential, unavoidable — it's genuinely stateful), and
-        the fan-out itself is done ONCE via a vectorized merge against
-        pair_groups[pair], instead of once per bar.
+        FX-SPECIFIC: unlike equity's simpler 1:1 engine, live mode's
+        compute_exposure_rows() fans out each bar to one row per exposed
+        ticker via iterrows() over pair_groups[pair]. THIS FUNCTION DOES
+        NOT DO THAT FAN-OUT — it returns bar-level metrics only (one row
+        per input bar). The fan-out happens AFTER this function, via a
+        Spark broadcast join in process_batch_backfill_replay(). Doing
+        the fan-out inside this pandas UDF previously caused executor
+        OOMs: one currency pair's entire expanded output (bars x ~270
+        tickers) had to fit in one executor's memory before Spark ever
+        regained control. Keeping this function 1:1 (bar in, bar out)
+        gives it the same bounded-memory property equity's engine has.
 
         No Spark SQL window functions are used. groupBy("currency_pair")
         is a shuffle/routing key only.
@@ -1731,7 +1742,6 @@ def make_run_pair_engine(pair_groups: dict):
 
         pair = pdf["currency_pair"].iloc[0]
         pdf = pdf.sort_values("timestamp").reset_index(drop=True)
-        total_rows = len(pdf)
 
         if pair not in pair_groups:
             out = pdf.copy()
@@ -1753,16 +1763,7 @@ def make_run_pair_engine(pair_groups: dict):
         buffer: list = []
         bar_rows: list = []
 
-        for i, row in enumerate(pdf.to_dict("records"), start=1):
-            # ── ADD THIS: Progress logging every 1000 rows ────────────
-            if (IS_BACKFILL or IS_REPLAY) and i % 1000 == 0:
-                log("INFO", f"FX_PROGRESS {i}/{total_rows} rows", {
-                    "currency_pair": pair,
-                    "processed": i,
-                    "total": total_rows,
-                    "mode": CONFIG["run_mode"]
-                })
-
+        for row in pdf.to_dict("records"):
             try:
                 if row["close"] <= 0 or row["high"] < row["low"]:
                     row["_engine_error"] = (
@@ -1809,74 +1810,44 @@ def make_run_pair_engine(pair_groups: dict):
             row["_engine_error"] = None
             bar_rows.append(row)
 
-        # ── ADD THIS: Completion log for the pair ─────────────────────
-        if IS_BACKFILL or IS_REPLAY:
-            log("INFO", f"FX_PAIR_DONE {pair}", {
-                "currency_pair": pair,
-                "total_rows": total_rows,
-                "valid_rows": len([r for r in bar_rows if r.get("_engine_error") is None]),
-                "error_rows": len([r for r in bar_rows if r.get("_engine_error") is not None]),
-                "mode": CONFIG["run_mode"]
-            })
-
         bars_df = pd.DataFrame(bar_rows)
         if "_ts_epoch_min" in bars_df.columns:
             bars_df = bars_df.drop(columns=["_ts_epoch_min"])
 
-        invalid_mask = bars_df["_engine_error"].notna()
-        invalid_bars = bars_df[invalid_mask].copy()
-        valid_bars   = bars_df[~invalid_mask].copy()
-
-        if valid_bars.empty:
-            for col in FX_ENGINE_EXTRA_COLUMNS:
-                if col not in invalid_bars.columns:
-                    invalid_bars[col] = None
-            return invalid_bars
-
-        # ── Vectorized fan-out (replaces iterrows() in
-        # compute_exposure_rows) ──
-        exposure_cols = ["ticker", "sector", "revenue",
-                          "foreign_revenue_ratio", "daily_exposure"]
-        exposure_df = pair_groups[pair][exposure_cols].copy()
-        exposure_df["_join_key"] = 1
-        valid_bars["_join_key"] = 1
-
-        fanned = valid_bars.merge(exposure_df, on="_join_key")
-        fanned = fanned.drop(columns=["_join_key"])
-
-        z95 = CONFIG["z_95"]
-        fanned["position_size"] = fanned["daily_exposure"].fillna(0.0)
-        fanned["fx_pnl"] = fanned["position_size"] * fanned["fx_return_1m"].fillna(0.0)
-        fanned["VaR_95_15m"] = (
-            fanned["position_size"] * fanned["fx_vol_15m"].fillna(0.0) * z95
-        )
-        fanned = fanned.drop(columns=["daily_exposure"], errors="ignore")
-
-        result = pd.concat([fanned, invalid_bars], ignore_index=True, sort=False)
+        # NO FAN-OUT HERE. Previously this function joined every bar
+        # against ~270 exposure rows (pair_groups[pair]) INSIDE this
+        # pandas UDF, so one executor held one currency pair's ENTIRE
+        # expanded output (bars x tickers, potentially 600K+ rows) as a
+        # single in-memory pandas DataFrame — that was the executor OOM
+        # (exit 137) at 2GB/executor. The fan-out now happens AFTER this
+        # function returns, via a Spark broadcast join in
+        # process_batch_backfill_replay(), which Spark distributes and
+        # shuffles properly instead of one process holding it all.
+        #
+        # Output here is bounded by input size (one row per input bar,
+        # valid or invalid) — never multiplied — matching the same
+        # memory-safety property equity's 1:1 engine already has.
         for col in FX_ENGINE_EXTRA_COLUMNS:
-            if col not in result.columns:
-                result[col] = None
-        return result
+            if col not in bars_df.columns:
+                bars_df[col] = None
+        return bars_df
 
     return run_pair_engine
+
 
 def build_fx_backfill_output_schema(input_schema: StructType) -> StructType:
     """
     Build the Spark schema required by applyInPandas() for
-    run_pair_engine()'s output: input bar columns plus
-    FX_ENGINE_EXTRA_COLUMNS (the fan-out/exposure/metric fields).
+    run_pair_engine()'s bar-level output: input bar columns plus
+    FX_ENGINE_EXTRA_COLUMNS (prev-OHLC + FX metrics only — no fan-out
+    columns; those are added later via a Spark broadcast join).
     BACKFILL/REPLAY ONLY — live mode never calls this.
     """
     fields = list(input_schema.fields)
     existing_names = {f.name for f in fields}
     for name in FX_ENGINE_EXTRA_COLUMNS:
         if name not in existing_names:
-            if name == "_engine_error":
-                dtype = StringType()
-            elif name in ("ticker", "sector"):
-                dtype = StringType()
-            else:
-                dtype = FloatType()
+            dtype = StringType() if name == "_engine_error" else FloatType()
             fields.append(StructField(name, dtype, True))
     return StructType(fields)
 
@@ -1919,15 +1890,57 @@ def process_batch_backfill_replay(
         {"batch_id": str(batch_id), "rows": deduped_count,
          "run_mode": CONFIG["run_mode"]})
 
-    output_schema  = build_fx_backfill_output_schema(deduped_df.schema)
+    output_schema   = build_fx_backfill_output_schema(deduped_df.schema)
     run_pair_engine = make_run_pair_engine(pair_groups)
 
-    # THE ACTUAL DISTRIBUTION — each currency_pair's full bar history
-    # goes to a separate executor task in parallel.
+    # STAGE 1 — bar-level metrics only, distributed by currency_pair.
+    # No fan-out happens here anymore (that was the OOM cause) — output
+    # row count equals input row count, bounded per partition.
     result_sdf = deduped_df.groupBy("currency_pair").applyInPandas(
         run_pair_engine, schema=output_schema
     )
-    result_pdf = result_sdf.toPandas()
+
+    # STAGE 2 — fan-out via Spark broadcast join, NOT a pandas merge
+    # inside the UDF. The exposure table (~1900 rows total across all
+    # pairs) is tiny — broadcasting it means every executor gets a local
+    # copy, and Spark streams/shuffles the (much larger) bar side through
+    # normally instead of one process materializing one pair's entire
+    # expanded output in memory. This is what removes the executor OOM.
+    invalid_sdf = result_sdf.filter(col("_engine_error").isNotNull())
+    valid_sdf   = result_sdf.filter(col("_engine_error").isNull())
+
+    spark = SparkSession.builder.getOrCreate()
+    exposure_pdf = pd.concat(
+        [
+            df[["ticker", "sector", "revenue", "foreign_revenue_ratio",
+                "daily_exposure", "currency_pair"]]
+            for df in pair_groups.values()
+        ],
+        ignore_index=True,
+    )
+    exposure_sdf = spark.createDataFrame(exposure_pdf)
+
+    z95 = CONFIG["z_95"]
+    fanned_sdf = (
+        valid_sdf.join(broadcast(exposure_sdf), on="currency_pair", how="inner")
+        .withColumn("position_size", col("daily_exposure").cast("double"))
+        .withColumn("fx_pnl", col("position_size") * col("fx_return_1m"))
+        .withColumn("VaR_95_15m", col("position_size") * col("fx_vol_15m") * lit(z95))
+        .drop("daily_exposure")
+    )
+
+    # Invalid (DLQ-bound) bars never had exposure rows before either —
+    # reattach them with the fan-out columns null so the single downstream
+    # collection loop below still sees a uniform row shape.
+    for extra_col in FX_FANOUT_EXTRA_COLUMNS:
+        if extra_col not in invalid_sdf.columns:
+            col_type = "string" if extra_col in ("ticker", "sector") else "double"
+            invalid_sdf = invalid_sdf.withColumn(
+                extra_col, lit(None).cast(col_type)
+            )
+
+    result_sdf_final = fanned_sdf.unionByName(invalid_sdf, allowMissingColumns=True)
+    result_pdf = result_sdf_final.toPandas()
 
     output_rows: list = []
     for row_dict in result_pdf.to_dict("records"):
@@ -2166,17 +2179,7 @@ def process_batch(
     output_rows: list = []
 
     # ── Step 3: Process each FX bar ───────────────────────────────────
-    total_rows = len(pdf)
-    for i, (_, bar) in enumerate(pdf.iterrows(), start=1):
-        # ── Progress logging every 1000 rows ──────────────────────────
-        if IS_BACKFILL and i % 1000 == 0:
-            log("INFO", f"FX_PROGRESS {i}/{total_rows} rows", {
-                "processed": i,
-                "total": total_rows,
-                "batch_id": str(batch_id),
-                "mode": CONFIG["run_mode"]
-            })
-        
+    for _, bar in pdf.iterrows():
         try:
             pair = bar["currency_pair"]
 
@@ -2224,6 +2227,7 @@ def process_batch(
             if not exposure_rows:
                 continue
 
+
             producer_pipeline = bar.get("producer_pipeline_name", "fx_kafka_producer")
 
             for out_row in exposure_rows:
@@ -2245,7 +2249,7 @@ def process_batch(
                 "error":             str(exc),
                 "currency_pair":     bar.get("currency_pair", ""),
                 "offset":            int(bar.get("offset", -1)),
-                "partition":         int(bar.get("partition", -1)),
+                "partition":   int(bar.get("partition", -1)),
                 "original_event":    bar.to_dict(),
                 "failed_at":         pendulum.now("America/New_York").to_iso8601_string(),
                 "consumer_pipeline": CONFIG["consumer_pipeline_name"],
@@ -2254,6 +2258,7 @@ def process_batch(
                 "run_mode":          CONFIG["run_mode"],
             }
             dlq_buffer.append(dlq_entry)
+
 
     # ========== SET FAILED EVENTS GAUGE ==========
     # Count events that failed (those with "original_event" in dlq_buffer)
