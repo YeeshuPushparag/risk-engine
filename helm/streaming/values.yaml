@@ -72,4 +72,4 @@ spark:
   executorMemory: 2g
 
   driverCores: 1
-  driverMemory: 2g
+  driverMemory: 3g
