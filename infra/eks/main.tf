@@ -28,7 +28,7 @@ resource "aws_eks_node_group" "streaming" {
   scaling_config {
     min_size     = 1
     desired_size = 1
-    max_size     = 4
+    max_size     = 8
   }
 
   labels = {

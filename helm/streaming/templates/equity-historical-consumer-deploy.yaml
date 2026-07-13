@@ -94,6 +94,7 @@ spec:
                 --conf spark.executor.memory={{ .Values.spark.executorMemory }} \
                 --conf spark.driver.cores={{ .Values.spark.driverCores }} \
                 --conf spark.driver.memory={{ .Values.spark.driverMemory }} \
+                --conf spark.kubernetes.node.selector.role={{ .Values.nodeSelector.role }} \
                 --conf spark.kubernetes.executor.podNamePrefix=equity-historical-exec \
                 --conf spark.local.dir=/tmp/spark \
                 /app/equity_consumer.py

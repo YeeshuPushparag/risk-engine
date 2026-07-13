@@ -155,7 +155,7 @@ import requests
 import pendulum
 from kafka import KafkaConsumer
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, explode, lit, monotonically_increasing_id, broadcast
+from pyspark.sql.functions import col, from_json, explode, lit, monotonically_increasing_id, broadcast, to_timestamp, date_format, coalesce
 from pyspark.sql.types import (
     StructType, StructField, StringType, FloatType, ArrayType
 )
@@ -1940,58 +1940,112 @@ def process_batch_backfill_replay(
             )
 
     result_sdf_final = fanned_sdf.unionByName(invalid_sdf, allowMissingColumns=True)
-    result_pdf = result_sdf_final.toPandas()
 
-    output_rows: list = []
-    for row_dict in result_pdf.to_dict("records"):
-        if row_dict.get("_engine_error"):
-            metrics["events_failed"] += 1
-            dlq_buffer.append({
-                "error":             row_dict["_engine_error"],
-                "currency_pair":     row_dict.get("currency_pair", ""),
-                "offset":            int(row_dict.get("offset", -1) or -1),
-                "partition":         int(row_dict.get("partition", -1) or -1),
-                "original_event":    row_dict,
-                "failed_at":         pendulum.now("America/New_York").to_iso8601_string(),
-                "consumer_pipeline": CONFIG["consumer_pipeline_name"],
-                "batch_id":          str(batch_id),
-                "pipeline_run_id":   pipeline_run_id,
-                "run_mode":          CONFIG["run_mode"],
-            })
-            continue
+    # =========================================================
+    # THE ACTUAL OOM FIX
+    # =========================================================
+    # Previously: result_sdf_final.toPandas() pulled the ENTIRE post-
+    # fan-out dataset (16,566 bars x ~271 tickers/pair here = ~4.5M rows)
+    # into ONE driver-side pandas DataFrame — that's what threw
+    # "OutOfMemoryError: Java heap space" on the driver during collect().
+    #
+    # Fix: split into two paths.
+    #   - DLQ (invalid bars): bounded by raw bar count (never multiplied
+    #     by fan-out, at most `deduped_count` rows) — safe to collect to
+    #     pandas as before, preserves the exact original DLQ dict shape.
+    #   - Main output (valid, fanned bars): NEVER collected to the driver
+    #     at all. Lineage is stamped via Spark withColumn (not a Python
+    #     loop), and the write happens via Spark's own distributed
+    #     parquet writer — each executor writes its own partition's rows
+    #     directly to S3 in parallel. The driver never holds this data.
+    invalid_pdf = invalid_sdf.toPandas()
+    for row_dict in invalid_pdf.to_dict("records"):
+        metrics["events_failed"] += 1
+        dlq_buffer.append({
+            "error":             row_dict.get("_engine_error"),
+            "currency_pair":     row_dict.get("currency_pair", ""),
+            "offset":            int(row_dict.get("offset", -1) or -1),
+            "partition":         int(row_dict.get("partition", -1) or -1),
+            "original_event":    row_dict,
+            "failed_at":         pendulum.now("America/New_York").to_iso8601_string(),
+            "consumer_pipeline": CONFIG["consumer_pipeline_name"],
+            "batch_id":          str(batch_id),
+            "pipeline_run_id":   pipeline_run_id,
+            "run_mode":          CONFIG["run_mode"],
+        })
 
-        row_dict.pop("_engine_error", None)
-        producer_pipeline = row_dict.get("producer_pipeline_name", "fx_kafka_producer")
-        row_dict = add_lineage(
-            row_dict             = row_dict,
-            batch_id             = str(batch_id),
-            pipeline_run_id      = pipeline_run_id,
-            processing_timestamp = processing_timestamp,
-            producer_pipeline    = producer_pipeline,
+    run_mode_label = "replay" if IS_REPLAY else "backfill"
+
+    # Lineage stamping via Spark column expressions — equivalent to
+    # add_lineage(), just applied distributed instead of in a Python
+    # loop over collected rows. producer_pipeline_name pass-through
+    # matches the original default-fallback behavior.
+    final_output_sdf = (
+        fanned_sdf
+        .withColumn("consumer_pipeline_name", lit(CONFIG["consumer_pipeline_name"]))
+        .withColumn("pipeline_run_id",        lit(pipeline_run_id))
+        .withColumn("processing_timestamp",   lit(processing_timestamp))
+        .withColumn("data_source",            lit(CONFIG["data_source"]))
+        .withColumn("transformation",         lit(CONFIG["transformation"]))
+        .withColumn("record_created_at",      lit(processing_timestamp))
+        .withColumn("run_mode",               lit(run_mode_label))
+        .withColumn("batch_id",               lit(str(batch_id)))
+        .withColumn(
+            "producer_pipeline_name",
+            coalesce(col("producer_pipeline_name"), lit("fx_kafka_producer")),
         )
-        output_rows.append(row_dict)
-        metrics["events_processed"] += 1
-        PROM_RECORDS_PROCESSED_TOTAL.inc()
+    )
+
+    # .count() is a scalar aggregate action — Spark computes it
+    # distributed and returns one number to the driver, NOT the rows
+    # themselves. Safe regardless of fan-out size.
+    output_count = final_output_sdf.count()
+    metrics["events_processed"] = output_count
+    PROM_RECORDS_PROCESSED_TOTAL.inc(output_count)
 
     log("INFO", "BACKFILL_REPLAY_ENGINE_DONE",
-        {"batch_id": str(batch_id), "rows_out": len(output_rows)})
+        {"batch_id": str(batch_id), "rows_out": output_count})
 
-    if not output_rows:
+    if output_count == 0:
         PROM_DLQ_TOTAL.inc(len(dlq_buffer))
         flush_consumer_dlq_to_s3(dlq_buffer, str(batch_id))
         metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
         log_batch_metrics(str(batch_id), metrics)
         return
 
-    df_out = pd.DataFrame(output_rows)
-    df_out = df_out.where(pd.notnull(df_out), None)
+    # Distributed write — partitioned by date/hour to match the
+    # documented S3 layout (date=YYYY-MM-DD/hour=HH/...). NOTE: file
+    # names within each partition are Spark's own generated part-*
+    # names, not the batch_<id>_<timestamp>.parquet scheme
+    # save_to_parquet() used — an unavoidable tradeoff of a true
+    # distributed write (Spark's writer doesn't do the same per-file
+    # atomic PUT/COPY/DELETE our custom pandas writer did). Directory
+    # partitioning and queryability by date=/hour= is unchanged.
+    output_prefix = _output_prefix_for_mode()
+    output_path = f"s3a://{CONFIG['write_bucket']}/{output_prefix}"
 
-    save_to_parquet(df_out, str(batch_id))
+    write_ready_sdf = (
+        final_output_sdf
+        .withColumn("_ts_parsed", to_timestamp(col("timestamp")))
+        .withColumn("date", date_format(col("_ts_parsed"), "yyyy-MM-dd"))
+        .withColumn("hour", date_format(col("_ts_parsed"), "HH"))
+        .drop("_ts_parsed")
+    )
 
-    # Redis and late-event filtering are LIVE ONLY — never touched here,
-    # exactly as the original design already documented.
-    PROM_DLQ_TOTAL.inc(len(dlq_buffer))
-    flush_consumer_dlq_to_s3(dlq_buffer, str(batch_id))
+    try:
+        (
+            write_ready_sdf
+            .write
+            .mode("append")
+            .partitionBy("date", "hour")
+            .parquet(output_path)
+        )
+        PROM_S3_WRITES_TOTAL.inc()
+    except Exception as exc:
+        log("ERROR", "Spark-native parquet write failed for backfill/replay",
+            {"batch_id": batch_id, "run_mode": CONFIG["run_mode"], "error": str(exc)})
+        send_alert(f"S3 write FAILED (Spark-native) | batch_id={batch_id} | error={str(exc)}")
+        raise
 
     PROM_LAST_SUCCESS_TIMESTAMP.set(time.time())
     metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
