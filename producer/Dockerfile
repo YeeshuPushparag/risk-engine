@@ -10,8 +10,13 @@ RUN apt-get update && \
 
 COPY requirements.txt /tmp/requirements.txt
 
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN python -m pip install --upgrade pip setuptools wheel && \
+    python -m pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY . /app
 
-CMD ["python", "main.py"]
+RUN python -m compileall /app
+
+ENV PYTHONUNBUFFERED=1
+
+ENTRYPOINT ["python"]
