@@ -93,10 +93,10 @@ spec:
                 --conf spark.pyspark.driver.python=/usr/bin/python3 \
                 --conf spark.executorEnv.PYSPARK_PYTHON=/usr/bin/python3 \
                 --conf spark.executor.instances={{ .Values.spark.executors.live }} \
-                --conf spark.executor.cores={{ .Values.spark.executorCores }} \
-                --conf spark.executor.memory={{ .Values.spark.executorMemory }} \
-                --conf spark.driver.cores={{ .Values.spark.driverCores }} \
-                --conf spark.driver.memory={{ .Values.spark.driverMemory }} \
+                --conf spark.executor.cores={{ .Values.spark.live.executorCores }} \
+                --conf spark.executor.memory={{ .Values.spark.live.executorMemory }} \
+                --conf spark.driver.cores={{ .Values.spark.live.driverCores }} \
+                --conf spark.driver.memory={{ .Values.spark.live.driverMemory }} \
                 --conf spark.kubernetes.node.selector.role={{ .Values.nodeSelector.role }} \
                 --conf spark.kubernetes.executor.podNamePrefix=spark-fx-exec \
                 --conf spark.local.dir=/tmp/spark \

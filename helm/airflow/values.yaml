@@ -48,3 +48,12 @@ persistence:
     enabled: false
   postgres:
     enabled: false
+
+highCompute:
+  nodeLabel:
+    key: role
+    value: airflow-high-compute
+  taint:
+    key: dedicated
+    value: high-compute
+    effect: NoSchedule

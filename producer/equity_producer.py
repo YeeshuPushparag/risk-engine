@@ -264,7 +264,8 @@ def _push_metrics(producer_run_id: str) -> None:
         send_alert(
             f"❌ Metrics Push FAILED | mode={CONFIG['run_mode']} | error={str(exc)}",
             level="CRITICAL"
-        )
+        )        
+
 
 def _start_metrics_server() -> None:
     """
@@ -287,6 +288,7 @@ def _start_metrics_server() -> None:
 
 def send_alert(message: str, level: str = "CRITICAL"):
     """Send alert to Slack for critical issues only."""
+    MAX_SLACK_LEN = 100
     print(f"[{level}] {message}")
 
     if level != "CRITICAL":
@@ -297,6 +299,8 @@ def send_alert(message: str, level: str = "CRITICAL"):
         return
 
     try:
+        if len(message) > MAX_SLACK_LEN:
+            message = message[:MAX_SLACK_LEN] + "..."
         text = f"*[{level}] equity_kafka_producer *\n{message}"
         requests.post(webhook, json={"text": text}, timeout=3)
     except Exception as e:
@@ -406,9 +410,44 @@ def is_market_holiday() -> bool:
     return schedule.empty
 
 # =============================================================
-# Check if Timestamp is Within Today's Market Hours
+# TIMEZONE NORMALIZATION  —  everything downstream is Eastern Time
 # =============================================================
-def is_within_market_hours(timestamp) -> bool:
+def to_et(ts) -> pendulum.DateTime:
+    """
+    Normalize any timestamp to US/Eastern.
+
+    yfinance always returns UTC data (tz-aware UTC, or occasionally
+    tz-naive — pendulum.instance() treats naive input as UTC by
+    default, which matches that assumption). Every timestamp that gets
+    stored to raw S3, sent to Kafka, or used for partitioning is
+    converted here, at the single point data leaves yfinance, so the
+    rest of the pipeline (producer raw S3 + DLQ, Kafka payload, and the
+    consumer's raw S3 / processed S3 / DLQ / state rebuild) all see the
+    same ET-labeled value. Nothing downstream should ever re-derive a
+    date/hour from a non-ET timestamp again.
+    """
+    if isinstance(ts, str):
+        dt = pendulum.parse(ts)
+    else:
+        dt = pendulum.instance(ts)
+    return dt.in_timezone("America/New_York")
+
+
+# =============================================================
+# Check if Timestamp is Within Market Hours
+# =============================================================
+def is_within_market_hours(timestamp, check_today: bool = True) -> bool:
+    """
+    check_today=True (default, LIVE mode): also rejects a bar whose date
+        doesn't match the real-world "today" the process started on —
+        a safety guard against processing a stale/wrong-day bar live.
+    check_today=False (BACKFILL mode): evaluates the 9:30-16:00 ET
+        window purely against the bar's own date. BACKFILL_DATE is
+        essentially never the same as the real-world date the backfill
+        job happens to run on, so leaving check_today=True here would
+        make dt.date() != _TODAY true for every single event and
+        silently filter out the entire backfill.
+    """
     if isinstance(timestamp, str):
         dt = pendulum.parse(timestamp)
     else:
@@ -417,13 +456,24 @@ def is_within_market_hours(timestamp) -> bool:
     # Convert to ET
     dt = dt.in_timezone("America/New_York")
     
-    if dt.date() != _TODAY:
+    if check_today and dt.date() != _TODAY:
         return False
     
     market_start = dt.start_of('day').add(hours=9, minutes=30)
     market_end = dt.start_of('day').add(hours=16, minutes=0)
     
     return market_start <= dt < market_end
+
+
+# =============================================================
+# Filter only marker hour rows
+# =============================================================
+def filter_backfill_market_hours(events: List[dict]) -> List[dict]:
+    """Filter events to only those within market hours for backfill mode."""
+    return [
+        event for event in events 
+        if is_within_market_hours(pendulum.parse(event["event_time"]), check_today=False)
+    ]
 
 # =============================================================
 # LOAD TICKERS  (read-only from equity-bucket)
@@ -744,7 +794,6 @@ def fetch_snapshot_with_retry(
                 log("WARNING", "Batch fully failed — all tickers sent to DLQ",
                     {"batch_id": batch_id, "total_tickers": len(tickers),
                      "attempts": CONFIG["fetch_max_retries"], "error": str(exc)})
-
                 for ticker in tickers:
                     dlq_buffer.append({
                         "event": {"data": {"ticker": ticker}},
@@ -900,12 +949,11 @@ def _extract_events_from_df(
     is_backfill = CONFIG["backfill_mode"]   
     events: List[dict] = []
     skipped_outside_market = 0 
+    forward_filled_dropped = 0
     for ticker in tickers:
         try:
             if ticker not in df.columns.get_level_values(0):
                 fetch_metrics["missing_tickers"].append(ticker)
-                log("DEBUG", "Ticker missing from yfinance response",
-                    {"ticker": ticker, "batch_id": batch_id})
                 dlq_buffer.append({
                     "event": {"data": {"ticker": ticker}},
                     "error": f"Ticker '{ticker}' not found in yfinance response",
@@ -917,8 +965,6 @@ def _extract_events_from_df(
 
             if sub.empty:
                 fetch_metrics["empty_tickers"].append(ticker)
-                log("DEBUG", "Ticker returned empty data",
-                    {"ticker": ticker, "batch_id": batch_id})
                 dlq_buffer.append({
                     "event": {"data": {"ticker": ticker}},
                     "error": f"Ticker '{ticker}' returned empty data from yfinance",
@@ -938,24 +984,41 @@ def _extract_events_from_df(
                 bars = [sub.iloc[i] for i in range(len(sub))]
 
             for row in bars:
-                ts = row.name
+                # Normalize to ET immediately — the market-hours check,
+                # the stored event timestamp/date, and (in backfill) the
+                # hour used to pick the S3 partition all derive from
+                # this single ET value from here on.
+                ts_et = to_et(row.name)
 
                 # ===== THIS IS THE NEW FILTER =====
                 if not is_backfill:
-                    if not is_within_market_hours(ts):
+                    if not is_within_market_hours(ts_et):
                         skipped_outside_market += 1
-                        log("DEBUG", "Skipping data outside market hours",
-                            {"ticker": ticker, "timestamp": ts.isoformat(), 
-                            "batch_id": batch_id})
                         continue
                 # ===== END NEW FILTER =====
 
+                # ===== BACKFILL FORWARD-FILL / NO-PRINT GUARD =====
+                # yfinance pads a requested start/end range with a row
+                # for every single minute of the day, even a one-day
+                # range — this is not specific to multi-day requests.
+                # Padding rows repeat the last real bar with
+                # open=high=low=close, so they carry zero intrabar
+                # range. Real equity 1m data essentially never has
+                # every OHLC field identical, so a zero-range bar
+                # during backfill is treated as synthetic padding, not
+                # a real observation, and must never reach raw S3 or
+                # Kafka. (In practice this rarely fires for equities
+                # since a padded/no-trade minute typically also has
+                # volume<=0 and already gets routed below as invalid —
+                # this guard is a standardization/defensive backstop
+                # for cases where volume isn't reliably zeroed.)
+                if is_backfill and row["High"] == row["Low"]:
+                    forward_filled_dropped += 1
+                    continue
+                # ===== END GUARD =====
 
                 if pd.isna(row["Close"]) or row["Volume"] <= 0:
                     fetch_metrics["invalid_tickers"].append(ticker)
-                    log("DEBUG", "Ticker skipped — invalid close/volume",
-                        {"ticker": ticker, "close": row["Close"],
-                         "volume": row["Volume"]})
                     dlq_buffer.append({
                         "event": {"data": {"ticker": ticker}},
                         "error": (
@@ -973,8 +1036,8 @@ def _extract_events_from_df(
                     "low":       float(row["Low"]),
                     "close":     float(row["Close"]),
                     "volume":    float(row["Volume"]),
-                    "timestamp": ts.isoformat(),
-                    "date":      ts.date().isoformat(),
+                    "timestamp": ts_et.isoformat(),
+                    "date":      ts_et.date().isoformat(),
                 }
 
                 event = build_event(record, producer_run_id, batch_id, source_fetch_time, is_backfill=(not exclude_in_progress_bar))
@@ -1002,6 +1065,13 @@ def _extract_events_from_df(
                 {"batch_id": batch_id, 
                 "skipped_count": skipped_outside_market,
                 "kept_events": len(events)})
+
+    # Log forward-fill / no-print filtering (backfill only)
+    if is_backfill and forward_filled_dropped > 0:
+        log("INFO", "Backfill: dropped forward-filled (zero-range) bars — no real print",
+            {"batch_id": batch_id,
+             "dropped_count": forward_filled_dropped,
+             "kept_events": len(events)})
 
     # Log fetch health
     if fetch_metrics["missing_tickers"]:
@@ -1036,7 +1106,7 @@ def _extract_events_from_df(
                 f"batch={batch_id} | "
                 f"missing={len(fetch_metrics['missing_tickers'])}/{len(tickers)}",
                 level="CRITICAL",
-            )
+            )            
 
 
     return events
@@ -1200,7 +1270,7 @@ def run_live(producer_run_id: str, tickers: list[str], producer: KafkaProducer) 
 
             break
 
-        batch_id = datetime.now().strftime('%Y%m%d_%H%M%S')
+        batch_id = pendulum.now("America/New_York").strftime('%Y%m%d_%H%M%S')
         source_fetch_time = pendulum.now("America/New_York").to_iso8601_string()
         metrics           = make_batch_metrics()
         dlq_buffer:  list[dict] = []
@@ -1368,7 +1438,7 @@ def run_backfill(producer_run_id: str, tickers: list[str], producer: KafkaProduc
         },
     )
 
-    batch_id = datetime.now().strftime('%Y%m%d_%H%M%S')
+    batch_id = pendulum.now("America/New_York").strftime('%Y%m%d_%H%M%S')
     dlq_buffer: list[dict] = []
     metrics = make_batch_metrics()
     cycle_start = time.monotonic()
@@ -1383,7 +1453,10 @@ def run_backfill(producer_run_id: str, tickers: list[str], producer: KafkaProduc
             batch_id=batch_id,
             dlq_buffer=dlq_buffer,
         )
-
+        
+        # FILTER FIRST (remove non-market hours)
+        events = filter_backfill_market_hours(events)
+        
         metrics["events_fetched"] = len(events)
         metrics["missing_tickers"] = len(fetch_metrics.get("missing_tickers", []))
         metrics["empty_tickers"] = len(fetch_metrics.get("empty_tickers", []))
@@ -1666,11 +1739,6 @@ def main():
         )
         raise
     
-    finally:  
-        try:
-            _push_metrics(producer_run_id)
-        except Exception:
-            pass
 
 if __name__ == "__main__":
     main()

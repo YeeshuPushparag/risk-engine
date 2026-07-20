@@ -53,3 +53,11 @@ data:
   # Misc
   # =========================
   PYTHONPATH: /opt/airflow
+
+
+  AIRFLOW__NAMESPACE: airflow
+  AIRFLOW_IMAGE: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+  HIGH_COMPUTE_NODE_LABEL_KEY: "{{ .Values.highCompute.nodeLabel.key }}"
+  HIGH_COMPUTE_NODE_LABEL_VALUE: "{{ .Values.highCompute.nodeLabel.value }}"
+  HIGH_COMPUTE_NODE_TAINT_KEY: "{{ .Values.highCompute.taint.key }}"
+  HIGH_COMPUTE_NODE_TAINT_VALUE: "{{ .Values.highCompute.taint.value }}"

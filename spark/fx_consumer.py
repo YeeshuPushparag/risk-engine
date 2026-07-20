@@ -489,11 +489,10 @@ def _push_metrics() -> None:
     except Exception as exc:
         log("WARNING", "Prometheus push_to_gateway failed",
             {"error": str(exc), "mode": CONFIG["run_mode"]})
-        
         # ─── Send Slack alert (message only) ────────────────────────────
         send_alert(
             f"❌ Metrics Push FAILED | mode={CONFIG['run_mode']} | error={str(exc)}"
-        )
+        )        
 
 def _start_metrics_server() -> None:
     """
@@ -517,6 +516,7 @@ def _start_metrics_server() -> None:
 # =============================================================
 
 def send_alert(message: str):
+    MAX_SLACK_LEN = 100
     log("CRITICAL", f"[ALERT] {message}")
 
     webhook = os.getenv("SLACK_WEBHOOK_URL")
@@ -524,6 +524,8 @@ def send_alert(message: str):
         return
 
     try:
+        if len(message) > MAX_SLACK_LEN:
+            message = message[:MAX_SLACK_LEN] + "..."
         text = f"* [CRITICAL] fx_kafka_consumer *\n{message}"
         requests.post(webhook, json={"text": text}, timeout=3)
     except Exception as e:
@@ -592,7 +594,9 @@ def wait_for_topic(timeout_seconds: int = 600) -> None:
                     "timeout_seconds": timeout_seconds,
                 },
             )
-
+            send_alert(
+                f"Kafka topic '{CONFIG['topic']}' not found after {timeout_seconds} seconds"
+            )
             raise RuntimeError(
                 f"Kafka topic '{CONFIG['topic']}' not found after {timeout_seconds} seconds"
             )
@@ -1194,16 +1198,18 @@ def rebuild_state_from_s3() -> None:
         combined["timestamp"],
         utc=True,
         errors="coerce"
-    )
+    ).dt.tz_convert("America/New_York")
 
     combined = combined.dropna(subset=["_evt_dt"])
 
-    rebuild_start_utc = pd.Timestamp(rebuild_start_et).tz_convert("UTC")
-    now_utc           = pd.Timestamp(now_et).tz_convert("UTC")
+    # Compare entirely in ET — no UTC intermediate — so rebuild
+    # filtering matches the ET-based partitioning used everywhere else.
+    rebuild_start_et_ts = pd.Timestamp(rebuild_start_et)
+    now_et_ts           = pd.Timestamp(now_et)
 
     combined = combined[
-        (combined["_evt_dt"] >= rebuild_start_utc)
-        & (combined["_evt_dt"] <= now_utc)
+        (combined["_evt_dt"] >= rebuild_start_et_ts)
+        & (combined["_evt_dt"] <= now_et_ts)
     ]
 
     if combined.empty:
@@ -1224,7 +1230,8 @@ def rebuild_state_from_s3() -> None:
             {"missing_columns": list(missing)})
         return
 
-    records_loaded = 0
+    records_loaded  = 0
+    records_deduped = 0
     for _, row in combined.iterrows():
         pair = row.get("currency_pair")
         if not pair:
@@ -1240,6 +1247,31 @@ def rebuild_state_from_s3() -> None:
 
         if close <= 0 or high < low:
             continue
+
+        row_ts = pd.to_datetime(row.get("timestamp"), utc=True, errors="coerce")
+        if pd.isna(row_ts):
+            continue
+        row_ts = row_ts.tz_convert("America/New_York")
+
+        # ─── Same persistent ordering/dedup guard the live streaming
+        # loop uses. Raw S3 files written by the live producer can
+        # legitimately contain the same (pair, timestamp) bar across
+        # two different cycle files (no producer-side dedup by design —
+        # see fx-producer). list_s3_files_with_prefix above intentionally
+        # reads ALL files in the scan window (correct for normal live
+        # cycles), so without this check a restart could push a
+        # duplicate bar into the buffer twice, corrupting the exact
+        # rolling-metric window the live path already protects.
+        existing_buffer = pair_buffers.get(pair)
+        if existing_buffer:
+            last_ts = pd.to_datetime(
+                existing_buffer[-1].get("timestamp"), utc=True, errors="coerce"
+            )
+            if pd.notna(last_ts):
+                last_ts = last_ts.tz_convert("America/New_York")
+                if row_ts <= last_ts:
+                    records_deduped += 1
+                    continue
 
         # Build a clean OHLC bar — identical structure to what the live
         # pipeline stores via update_pair_buffer
@@ -1258,6 +1290,7 @@ def rebuild_state_from_s3() -> None:
 
     log("INFO", "FX state rebuild complete",
         {"records_loaded":        records_loaded,
+         "records_deduped":       records_deduped,
          "pairs_in_buffer":       len(pair_buffers),
          "rebuild_window_minutes": rebuild_minutes})
 
@@ -1531,16 +1564,22 @@ def save_to_parquet(df: pd.DataFrame, batch_id: str) -> None:
 
     output_prefix = _output_prefix_for_mode()
     
-    # Create temporary partition columns from each row's timestamp
-    df['_partition_date'] = pd.to_datetime(df['timestamp']).dt.strftime('%Y-%m-%d')
-    df['_partition_hour'] = pd.to_datetime(df['timestamp']).dt.strftime('%H')
+    # Create temporary partition columns from each row's timestamp.
+    # Always normalize to America/New_York explicitly here — parsing
+    # with utc=True first (so both offset-aware and naive/UTC strings
+    # are handled the same way) and then converting to ET guarantees
+    # every partition folder is computed in ET, regardless of what the
+    # source string's original offset was.
+    ts_et = pd.to_datetime(df['timestamp'], utc=True).dt.tz_convert("America/New_York")
+    df['_partition_date'] = ts_et.dt.strftime('%Y-%m-%d')
+    df['_partition_hour'] = ts_et.dt.strftime('%H')
     
     # Group by date and hour, writing each group to its own partitioned file
     for (date, hour), group in df.groupby(['_partition_date', '_partition_hour']):
         # Derive batch_id from the group (all rows in this hour have same batch_id)
         batch_id = group.iloc[0]["batch_id"]
         
-        consumer_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]
+        consumer_timestamp = pendulum.now("America/New_York").strftime('%Y%m%d_%H%M%S_%f')[:-3]
         key = (
             f"{output_prefix}/"
             f"date={date}/hour={hour}/"
@@ -1572,13 +1611,22 @@ def save_to_parquet(df: pd.DataFrame, batch_id: str) -> None:
 
 def publish_fx_snapshot_to_redis(snapshot_rows: list) -> None:
     """
-    Publish the latest FX snapshot to Redis for real-time consumers.
-    SET + PUBLISH.
+    Publish the SYNCHRONIZED FX snapshot to Redis ("fx_latest_snapshot" /
+    channel "fx_stream") for real-time consumers. SET + PUBLISH.
 
-    LIVE MODE ONLY — this function must never be called during replay or backfill.
-    The call site (process_batch) enforces this via IS_LIVE.
-    Redis represents live market state only; historical modes must never
-    overwrite the current live snapshot with stale data.
+    This is Redis #1: the call site (process_batch) passes only rows
+    that are (a) genuinely new for their pair — passed the persistent
+    cross-batch ordering/dedup check, (b) within the live freshness
+    window (late_event_max_minutes), and (c) all floored to the SAME
+    minute as the batch's max minute — so every pair in this snapshot
+    is guaranteed as-of the identical instant. This is the store to
+    read from for anything that needs cross-pair consistency (e.g. an
+    aggregate computed across multiple pairs).
+
+    LIVE MODE ONLY — this function must never be called during replay or
+    backfill. The call site enforces this via IS_LIVE. Redis represents
+    live market state only; historical modes must never overwrite the
+    current live snapshot with stale data.
     """
     if not snapshot_rows:
         return
@@ -1596,6 +1644,87 @@ def publish_fx_snapshot_to_redis(snapshot_rows: list) -> None:
     except Exception as exc:
         log("ERROR", "Redis FX snapshot publish failed", {"error": str(exc)})
         send_alert(f"Redis snapshot FAILED | error={str(exc)}")
+
+
+def build_fx_all_pairs_snapshot(pair_groups: dict, late_cutoff) -> list:
+    """
+    Build Redis #2's payload — "never lose a pair" — directly from
+    pair_buffers, the same persistent state process_batch already
+    maintains. Every currency pair that has EVER produced a bar is
+    included, using that pair's own latest buffered bar and that pair's
+    own rolling FX metrics, regardless of whether it updated in the
+    current batch or how long ago its last real bar arrived. Each fanned
+    -out ticker row is tagged with is_stale (True when that pair's last
+    bar is older than late_event_max_minutes) so the UI can render
+    freshness without a ticker ever disappearing from the view.
+
+    This deliberately reuses compute_fx_metrics()/compute_exposure_rows()
+    — the exact same functions the fresh/live path uses — so there is
+    only ever one place that computes "the metrics for this pair" and
+    one place that fans a pair out to its exposed tickers.
+
+    LIVE MODE ONLY. Called unconditionally every live batch (regardless
+    of whether output_rows is empty this cycle) so a pair's visibility
+    in Redis #2 never depends on this batch having new data for it.
+    """
+    snapshot_rows: list = []
+
+    for pair, buffer in pair_buffers.items():
+        if not buffer:
+            continue
+
+        latest_bar = dict(buffer[-1])
+        fx_metrics = compute_fx_metrics(buffer)
+        latest_bar = add_prev_ohlcv_to_bar(latest_bar, buffer)
+
+        exposure_rows = compute_exposure_rows(
+            bar         = latest_bar,
+            pair        = pair,
+            fx_metrics  = fx_metrics,
+            pair_groups = pair_groups,
+        )
+
+        bar_ts = pd.to_datetime(latest_bar.get("timestamp"), utc=True, errors="coerce")
+        is_stale = bool(
+            pd.isna(bar_ts) or bar_ts.tz_convert("America/New_York") < late_cutoff
+        )
+
+        for row in exposure_rows:
+            row["is_stale"] = is_stale
+            snapshot_rows.append(row)
+
+    return snapshot_rows
+
+
+def publish_fx_all_pairs_snapshot(snapshot_rows: list) -> None:
+    """
+    Publish the "never lose a pair" FX snapshot to Redis
+    ("fx_latest_snapshot_all" / channel "fx_stream_all"). SET + PUBLISH.
+
+    This is Redis #2: every pair the consumer has ever seen, each
+    carrying its own true latest timestamp and an is_stale flag —
+    exactly the view Django Channels / Next.js should read for "show
+    all N tickers, and let the UI distinguish fresh from stale" rather
+    than silently dropping a ticker whose feed went quiet.
+
+    LIVE MODE ONLY — same guard as publish_fx_snapshot_to_redis.
+    """
+    if not snapshot_rows:
+        return
+
+    try:
+        safe_rows     = [{k: json_safe(v) for k, v in r.items()} for r in snapshot_rows]
+        snapshot_json = json.dumps(safe_rows, default=str)
+
+        rc = _get_redis()
+        rc.set("fx_latest_snapshot_all", snapshot_json)
+        rc.publish("fx_stream_all", snapshot_json)
+
+        PROM_REDIS_WRITES_TOTAL.inc()
+
+    except Exception as exc:
+        log("ERROR", "Redis FX all-pairs snapshot publish failed", {"error": str(exc)})
+        send_alert(f"Redis all-pairs snapshot FAILED | error={str(exc)}")
 
 # =============================================================
 # ADD LINEAGE TO OUTPUT ROWS
@@ -1742,6 +1871,16 @@ def make_run_pair_engine(pair_groups: dict):
 
         pair = pdf["currency_pair"].iloc[0]
         pdf = pdf.sort_values("timestamp").reset_index(drop=True)
+        total_rows = len(pdf)
+
+        # ── Log the start of processing for this currency pair (backfill/replay only).
+        # This function is never called from live mode.
+        if total_rows > 0:
+            log("INFO", "PAIR_START", {
+                "currency_pair": pair,
+                "total_rows": total_rows,
+                "run_mode": CONFIG["run_mode"]
+            })
 
         if pair not in pair_groups:
             out = pdf.copy()
@@ -1763,7 +1902,19 @@ def make_run_pair_engine(pair_groups: dict):
         buffer: list = []
         bar_rows: list = []
 
-        for row in pdf.to_dict("records"):
+        for i, row in enumerate(pdf.to_dict("records"), start=1):
+            # ── Log progress every 1000 rows while processing this currency pair.
+            # Applies to both backfill and replay. Live mode never reaches here.
+            if total_rows >= 1000 and i % 1000 == 0:
+                pct_complete = round((i / total_rows) * 100, 1)
+
+                log("INFO", "PROGRESS", {
+                    "currency_pair": pair,
+                    "processed": i,
+                    "total": total_rows,
+                    "pct": pct_complete,
+                    "run_mode": CONFIG["run_mode"]
+                })
             try:
                 if row["close"] <= 0 or row["high"] < row["low"]:
                     row["_engine_error"] = (
@@ -1810,6 +1961,21 @@ def make_run_pair_engine(pair_groups: dict):
             row["_engine_error"] = None
             bar_rows.append(row)
 
+
+        # ── Log completion for this currency pair (backfill/replay only).
+        # Includes counts of successful and failed rows.
+        if total_rows > 0:
+            valid_rows = len([r for r in bar_rows if r.get("_engine_error") is None])
+            error_rows = len([r for r in bar_rows if r.get("_engine_error") is not None])
+
+            log("INFO", "PAIR_DONE", {
+                "currency_pair": pair,
+                "total_rows": total_rows,
+                "valid_rows": valid_rows,
+                "error_rows": error_rows,
+                "output_rows": len(bar_rows),
+                "run_mode": CONFIG["run_mode"]
+            })
         bars_df = pd.DataFrame(bar_rows)
         if "_ts_epoch_min" in bars_df.columns:
             bars_df = bars_df.drop(columns=["_ts_epoch_min"])
@@ -2075,18 +2241,36 @@ def process_batch(
         BACKFILL -> fx/dlq/backfill/
         REPLAY   -> fx/dlq/replay/
 
-    Late event filtering:
-        LIVE     : Events older than late_event_max_minutes are filtered and
-                   routed to the live S3 DLQ.
-        BACKFILL : Late-event filtering is DISABLED. No late DLQ writes.
-        REPLAY   : Late-event filtering is DISABLED. Historical events are always
-                   older than late_event_max_minutes by wall clock — filtering
-                   would drop every event. No late DLQ writes.
+    Late/duplicate event handling (LIVE ONLY — backfill/replay unaffected):
+        A bar only ever reaches Redis/S3 after a PERSISTENT, cross-batch
+        ordering check: is its timestamp newer than the last timestamp
+        already accepted into that pair's buffer? This replaces relying
+        on same-batch dropDuplicates alone, which has no memory across
+        batches and would let an unchanged bar re-fetched next cycle
+        (or a batch straggling in after a Kafka/producer hiccup)
+        re-enter the buffer as if it were new.
+          - Not newer (duplicate)              -> dropped, buffer untouched.
+          - Newer AND within late_event_max_minutes -> full processing:
+            buffer update, rolling FX metrics, fan-out, feeds S3 +
+            Redis #1 (the synchronized view).
+          - Newer BUT older than late_event_max_minutes -> still updates
+            the buffer (it is real, just late) so it is never lost, but
+            is excluded from S3 / Redis #1; it is NOT treated as an
+            error and is NOT routed to DLQ for lateness alone.
 
-    Redis:
-        LIVE     : Snapshot published after every successful batch.
-        BACKFILL : Redis is NEVER touched.
-        REPLAY   : Redis is NEVER touched.
+    Redis (LIVE ONLY — two separate stores, both read from state this
+    function already maintains, not recomputed independently):
+        Redis #1 "fx_latest_snapshot" / "fx_stream":
+            Only pairs that are new-this-cycle, within the freshness
+            window, AND floored to the SAME minute as the batch's max
+            minute — i.e. genuinely synchronized as-of one instant.
+            Use for anything needing cross-pair consistency.
+        Redis #2 "fx_latest_snapshot_all" / "fx_stream_all":
+            EVERY pair ever seen, built straight from pair_buffers,
+            each tagged is_stale. Published every live batch regardless
+            of whether this cycle had new data — a pair is never
+            dropped from this view just because its feed went quiet.
+        BACKFILL / REPLAY: Redis is NEVER touched, as before.
 
     Prometheus metrics:
         LIVE     : Pushed after each successful batch.
@@ -2095,14 +2279,17 @@ def process_batch(
         REPLAY   : Not pushed from process_batch; pushed once when the
                 replay job completes.
 
-    Per-batch lifecycle:
+    Per-batch lifecycle (LIVE):
       1. Convert Spark -> pandas
-      2. Deduplicate by (currency_pair, timestamp)
-      3. Filter late events [LIVE ONLY]
-      4. Per-bar: validation -> buffer update -> FX metrics -> fan-out -> lineage
-      5. Atomic S3 write (mode-isolated output prefix)
-      6. Redis snapshot [LIVE ONLY]
-      7. Flush consumer DLQ to S3 (mode-isolated DLQ prefix)
+      2. Cheap intra-batch dropDuplicates (belt-and-suspenders only)
+      3. Per-bar: persistent ordering/dedup check -> buffer update ->
+         FX metrics -> freshness branch -> fan-out -> lineage
+      4. Build Redis #1's same-minute synchronized subset
+      5. Atomic S3 write of all fresh+deduped rows (mode-isolated prefix)
+      6. Publish Redis #1 (synchronized subset) and Redis #2 (all pairs,
+         from pair_buffers)
+      7. Flush consumer DLQ to S3 (mode-isolated DLQ prefix; lateness
+         alone no longer generates a DLQ entry)
       8. Push Prometheus metrics [LIVE and BACKFILL — replay pushes at job end]
 
     Idempotency:
@@ -2137,7 +2324,7 @@ def process_batch(
         )
         return
 
-    # ── LIVE MODE — everything below is the ORIGINAL code, unchanged ──
+    # ── LIVE MODE ──────────────────────────────────────────────────────
     # ── Convert Spark batch to pandas ─────────────────────────────────
     try:
         if batch_df.count() == 0:
@@ -2171,61 +2358,22 @@ def process_batch(
         log_batch_metrics(str(batch_id), metrics)
         return
 
-    # ── Step 2: Late event filtering ──────────────────────────────────
-    # LIVE MODE ONLY: filter events older than late_event_max_minutes to
-    # prevent stale data from corrupting rolling metrics.
-    # BACKFILL and REPLAY: late filtering is DISABLED.
-    #   - Backfill processes historical data; filtering would cause incorrect
-    #     data loss from legitimate historical batches.
-    #   - Replay events are always older than late_event_max_minutes by wall
-    #     clock — filtering would drop every event.
-    # Late DLQ writes only occur in live mode.
-    if IS_LIVE and "timestamp" in pdf.columns:
+    # ── Step 2: Annotate ET timestamp (LIVE ONLY) ──────────────────────
+    # No longer filters or drops rows here. Whether a bar is a duplicate
+    # or too late is now decided per-bar inside Step 3, against the
+    # PERSISTENT pair_buffers state (not just this batch) — see the
+    # docstring above for why same-batch filtering here was insufficient.
+    if "timestamp" in pdf.columns:
         pdf["_evt_dt"] = (
             pd.to_datetime(pdf["timestamp"], utc=True, errors="coerce")
             .dt.tz_convert("America/New_York")
         )
-        late_events            = pdf[pdf["_evt_dt"] < late_cutoff]
-        pdf                    = pdf[pdf["_evt_dt"] >= late_cutoff].copy()
-        metrics["events_late"] = len(late_events)
-    
+    else:
+        pdf["_evt_dt"] = pd.NaT
 
-
-        for _, late_row in late_events.iterrows():
-            dlq_entry = {
-                "error":             (
-                    f"Late FX event skipped — older than "
-                    f"{CONFIG['late_event_max_minutes']} minutes"
-                ),
-                "currency_pair":     late_row.get("currency_pair", ""),
-                "timestamp":         late_row.get("timestamp", ""),
-                "current_time":      current_time.isoformat(),
-                "offset":            int(late_row.get("offset", -1)),
-                "partition":   int(late_row.get("partition", -1)),
-                "consumer_pipeline": CONFIG["consumer_pipeline_name"],
-                "batch_id":          str(batch_id),
-                "pipeline_run_id":   pipeline_run_id,
-            }
-            dlq_buffer.append(dlq_entry)
-
-        pdf = pdf.drop(columns=["_evt_dt"])
-
-    # ========== GAUGES FOR ALL MODES (OUTSIDE THE IF BLOCK) ==========
-    PROM_LATE_EVENTS.set(metrics["events_late"])
     PROM_DEDUPED_EVENTS.set(metrics["events_deduped"])
     PROM_BUFFER_SIZE.set(sum(len(buf) for buf in pair_buffers.values()))
     PROM_PAIRS_IN_BUFFER.set(len(pair_buffers))
-    
-    if len(pdf) == 0:
-        log("INFO", "All FX events filtered",
-            {"batch_id":   batch_id,
-             "late_count": metrics["events_late"],
-             "run_mode":   CONFIG["run_mode"]})
-        PROM_DLQ_TOTAL.inc(len(dlq_buffer))
-        flush_consumer_dlq_to_s3(dlq_buffer, str(batch_id))
-        metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
-        log_batch_metrics(str(batch_id), metrics)
-        return
 
     metrics["events_received"] = len(pdf)
     log("INFO", "FX batch processed successfully", {"batch_id": str(batch_id)})
@@ -2245,13 +2393,39 @@ def process_batch(
                 )
 
             if pair not in pair_groups:
-                log("DEBUG", "FX pair not in universe — skipping",
+                log("INFO", "FX pair not in universe — skipping",
                     {"pair": pair, "batch_id": batch_id})
                 continue
+
+            bar_ts_et = bar.get("_evt_dt")
+            if bar_ts_et is None or pd.isna(bar_ts_et):
+                raise ValueError(f"Unparseable FX timestamp: {bar.get('timestamp')}")
+
+            # ─── Persistent, cross-batch ordering/dedup check ───
+            # Compares against the last timestamp already accepted into
+            # THIS pair's buffer — across batches, across a consumer
+            # restart (pair_buffers is repopulated by
+            # rebuild_state_from_s3 before live processing resumes) —
+            # not just against other rows in this same batch. This is
+            # the single gate that decides "is this bar actually new".
+            existing_buffer = pair_buffers.get(pair)
+            if existing_buffer:
+                last_ts = pd.to_datetime(
+                    existing_buffer[-1].get("timestamp"), utc=True, errors="coerce"
+                )
+                if pd.notna(last_ts):
+                    last_ts = last_ts.tz_convert("America/New_York")
+                    if bar_ts_et <= last_ts:
+                        metrics["events_deduped"] += 1
+                        continue
 
             # ─── Buffer update: clean OHLC structure ───
             # CRITICAL: Do NOT store full row in buffer.
             # Buffer must contain ONLY OHLC + minimal metadata.
+            # Unconditional once a bar passes the ordering check above —
+            # buffer state and rolling metrics never depend on whether
+            # the bar was fresh enough for live S3/Redis#1 output; that
+            # is decided separately, below, and only affects OUTPUT.
             clean_bar = {
                 "currency_pair": pair,
                 "open":          float(bar["open"]),
@@ -2269,6 +2443,22 @@ def process_batch(
 
             # FX rolling metrics (uses clean buffer)
             fx_metrics = compute_fx_metrics(pair_buffers[pair])
+
+            # ─── Freshness branch — output-only, buffer already updated ───
+            if bar_ts_et < late_cutoff:
+                # Genuinely new (passed ordering above) but arrived
+                # later than the live freshness window. The buffer
+                # update above already means pair_buffers — and
+                # therefore Redis #2 — reflect it. It is intentionally
+                # excluded from S3 / rolling live output / Redis #1
+                # only. Not discarded, and not a DLQ-worthy error —
+                # lateness alone is not a failure.
+                metrics["events_late"] += 1
+                log("INFO", "FX bar processed (buffer/Redis#2 updated) but "
+                             "excluded from S3/Redis#1 — outside freshness window",
+                    {"pair": pair, "timestamp": clean_bar["timestamp"],
+                     "batch_id": str(batch_id)})
+                continue
 
             # Fan-out to per-ticker exposure rows (uses clean bar)
             exposure_rows = compute_exposure_rows(
@@ -2304,7 +2494,7 @@ def process_batch(
                 "currency_pair":     bar.get("currency_pair", ""),
                 "offset":            int(bar.get("offset", -1)),
                 "partition":   int(bar.get("partition", -1)),
-                "original_event":    bar.to_dict(),
+                "original_event":    {k: v for k, v in bar.to_dict().items() if k != "_evt_dt"},
                 "failed_at":         pendulum.now("America/New_York").to_iso8601_string(),
                 "consumer_pipeline": CONFIG["consumer_pipeline_name"],
                 "batch_id":          str(batch_id),
@@ -2314,38 +2504,56 @@ def process_batch(
             dlq_buffer.append(dlq_entry)
 
 
-    # ========== SET FAILED EVENTS GAUGE ==========
+    # ========== SET GAUGES ==========
     # Count events that failed (those with "original_event" in dlq_buffer)
     metrics["events_failed"] = len([e for e in dlq_buffer if "original_event" in e])
     PROM_FAILED_EVENTS.set(metrics["events_failed"])
+    PROM_LATE_EVENTS.set(metrics["events_late"])
+    PROM_DEDUPED_EVENTS.set(metrics["events_deduped"])
 
     metrics["output_rows"] = len(output_rows)
 
-    if not output_rows:
-        PROM_DLQ_TOTAL.inc(len(dlq_buffer))
-        flush_consumer_dlq_to_s3(dlq_buffer, str(batch_id))
-        metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
-        log_batch_metrics(str(batch_id), metrics)
-        return
+    # ── Step 4: Redis #1 — the synchronized subset ─────────────────────
+    # From the fresh + deduped rows, keep only those floored to the SAME
+    # minute as the batch's max minute, so every pair in this snapshot
+    # is genuinely as-of one identical instant (e.g. 44 tickers at
+    # 2:36pm and 6 stragglers still at 2:35pm -> only the 44 go here).
+    synced_rows: list = []
+    if output_rows:
+        ts_index = pd.to_datetime(
+            [r["timestamp"] for r in output_rows], utc=True, errors="coerce"
+        ).tz_convert("America/New_York")
+        floored_minutes = ts_index.floor("min")
+        max_minute      = floored_minutes.max()
+        synced_rows = [
+            row for row, minute in zip(output_rows, floored_minutes)
+            if minute == max_minute
+        ]
 
-    # ── Step 4: Build output DataFrame, clean NaN ─────────────────────
-    df_out = pd.DataFrame(output_rows)
-    df_out = df_out.where(pd.notnull(df_out), None)
+        # ── Step 5: Atomic S3 write — ALL fresh+deduped rows, not just
+        # the synchronized subset. Mode-isolated output prefix.
+        # LIVE -> fx/data/live/ (BACKFILL/REPLAY never reach this branch)
+        df_out = pd.DataFrame(output_rows)
+        df_out = df_out.where(pd.notnull(df_out), None)
+        save_to_parquet(df_out, str(batch_id))
 
-    # ── Step 5: Atomic S3 write — mode-isolated output prefix ─────────
-    # LIVE     -> fx/data/live/
-    # BACKFILL -> fx/data/backfill/
-    # REPLAY   -> fx/data/replay/
-    save_to_parquet(df_out, str(batch_id))
-
-    # ── Step 6: Redis snapshot — LIVE ONLY ────────────────────────────
-    # Redis represents live market state only.
-    # Backfill and replay must never overwrite the live snapshot with
-    # stale historical data.
+    # ── Step 6: Redis — LIVE ONLY, two independent stores ──────────────
+    # Redis #1 "fx_latest_snapshot"/"fx_stream": only the synchronized
+    #   subset above — for anything needing cross-pair consistency.
+    # Redis #2 "fx_latest_snapshot_all"/"fx_stream_all": EVERY pair ever
+    #   seen, rebuilt straight from pair_buffers (which the loop above
+    #   already kept current, including late-but-real bars) — published
+    #   every live batch regardless of whether output_rows is empty this
+    #   cycle, so a pair is never dropped from view just because it
+    #   didn't have fresh data this batch.
     if IS_LIVE:
-        pairs = sorted(set(r["currency_pair"] for r in output_rows))
-        print(f"[REDIS-OUT] batch={batch_id} pairs={pairs}")
-        publish_fx_snapshot_to_redis(output_rows)
+        if synced_rows:
+            pairs = sorted(set(r["currency_pair"] for r in synced_rows))
+            print(f"[REDIS-OUT] batch={batch_id} pairs={pairs}")
+            publish_fx_snapshot_to_redis(synced_rows)
+
+        all_pairs_snapshot = build_fx_all_pairs_snapshot(pair_groups, late_cutoff)
+        publish_fx_all_pairs_snapshot(all_pairs_snapshot)
 
     # ── Step 7: Flush DLQ to S3 (mode-isolated DLQ prefix) ────────────
     PROM_DLQ_TOTAL.inc(len(dlq_buffer))
@@ -2354,6 +2562,7 @@ def process_batch(
     PROM_LAST_SUCCESS_TIMESTAMP.set(time.time())
     metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
     PROM_DURATION_SECONDS.observe(time.monotonic() - batch_start)
+    log_batch_metrics(str(batch_id), metrics)
 
 
 # =============================================================
@@ -2542,6 +2751,12 @@ def build_spark_session() -> SparkSession:
         )
         .config("spark.hadoop.fs.s3a.path.style.access", "true")
         .config("spark.sql.shuffle.partitions", CONFIG["spark_shuffle_partitions"])
+        # Without this, to_timestamp()/date_format() in the backfill/replay
+        # distributed write path (process_batch_backfill_replay) render
+        # date/hour in the JVM's default timezone (typically UTC in a
+        # container), not ET — silently mis-partitioning that path even
+        # though every other timestamp in the pipeline is ET-normalized.
+        .config("spark.sql.session.timeZone", "America/New_York")
         .getOrCreate()
     )
 
@@ -2785,6 +3000,11 @@ if __name__ == "__main__":
             except Exception as exc:
                 log("WARNING", "Final metrics push failed", {"error": str(exc)})
             
+            send_alert(
+                f"FX BACKFILL COMPLETE | "
+                f"start date={CONFIG['replay_start_date']}"
+                f"end date={CONFIG['replay_end_date']}"
+            )
             # Sleep 10 minutes after backfill completes before exiting
             log("INFO", "Backfill complete - waiting 10 minutes before final exit")
             time.sleep(600)  # 10 minutes = 600 seconds

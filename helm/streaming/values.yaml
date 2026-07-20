@@ -66,10 +66,23 @@ spark:
 
   executors:
     live: 1
-    backfillReplay: 10
+    equityBackfillReplay: 4
+    fxBackfillReplay: 10
 
-  executorCores: 1
-  executorMemory: 2g
+  live:
+    executorCores: 1
+    executorMemory: 2g
+    driverCores: 1
+    driverMemory: 2g
 
-  driverCores: 1
-  driverMemory: 3g
+  equityBackfillReplay:
+    executorCores: 1
+    executorMemory: 2g      # Equity-specific
+    driverCores: 1
+    driverMemory: 2g        # Equity-specific
+
+  fxBackfillReplay:
+    executorCores: 1
+    executorMemory: 4g      # FX-specific
+    driverCores: 1
+    driverMemory: 3g        # FX-specific

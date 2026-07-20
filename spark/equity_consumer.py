@@ -461,7 +461,7 @@ def _push_metrics() -> None:
         # ─── Send Slack alert (message only) ────────────────────────────
         send_alert(
             f"❌ Metrics Push FAILED | mode={CONFIG['run_mode']} | error={str(exc)}"
-        )
+        )        
 
 
 def _start_metrics_server() -> None:
@@ -482,6 +482,7 @@ def _start_metrics_server() -> None:
 # =============================================================
 
 def send_alert(message: str) -> None:
+    MAX_SLACK_LEN = 100
     log("CRITICAL", f"[ALERT] {message}")
 
     webhook = os.getenv("SLACK_WEBHOOK_URL")
@@ -489,6 +490,8 @@ def send_alert(message: str) -> None:
         return
 
     try:
+        if len(message) > MAX_SLACK_LEN:
+            message = message[:MAX_SLACK_LEN] + "..."
         text = f"* [CRITICAL] equity_kafka_consumer *\n{message}"
         requests.post(webhook, json={"text": text}, timeout=3)
     except Exception as e:
@@ -795,6 +798,7 @@ def wait_for_topic(timeout_seconds: int = 600) -> None:
                     "Kafka topic is available",
                     {"topic": CONFIG["topic"]},
                 )
+
                 consumer.close()
                 return
 
@@ -818,7 +822,9 @@ def wait_for_topic(timeout_seconds: int = 600) -> None:
                     "timeout_seconds": timeout_seconds,
                 },
             )
-
+            send_alert(
+                f"Kafka topic '{CONFIG['topic']}' not found after {timeout_seconds} seconds"
+            )
             raise RuntimeError(
                 f"Kafka topic '{CONFIG['topic']}' not found after {timeout_seconds} seconds"
             )
@@ -1012,15 +1018,17 @@ def rebuild_state_from_s3() -> None:
 
     combined["_evt_dt"] = pd.to_datetime(
         combined["timestamp"], utc=True, errors="coerce"
-    )
+    ).dt.tz_convert("America/New_York")
     combined = combined.dropna(subset=["_evt_dt"])
 
-    rebuild_start_utc = pd.Timestamp(rebuild_start_et).tz_convert("UTC")
-    now_utc           = pd.Timestamp(now_et).tz_convert("UTC")
+    # Compare entirely in ET — no UTC intermediate — so rebuild
+    # filtering matches the ET-based partitioning used everywhere else.
+    rebuild_start_et_ts = pd.Timestamp(rebuild_start_et)
+    now_et_ts           = pd.Timestamp(now_et)
 
     combined = combined[
-        (combined["_evt_dt"] >= rebuild_start_utc)
-        & (combined["_evt_dt"] <= now_utc)
+        (combined["_evt_dt"] >= rebuild_start_et_ts)
+        & (combined["_evt_dt"] <= now_et_ts)
     ]
 
     if combined.empty:
@@ -1039,7 +1047,8 @@ def rebuild_state_from_s3() -> None:
             {"missing_columns": list(missing)})
         return
 
-    records_loaded = 0
+    records_loaded  = 0
+    records_deduped = 0
     for _, row in combined.iterrows():
         ticker = row.get("ticker")
         if not ticker:
@@ -1056,12 +1065,38 @@ def rebuild_state_from_s3() -> None:
         if close <= 0 or high < low:
             continue
 
+        row_ts = pd.to_datetime(row.get("timestamp"), utc=True, errors="coerce")
+        if pd.isna(row_ts):
+            continue
+        row_ts = row_ts.tz_convert("America/New_York")
+
+        # ─── Same persistent ordering/dedup guard the live streaming
+        # loop uses. Raw S3 files written by the live producer can
+        # legitimately contain the same (ticker, timestamp) row across
+        # two different cycle files (no producer-side dedup by design).
+        # list_s3_files_with_prefix above intentionally reads ALL files
+        # in the scan window (correct for normal live cycles), so
+        # without this check a restart could push a duplicate row into
+        # the buffer twice, corrupting the exact rolling-metric window
+        # the live path already protects.
+        existing_buffer = ticker_buffers.get(ticker)
+        if existing_buffer:
+            last_ts = pd.to_datetime(
+                existing_buffer[-1].get("timestamp"), utc=True, errors="coerce"
+            )
+            if pd.notna(last_ts):
+                last_ts = last_ts.tz_convert("America/New_York")
+                if row_ts <= last_ts:
+                    records_deduped += 1
+                    continue
+
         row_dict = row.to_dict()
         update_ticker_buffer(ticker, row_dict)
         records_loaded += 1
 
     log("INFO", "Equity state rebuild complete",
         {"records_loaded":        records_loaded,
+         "records_deduped":       records_deduped,
          "tickers_in_buffer":     len(ticker_buffers),
          "rebuild_window_minutes": rebuild_minutes})
 
@@ -1307,9 +1342,10 @@ def run_ticker_engine(pdf: pd.DataFrame) -> pd.DataFrame:
     ticker = pdf.iloc[0]["ticker"] if len(pdf) > 0 else "unknown"
     total_rows = len(pdf)
     
-    # ── ADD THIS: Start logging for replay mode ──────────────────────
-    if IS_REPLAY and total_rows > 0:
-        log("INFO", "REPLAY_TICKER_START", {
+    # ── Log the start of processing for this ticker (backfill/replay only).
+    # This function is never called from live mode.
+    if total_rows > 0:
+        log("INFO", "TICKER_START", {
             "ticker": ticker,
             "total_rows": total_rows,
             "run_mode": CONFIG["run_mode"]
@@ -1328,10 +1364,11 @@ def run_ticker_engine(pdf: pd.DataFrame) -> pd.DataFrame:
     out_rows: list = []
 
     for i, row in enumerate(pdf.to_dict("records"), start=1):
-        # ── ADD THIS: Progress logging every 1000 rows for replay ────
-        if IS_REPLAY and total_rows > 0 and i % 1000 == 0:
+        # ── Log progress every 1000 rows while processing this ticker.
+        # Applies to both backfill and replay. Live mode never reaches here.
+        if total_rows >= 1000 and i % 1000 == 0:
             pct_complete = round((i / total_rows) * 100, 1)
-            log("INFO", "REPLAY_PROGRESS", {
+            log("INFO", "PROGRESS", {
                 "ticker": ticker,
                 "processed": i,
                 "total": total_rows,
@@ -1384,11 +1421,13 @@ def run_ticker_engine(pdf: pd.DataFrame) -> pd.DataFrame:
 
         out_rows.append(row)
 
-    # ── ADD THIS: Completion logging for replay mode ──────────────────
-    if IS_REPLAY and total_rows > 0:
+    # ── Log completion for this ticker (backfill/replay only).
+    # Includes counts of successful and failed rows.
+    if total_rows > 0:
         valid_rows = len([r for r in out_rows if r.get("_engine_error") is None])
         error_rows = len([r for r in out_rows if r.get("_engine_error") is not None])
-        log("INFO", "REPLAY_TICKER_DONE", {
+
+        log("INFO", "TICKER_DONE", {
             "ticker": ticker,
             "total_rows": total_rows,
             "valid_rows": valid_rows,
@@ -1497,16 +1536,22 @@ def save_to_parquet(df: pd.DataFrame, batch_id: str) -> None:
 
     output_prefix = _output_prefix_for_mode()
     
-    # Create temporary partition columns from each row's timestamp
-    df['_partition_date'] = pd.to_datetime(df['timestamp']).dt.strftime('%Y-%m-%d')
-    df['_partition_hour'] = pd.to_datetime(df['timestamp']).dt.strftime('%H')
+    # Create temporary partition columns from each row's timestamp.
+    # Always normalize to America/New_York explicitly here — parsing
+    # with utc=True first (so both offset-aware and naive/UTC strings
+    # are handled the same way) and then converting to ET guarantees
+    # every partition folder is computed in ET, regardless of what the
+    # source string's original offset was.
+    ts_et = pd.to_datetime(df['timestamp'], utc=True).dt.tz_convert("America/New_York")
+    df['_partition_date'] = ts_et.dt.strftime('%Y-%m-%d')
+    df['_partition_hour'] = ts_et.dt.strftime('%H')
     
     # Group by date and hour, writing each group to its own partitioned file
     for (date, hour), group in df.groupby(['_partition_date', '_partition_hour']):
         # Derive batch_id from the group (all rows in this hour have same batch_id)
         batch_id = group.iloc[0]["batch_id"]
         
-        consumer_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]
+        consumer_timestamp = pendulum.now("America/New_York").strftime('%Y%m%d_%H%M%S_%f')[:-3]
         key = (
             f"{output_prefix}/"
             f"date={date}/hour={hour}/"
@@ -1539,14 +1584,25 @@ def save_to_parquet(df: pd.DataFrame, batch_id: str) -> None:
 def save_latest_snapshot_all_tickers(
     ticker_buffers: dict,
     positions_df:   pd.DataFrame,
+    late_cutoff,
 ) -> None:
     """
-    Build and publish a per-ticker snapshot to Redis.
+    Build and publish the "never lose a ticker" snapshot to Redis #2
+    ("equity_latest_snapshot" / "equity_stream" — pre-existing key
+    names, kept unchanged for backward compatibility with whatever is
+    already subscribed to them).
 
     LIVE MODE ONLY — this function must never be called during backfill or replay.
     The call site (process_batch) enforces this via is_live_mode().
 
-    Business logic preserved exactly from original pipeline.
+    EVERY ticker that has ever produced a bar is included, using that
+    ticker's own latest buffered row, regardless of whether it updated
+    in the current batch or how long ago its last real row arrived.
+    Each row is tagged is_stale (True when that ticker's last row is
+    older than late_event_max_minutes) so the UI can render freshness
+    without a ticker ever disappearing from the view.
+
+    Business logic otherwise preserved exactly from original pipeline.
     Adds prev_OHLCV columns from the second-to-last buffer row.
     """
     latest_rows = []
@@ -1575,6 +1631,11 @@ def save_latest_snapshot_all_tickers(
                 "prev_volume": np.nan,
             })
 
+        row_ts = pd.to_datetime(latest_row.get("timestamp"), utc=True, errors="coerce")
+        latest_row["is_stale"] = bool(
+            pd.isna(row_ts) or row_ts.tz_convert("America/New_York") < late_cutoff
+        )
+
         latest_rows.append(latest_row)
 
     if not latest_rows:
@@ -1595,6 +1656,41 @@ def save_latest_snapshot_all_tickers(
     except Exception as exc:
         log("ERROR", "Redis snapshot publish failed", {"error": str(exc)})
         send_alert(f"Redis snapshot FAILED | error={str(exc)}")
+
+
+def publish_equity_synced_snapshot(synced_rows: list) -> None:
+    """
+    Publish the SYNCHRONIZED snapshot to Redis #1
+    ("equity_latest_snapshot_synced" / "equity_stream_synced" — new
+    key names, additive, does not replace the pre-existing store above).
+
+    The call site (process_batch) passes only rows that are (a)
+    genuinely new for their ticker — passed the persistent cross-batch
+    ordering/dedup check, (b) within the live freshness window
+    (late_event_max_minutes), and (c) all floored to the SAME minute as
+    the batch's max minute — so every ticker in this snapshot is
+    guaranteed as-of the identical instant. Use this store for anything
+    needing cross-ticker consistency (e.g. a portfolio-level aggregate).
+
+    LIVE MODE ONLY — same guard as save_latest_snapshot_all_tickers.
+    """
+    if not synced_rows:
+        return
+
+    try:
+        df_synced     = pd.DataFrame(synced_rows)
+        df_synced     = df_synced.where(pd.notnull(df_synced), None)
+        snapshot_json = df_synced.to_json(orient="records")
+
+        rc = _get_redis()
+        rc.set("equity_latest_snapshot_synced", snapshot_json)
+        rc.publish("equity_stream_synced", snapshot_json)
+
+        PROM_REDIS_WRITES_TOTAL.inc()
+
+    except Exception as exc:
+        log("ERROR", "Redis synced snapshot publish failed", {"error": str(exc)})
+        send_alert(f"Redis synced snapshot FAILED | error={str(exc)}")
 
 # =============================================================
 # ADD LINEAGE TO OUTPUT ROWS
@@ -1767,20 +1863,54 @@ def process_batch(
     Mode-specific behavior (enforced via IS_LIVE / IS_BACKFILL / IS_REPLAY):
       Output path  : equity/data/live/ | equity/data/backfill/ | equity/data/replay/
       DLQ path     : equity/dlq/live/  | equity/dlq/backfill/  | equity/dlq/replay/
-      Redis        : published after every batch (LIVE ONLY)
-      Late events  : filtered and routed to live DLQ (LIVE ONLY)
+      Redis        : two independent stores, LIVE ONLY (see below)
       Metrics push : at market end (LIVE ONLY); at job end (BACKFILL/REPLAY)
+
+    Late/duplicate event handling (LIVE ONLY):
+        A row only reaches S3/Redis#1 after a PERSISTENT, cross-batch
+        ordering check: is its timestamp newer than the last timestamp
+        already accepted into that ticker's buffer? This replaces
+        relying on same-batch drop_duplicates alone, which has no
+        memory across batches and would let an unchanged row re-fetched
+        next cycle (or a batch straggling in late) re-enter the buffer
+        as if it were new.
+          - Not newer (duplicate)                    -> dropped, buffer untouched.
+          - Newer AND within late_event_max_minutes   -> full processing:
+            buffer update, rolling metrics, feeds S3 + Redis #1.
+          - Newer BUT older than late_event_max_minutes -> still updates
+            the buffer (it is real, just late) so it is never lost, but
+            is excluded from S3 / Redis #1; NOT treated as an error and
+            NOT routed to DLQ for lateness alone.
+
+    Redis (LIVE ONLY — two separate stores, both read from state this
+    function already maintains):
+        Redis #2 "equity_latest_snapshot" / "equity_stream" (unchanged
+            key names — this is the pre-existing store):
+            EVERY ticker ever seen, built straight from ticker_buffers,
+            each tagged is_stale. Published every live batch regardless
+            of whether this cycle had new data for a given ticker — a
+            ticker is never dropped from this view just because its
+            feed went quiet.
+        Redis #1 "equity_latest_snapshot_synced" / "equity_stream_synced"
+            (new): only tickers that are new-this-cycle, within the
+            freshness window, AND floored to the SAME minute as the
+            batch's max minute — genuinely synchronized as-of one
+            instant. Use for anything needing cross-ticker consistency
+            (e.g. a portfolio-level aggregate).
+        BACKFILL / REPLAY: Redis is NEVER touched, as before.
 
     Per-batch lifecycle:
       1. Convert Spark -> pandas
-      2. Deduplicate by (ticker, timestamp)
-      3. Filter late events (LIVE ONLY — backfill and replay skip this step)
-      4. For each row: validation -> buffer update -> metrics -> lineage
-      5. Enrich with positions
-      6. Atomic S3 write to mode-specific output path
-      7. Redis snapshot (LIVE ONLY)
-      8. Flush DLQ to mode-specific S3 DLQ path
-      9. Expose metrics (LIVE ONLY — others push at job end)
+      2. Cheap intra-batch drop_duplicates (belt-and-suspenders only)
+      3. Per-row: persistent ordering/dedup check -> buffer update ->
+         metrics -> freshness branch -> lineage
+      4. Enrich with positions
+      5. Atomic S3 write to mode-specific output path (fresh rows only)
+      6. Build Redis #1's same-minute synchronized subset; publish
+         Redis #1 and Redis #2 (all tickers, unconditional)
+      7. Flush DLQ to mode-specific S3 DLQ path (lateness alone no
+         longer generates a DLQ entry)
+      8. Expose metrics (LIVE ONLY — others push at job end)
 
     Idempotency:
         Spark checkpoints handle offset tracking (live and backfill modes).
@@ -1797,6 +1927,8 @@ def process_batch(
     metrics              = make_batch_metrics()
     dlq_buffer:   list   = []
     batch_start          = time.monotonic()
+    current_time         = pd.Timestamp.now(tz="America/New_York")
+    late_cutoff          = current_time - pd.Timedelta(minutes=CONFIG["late_event_max_minutes"])
 
     PROM_BATCHES_TOTAL.inc()
 
@@ -1822,9 +1954,8 @@ def process_batch(
         )
         return
 
-    # ── LIVE MODE — everything below is the ORIGINAL code, byte for
-    # byte unchanged, including this exact try/except block. ──────────
-    # Convert Spark batch to pandas
+    # ── LIVE MODE ──────────────────────────────────────────────────────
+    # ── Convert Spark batch to pandas ─────────────────────────────────
     try:
         if batch_df.count() == 0:
             log("INFO", "Empty batch received",
@@ -1854,69 +1985,26 @@ def process_batch(
         log_batch_metrics(str(batch_id), metrics)
         return
 
-    # Step 2: Late event filtering — LIVE MODE ONLY
-    #
-    # LIVE     : drop events older than late_event_max_minutes to prevent
-    #            stale data from corrupting rolling intraday metrics.
-    # BACKFILL : skip — processes historical data by design.
-    # REPLAY   : skip — historical events are always older than the threshold.
+    # Step 2: Annotate ET timestamp — LIVE ONLY.
+    # No longer filters or drops rows here. Whether a row is a duplicate
+    # or too late is now decided per-row inside the loop below, against
+    # the PERSISTENT ticker_buffers state (not just this batch).
     if IS_LIVE and "timestamp" in pdf.columns:
-        current_time = pd.Timestamp.now(tz="America/New_York")
-        late_cutoff  = current_time - pd.Timedelta(
-            minutes=CONFIG["late_event_max_minutes"]
-        )
-
         pdf["_evt_dt"] = (
             pd.to_datetime(pdf["timestamp"], utc=True, errors="coerce")
             .dt.tz_convert("America/New_York")
         )
-        late_events = pdf[pdf["_evt_dt"] < late_cutoff]
-        pdf         = pdf[pdf["_evt_dt"] >= late_cutoff]
-        metrics["events_late"] = len(late_events)
+    else:
+        pdf["_evt_dt"] = pd.NaT
 
-        if not late_events.empty:
-            for _, late_row in late_events.iterrows():
-                error_payload = {
-                    "error": (
-                        f"Late event skipped (older than "
-                        f"{CONFIG['late_event_max_minutes']} minutes)"
-                    ),
-                    "ticker":            late_row.get("ticker", ""),
-                    "timestamp":         late_row.get("timestamp", ""),
-                    "current_time":      current_time.isoformat(),
-                    "offset":            int(late_row.get("offset", -1)),
-                    "partition":         int(late_row.get("partition", -1)),
-                    "consumer_pipeline": CONFIG["consumer_pipeline_name"],
-                    "batch_id":          str(batch_id),
-                    "pipeline_run_id":   pipeline_run_id,
-                    "run_mode":          CONFIG["run_mode"],
-                }
-                dlq_buffer.append(error_payload)
-
-        pdf = pdf.drop(columns=["_evt_dt"])
-
-    PROM_LATE_EVENTS.set(metrics["events_late"] if IS_LIVE else 0)
     PROM_BUFFER_SIZE.set(sum(len(buf) for buf in ticker_buffers.values()))
     PROM_TICKERS_IN_BUFFER.set(len(ticker_buffers))
-
-    if len(pdf) == 0:
-        log("INFO", "All events filtered",
-            {"batch_id":   batch_id,
-             "late_count": metrics["events_late"],
-             "run_mode":   CONFIG["run_mode"]})
-        PROM_DLQ_TOTAL.inc(len(dlq_buffer))
-        flush_dlq_to_s3(dlq_buffer, str(batch_id))
-        metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
-        log_batch_metrics(str(batch_id), metrics)
-        return
 
     metrics["events_received"] = len(pdf)
 
     snapshot_rows: list = []
     log("INFO", "ROW_LOOP_START")
-    for i, (_, row) in enumerate(pdf.iterrows(), start=1):
-        if IS_BACKFILL and i % 1000 == 0:
-            log("INFO", f"PROGRESS {i}/{len(pdf)}")
+    for row in pdf.to_dict("records"):
         try:
             ticker = row["ticker"]
 
@@ -1927,8 +2015,33 @@ def process_batch(
                     f"high={row['high']}, low={row['low']}"
                 )
 
-            # Buffer update (with safety guards)
-            row_dict = row.to_dict()
+            row_ts_et = row.get("_evt_dt")
+            if row_ts_et is None or pd.isna(row_ts_et):
+                raise ValueError(f"Unparseable timestamp: {row.get('timestamp')}")
+
+            # ─── Persistent, cross-batch ordering/dedup check ───
+            # Compares against the last timestamp already accepted into
+            # THIS ticker's buffer — across batches, across a consumer
+            # restart (ticker_buffers is repopulated by
+            # rebuild_state_from_s3 before live processing resumes) —
+            # not just against other rows in this same batch.
+            existing_buffer = ticker_buffers.get(ticker)
+            if existing_buffer:
+                last_ts = pd.to_datetime(
+                    existing_buffer[-1].get("timestamp"), utc=True, errors="coerce"
+                )
+                if pd.notna(last_ts):
+                    last_ts = last_ts.tz_convert("America/New_York")
+                    if row_ts_et <= last_ts:
+                        metrics["events_deduped"] += 1
+                        continue
+
+            # Buffer update (with safety guards). `row` is already a
+            # plain dict here (pdf.to_dict("records") yields dicts, not
+            # Series) — the original `row.to_dict()` call would raise
+            # AttributeError on every single row; fixed to just copy it.
+            row_dict = dict(row)
+            row_dict.pop("_evt_dt", None)
             update_ticker_buffer(ticker, row_dict)
 
             # Add prev OHLCV values from buffer
@@ -1951,9 +2064,25 @@ def process_batch(
                     "prev_volume": np.nan,
                 })
 
-            # Feature computation
+            # Feature computation — unconditional, same as buffer update
+            # above: rolling metrics never depend on freshness.
             computed = compute_metrics(ticker_buffers[ticker])
             row_dict.update(computed)
+
+            # ─── Freshness branch — output-only, buffer already updated ───
+            if row_ts_et < late_cutoff:
+                # Genuinely new (passed ordering above) but arrived
+                # later than the live freshness window. The buffer
+                # update above already means ticker_buffers — and
+                # therefore Redis #2 — reflect it. Excluded from
+                # S3/Redis#1 only. Not discarded, not a DLQ-worthy
+                # error — lateness alone is not a failure.
+                metrics["events_late"] += 1
+                log("INFO", "Row processed (buffer/Redis#2 updated) but "
+                             "excluded from S3/Redis#1 — outside freshness window",
+                    {"ticker": ticker, "timestamp": row_dict.get("timestamp"),
+                     "batch_id": str(batch_id)})
+                continue
 
             # Lineage stamping — run_mode set from CONFIG["run_mode"] directly
             row_dict = add_lineage(
@@ -1977,7 +2106,7 @@ def process_batch(
                 "ticker":            row.get("ticker", ""),
                 "offset":      int(row.get("offset", -1)),
                 "partition":   int(row.get("partition", -1)),
-                "original_event":    row.to_dict(),
+                "original_event":    {k: v for k, v in row.items() if k != "_evt_dt"},
                 "failed_at":         pendulum.now("America/New_York").to_iso8601_string(),
                 "consumer_pipeline": CONFIG["consumer_pipeline_name"],
                 "batch_id":          str(batch_id),
@@ -1986,37 +2115,57 @@ def process_batch(
             }
             dlq_buffer.append(error_payload)
     log("INFO", "ROW_LOOP_DONE")
-    if not snapshot_rows:
-        PROM_DLQ_TOTAL.inc(len(dlq_buffer))
-        flush_dlq_to_s3(dlq_buffer, str(batch_id))
-        metrics["batch_latency_s"] = round(time.monotonic() - batch_start, 3)
-        log_batch_metrics(str(batch_id), metrics)
-        return
 
+    PROM_LATE_EVENTS.set(metrics["events_late"])
+    PROM_DEDUPED_EVENTS.set(metrics["events_deduped"])
     PROM_FAILED_EVENTS.set(metrics["events_failed"])
 
     log("INFO", "Processing events",
         {"batch_id": batch_id, "event_count": len(snapshot_rows),
          "run_mode": CONFIG["run_mode"]})
 
-    snapshot_df = pd.DataFrame(snapshot_rows)
+    # ── Build Redis #1's synchronized subset ────────────────────────
+    # From the fresh + deduped rows, keep only those floored to the SAME
+    # minute as the batch's max minute, so every ticker in this snapshot
+    # is genuinely as-of one identical instant.
+    synced_rows: list = []
+    if snapshot_rows:
+        ts_index = pd.to_datetime(
+            [r["timestamp"] for r in snapshot_rows], utc=True, errors="coerce"
+        ).tz_convert("America/New_York")
+        floored_minutes = ts_index.floor("min")
+        max_minute      = floored_minutes.max()
+        synced_rows = [
+            row for row, minute in zip(snapshot_rows, floored_minutes)
+            if minute == max_minute
+        ]
 
-    log("INFO", "ENRICH_START")
-    # Enrichment
-    snapshot_df = enrich_intraday_with_positions(snapshot_df, positions_df)
-    snapshot_df = snapshot_df.where(pd.notnull(snapshot_df), None)
-    log("INFO", "ENRICH_DONE")
+        log("INFO", "ENRICH_START")
+        snapshot_df = pd.DataFrame(snapshot_rows)
+        snapshot_df = enrich_intraday_with_positions(snapshot_df, positions_df)
+        snapshot_df = snapshot_df.where(pd.notnull(snapshot_df), None)
+        log("INFO", "ENRICH_DONE")
 
-    log("INFO", "SAVE_START")
-    # S3 write — mode-specific path; outputs are always isolated
-    save_to_parquet(snapshot_df, str(batch_id))
-    log("INFO", "SAVE_DONE")
+        log("INFO", "SAVE_START")
+        # S3 write — mode-specific path; ALL fresh+deduped rows, not
+        # just the synchronized subset. Outputs are always isolated.
+        save_to_parquet(snapshot_df, str(batch_id))
+        log("INFO", "SAVE_DONE")
 
-    # Redis snapshot — LIVE ONLY
-    # Backfill and replay must never overwrite the live snapshot with
-    # historical data. Redis represents live state only.
+    # ── Redis — LIVE ONLY, two independent stores ──────────────────────
+    # Redis #1 "equity_latest_snapshot_synced"/"equity_stream_synced":
+    #   only the synchronized subset above.
+    # Redis #2 "equity_latest_snapshot"/"equity_stream" (pre-existing
+    #   key names, unchanged): EVERY ticker ever seen, rebuilt straight
+    #   from ticker_buffers (which the loop above already kept current,
+    #   including late-but-real rows) — published every live batch
+    #   regardless of whether snapshot_rows is empty this cycle, so a
+    #   ticker is never dropped from view just because it didn't have
+    #   fresh data this batch.
     if IS_LIVE:
-        save_latest_snapshot_all_tickers(ticker_buffers, positions_df)
+        if synced_rows:
+            publish_equity_synced_snapshot(synced_rows)
+        save_latest_snapshot_all_tickers(ticker_buffers, positions_df, late_cutoff)
 
     log("INFO", "DLQ_START")
     # Flush DLQ to mode-specific S3 DLQ path
@@ -2443,6 +2592,10 @@ if __name__ == "__main__":
             except Exception:
                 pass
  
+            send_alert(
+                f"EQUITY BACKFILL COMPLETE | "
+                f"date={CONFIG['backfill_date']}"
+            )
             # Sleep 10 minutes after backfill completes before exiting
             log("INFO", "Backfill complete - waiting 10 minutes before final exit")
             time.sleep(600)  # 10 minutes = 600 seconds

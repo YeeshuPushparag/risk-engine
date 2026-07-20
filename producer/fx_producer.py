@@ -254,7 +254,7 @@ def _push_metrics(producer_run_id: str) -> None:
     except Exception as exc:
         log("WARNING", "Prometheus push_to_gateway failed",
             {"error": str(exc), "mode": CONFIG["run_mode"]})
-        
+       
         # ─── This sends Slack ONLY because level="CRITICAL" ────────────
         send_alert(
             f"❌ Metrics Push FAILED | mode={CONFIG['run_mode']} | error={str(exc)}",
@@ -264,7 +264,8 @@ def _push_metrics(producer_run_id: str) -> None:
                 "error": str(exc),
                 "producer_run_id": producer_run_id,
             }
-        )
+        )        
+
 
 
 def _start_metrics_server() -> None:
@@ -288,6 +289,7 @@ def _start_metrics_server() -> None:
 
 def send_alert(message: str, level: str = "CRITICAL", context: dict = None) -> None:
     """Send alert to Slack for critical issues only."""
+    MAX_SLACK_LEN = 100
     # Always log
     log(level, f"[ALERT] {message}", context or {})
 
@@ -300,7 +302,10 @@ def send_alert(message: str, level: str = "CRITICAL", context: dict = None) -> N
         return
 
     try:
-        text = f"*[{level}] fx_kafka_producer *\n{message}"
+        if len(message) > MAX_SLACK_LEN:
+            message = message[:MAX_SLACK_LEN] + "..."
+
+        text = f"*[{level}] fx_kafka_producer*\n{message}"
         requests.post(webhook, json={"text": text}, timeout=3)
     except Exception as e:
         print(f"[ALERT ERROR] Slack failed: {e}")
@@ -383,6 +388,29 @@ def atomic_write_parquet_to_s3(df: pd.DataFrame, bucket: str, key: str) -> None:
 
 
 # =============================================================
+# TIMEZONE NORMALIZATION  —  everything downstream is Eastern Time
+# =============================================================
+def to_et(ts) -> pendulum.DateTime:
+    """
+    Normalize any timestamp to US/Eastern.
+
+    yfinance always returns UTC data (tz-aware UTC, or occasionally
+    tz-naive — pendulum.instance() treats naive input as UTC by
+    default, which matches that assumption). Every timestamp that gets
+    stored to raw S3, sent to Kafka, or used for partitioning is
+    converted here, at the single point data leaves yfinance, so the
+    rest of the pipeline (producer raw S3 + DLQ, Kafka payload, and the
+    consumer's raw S3 / processed S3 / DLQ / state rebuild) all see the
+    same ET-labeled value.
+    """
+    if isinstance(ts, str):
+        dt = pendulum.parse(ts)
+    else:
+        dt = pendulum.instance(ts)
+    return dt.in_timezone("America/New_York")
+
+
+# =============================================================
 # Check if Timestamp is Within FX Market Hours
 # =============================================================
 def is_within_market_hours(timestamp) -> bool:
@@ -404,6 +432,16 @@ def is_within_market_hours(timestamp) -> bool:
     if weekday == 4:
         return hour < 17
     return False
+
+# =============================================================
+# Filter only market hour rows
+# =============================================================
+def filter_backfill_market_hours(events: List[dict]) -> List[dict]:
+    """Filter events to only those within market hours for backfill mode."""
+    return [
+        event for event in events 
+        if is_within_market_hours(pendulum.parse(event["event_time"]))
+    ]
 
 # =============================================================
 # KAFKA PRODUCER
@@ -558,7 +596,7 @@ def store_raw_events_parquet(
             f"Raw S3 write FAILED | batch={batch_id} | error={str(exc)}",
             level="CRITICAL",
             context={"batch_id": batch_id},
-        )
+        ) 
 
 # =============================================================
 # DLQ  (batch write to S3, not per-event)
@@ -657,14 +695,13 @@ def _extract_events_from_df(
     symbol_map = {pair + "=X": pair for pair in pairs}
     events: List[dict] = []
     skipped_outside_market = 0 
+    forward_filled_dropped = 0
     
     for symbol, pair in symbol_map.items():
         try:
             # Check if pair exists in response
             if symbol not in df.columns.get_level_values(0):
                 fetch_metrics["missing_pairs"].append(pair)
-                log("DEBUG", "FX pair missing from yfinance response",
-                    {"pair": pair, "symbol": symbol, "batch_id": batch_id})
                 dlq_buffer.append({
                     "event": {"data": {"currency_pair": pair}},
                     "error": f"FX pair '{pair}' not found in yfinance response",
@@ -677,8 +714,6 @@ def _extract_events_from_df(
             # Check if we have data
             if sub.empty:
                 fetch_metrics["empty_pairs"].append(pair)
-                log("DEBUG", "FX pair returned empty data",
-                    {"pair": pair, "batch_id": batch_id})
                 dlq_buffer.append({
                     "event": {"data": {"currency_pair": pair}},
                     "error": f"FX pair '{pair}' returned empty data from yfinance",
@@ -698,21 +733,42 @@ def _extract_events_from_df(
                 bars = [sub.iloc[i] for i in range(len(sub))]
 
             for row in bars:
-                ts = row.name
+                # Normalize to ET immediately — the market-hours check,
+                # the stored event timestamp/date, and (in backfill) the
+                # hour used to pick the S3 partition all derive from
+                # this single ET value from here on.
+                ts_et = to_et(row.name)
 
                 # ===== ADD THIS FILTER ONLY IN LIVE MODE =====
                 if not is_backfill:
-                    if not is_within_market_hours(ts):
+                    if not is_within_market_hours(ts_et):
                         skipped_outside_market += 1
-                        log("DEBUG", "Skipping FX data outside market hours",
-                            {"pair": pair, "timestamp": ts.isoformat(), "batch_id": batch_id})
                         continue
                 # ===== END FILTER =====
+
+                # ===== BACKFILL FORWARD-FILL / NO-PRINT GUARD =====
+                # yfinance pads a requested start/end range with a row
+                # for every single minute of every day in range — even
+                # long after the FX week has actually closed (e.g. past
+                # Friday 17:00 ET) or during any stretch with no new
+                # print. Those padding rows just repeat the last real
+                # bar with open=high=low=close, so they carry zero
+                # intrabar range. Real FX 1m data is never flat like
+                # that, so a zero-range bar during backfill is treated
+                # as synthetic padding — not a real observation — and
+                # must never reach raw S3 or Kafka. This catches padding
+                # the day/hour market-hours filter can't, since padding
+                # can occur inside a nominally "should be open" window
+                # (e.g. Mon-Thu 24h) whenever the real feed simply has
+                # no new print for a stretch.
+                if is_backfill and row["High"] == row["Low"]:
+                    forward_filled_dropped += 1
+                    continue
+                # ===== END GUARD =====
+
                 # FX validation: close must be positive; high >= low
                 if pd.isna(row["Close"]) or row["Close"] <= 0:
                     fetch_metrics["invalid_pairs"].append(pair)
-                    log("DEBUG", "FX pair skipped — invalid close",
-                        {"pair": pair, "close": str(row.get("Close")), "batch_id": batch_id})
                     dlq_buffer.append({
                         "event": {"data": {"currency_pair": pair}},
                         "error": f"Invalid FX data: close={row['Close']}",
@@ -722,9 +778,6 @@ def _extract_events_from_df(
 
                 if row["High"] < row["Low"]:
                     fetch_metrics["invalid_pairs"].append(pair)
-                    log("DEBUG", "FX pair skipped — high < low",
-                        {"pair": pair, "high": row["High"], "low": row["Low"],
-                         "batch_id": batch_id})
                     dlq_buffer.append({
                         "event": {"data": {"currency_pair": pair}},
                         "error": f"Invalid FX data: high={row['High']} < low={row['Low']}",
@@ -738,8 +791,8 @@ def _extract_events_from_df(
                     "high":          float(row["High"]),
                     "low":           float(row["Low"]),
                     "close":         float(row["Close"]),
-                    "timestamp":     ts.isoformat(),
-                    "date":          ts.date().isoformat(),
+                    "timestamp":     ts_et.isoformat(),
+                    "date":          ts_et.date().isoformat(),
                 }
 
                 event = build_event(record, producer_run_id, batch_id, source_fetch_time, is_backfill=(not exclude_in_progress_bar))
@@ -767,6 +820,13 @@ def _extract_events_from_df(
                 {"batch_id": batch_id, 
                 "skipped_count": skipped_outside_market,
                 "kept_events": len(events)})
+
+    # Log forward-fill / no-print filtering (backfill only)
+    if is_backfill and forward_filled_dropped > 0:
+        log("INFO", "FX backfill: dropped forward-filled (zero-range) bars — no real print",
+            {"batch_id": batch_id,
+             "dropped_count": forward_filled_dropped,
+             "kept_events": len(events)})
 
     # Log fetch health
     if fetch_metrics["missing_pairs"]:
@@ -1163,7 +1223,7 @@ def run_live(producer_run_id: str, producer: KafkaProducer) -> None:
             )
             break
 
-        batch_id          = datetime.now().strftime('%Y%m%d_%H%M%S')
+        batch_id          = pendulum.now("America/New_York").strftime('%Y%m%d_%H%M%S')
         source_fetch_time = pendulum.now("America/New_York").to_iso8601_string()
         metrics           = make_batch_metrics()
         dlq_buffer:  list = []
@@ -1339,7 +1399,7 @@ def run_backfill(producer_run_id: str, producer: KafkaProducer) -> None:
 
     for target_date in dates:
         # Single batch_id for ALL events on this date (used for Kafka lineage)
-        batch_id    = datetime.now().strftime('%Y%m%d_%H%M%S')
+        batch_id    = pendulum.now("America/New_York").strftime('%Y%m%d_%H%M%S')
         dlq_buffer: list = []
         metrics     = make_batch_metrics()
         cycle_start = time.monotonic()
@@ -1355,6 +1415,9 @@ def run_backfill(producer_run_id: str, producer: KafkaProducer) -> None:
                 batch_id        = batch_id,
                 dlq_buffer      = dlq_buffer,
             )
+            
+            # FILTER FIRST (remove non-market hours)
+            events = filter_backfill_market_hours(events)
 
             metrics["events_fetched"] = len(events)
             metrics["missing_pairs"]  = len(fetch_metrics.get("missing_pairs", []))
@@ -1647,11 +1710,6 @@ def main():
         )
         raise
     
-    finally:  
-        try:
-            _push_metrics(producer_run_id)
-        except Exception:
-            pass
 
 if __name__ == "__main__":
     main()

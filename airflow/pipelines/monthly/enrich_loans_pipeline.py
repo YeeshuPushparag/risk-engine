@@ -10,7 +10,6 @@ import requests
 import json
 from datetime import datetime, timedelta
 from connections.snowflake_conn import get_snowflake_conn
-from connections.postgre_conn import get_postgre_conn
 from snowflake.connector.pandas_tools import write_pandas
 from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 

@@ -156,6 +156,46 @@ resource "aws_eks_node_group" "jenkins_agent" {
 }
 
 ############################################
+# Node Group 6: AIRFLOW HIGH COMPUTE (ON-DEMAND)
+# Monthly Loan Pipeline and Longer Backfill/Replay
+############################################
+resource "aws_eks_node_group" "airflow_high_compute" {
+  cluster_name    = aws_eks_cluster.this.name
+  node_group_name = "${var.cluster_name}-airflow-high-compute"
+  node_role_arn   = aws_iam_role.eks_node_role.arn
+  subnet_ids      = local.eks_subnet_ids
+
+  instance_types = ["t3.xlarge"]
+
+  scaling_config {
+    min_size     = 0
+    desired_size = 0
+    max_size     = 1
+  }
+
+  labels = {
+    role = "airflow-high-compute"
+  }
+  
+  taint {
+    key    = "dedicated"
+    value  = "high-compute"
+    effect = "NO_SCHEDULE"
+  }
+
+  tags = {
+    "k8s.io/cluster-autoscaler/enabled"                      = "true"
+    "k8s.io/cluster-autoscaler/${var.cluster_name}"          = "owned"
+    "k8s.io/cluster-autoscaler/node-template/label/role"     = "airflow-high-compute"
+    "k8s.io/cluster-autoscaler/node-template/taint/dedicated" = "high-compute:NoSchedule"
+  }
+
+  depends_on = [
+    kubernetes_config_map_v1.aws_auth
+  ]
+}
+
+############################################
 # EBS CSI Addon
 ############################################
 resource "aws_eks_addon" "ebs_csi" {

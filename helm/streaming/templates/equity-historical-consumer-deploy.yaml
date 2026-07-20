@@ -89,11 +89,11 @@ spec:
                 --conf spark.pyspark.python=/usr/bin/python3 \
                 --conf spark.pyspark.driver.python=/usr/bin/python3 \
                 --conf spark.executorEnv.PYSPARK_PYTHON=/usr/bin/python3 \
-                --conf spark.executor.instances={{ .Values.spark.executors.backfillReplay }} \
-                --conf spark.executor.cores={{ .Values.spark.executorCores }} \
-                --conf spark.executor.memory={{ .Values.spark.executorMemory }} \
-                --conf spark.driver.cores={{ .Values.spark.driverCores }} \
-                --conf spark.driver.memory={{ .Values.spark.driverMemory }} \
+                --conf spark.executor.instances={{ .Values.spark.executors.equityBackfillReplay }} \
+                --conf spark.executor.cores={{ .Values.spark.equityBackfillReplay.executorCores }} \
+                --conf spark.executor.memory={{ .Values.spark.equityBackfillReplay.executorMemory }} \
+                --conf spark.driver.cores={{ .Values.spark.equityBackfillReplay.driverCores }} \
+                --conf spark.driver.memory={{ .Values.spark.equityBackfillReplay.driverMemory }} \
                 --conf spark.kubernetes.node.selector.role={{ .Values.nodeSelector.role }} \
                 --conf spark.kubernetes.executor.podNamePrefix=equity-historical-exec \
                 --conf spark.local.dir=/tmp/spark \
