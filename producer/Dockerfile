@@ -10,8 +10,8 @@ RUN apt-get update && \
 
 COPY requirements.txt /tmp/requirements.txt
 
-RUN python -m pip install --no-cache-dir --upgrade pip==25.0.1 setuptools wheel && \
-    python -m pip install --no-cache-dir --no-compile -r /tmp/requirements.txt
+RUN python -m pip install --upgrade pip setuptools wheel && \
+    python -m pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY . /app
 
