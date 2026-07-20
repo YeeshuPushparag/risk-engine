@@ -7,9 +7,13 @@ RUN apt-get update && \
     curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Ensure /usr/local/bin exists (fixes pip console script symlink issue)
+RUN mkdir -p /usr/local/bin
+
 COPY requirements.txt /tmp/requirements.txt
 
-RUN pip install --upgrade pip && \
+# Pin pip to a stable version to prevent future regressions
+RUN pip install pip==25.3 && \
     pip install -r /tmp/requirements.txt
 
 COPY . /app
