@@ -4,22 +4,14 @@ WORKDIR /app
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Ensure /usr/local/bin exists (fixes pip console script symlink issue)
-RUN mkdir -p /usr/local/bin
+        curl \
+        ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /tmp/requirements.txt
 
-# Pin pip to a stable version to prevent future regressions
-RUN pip install pip==25.3 && \
-    pip install -r /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY . /app
 
-RUN python -m compileall /app
-
-ENV PYTHONUNBUFFERED=1
-
-ENTRYPOINT ["python"]
+CMD ["python", "main.py"]
