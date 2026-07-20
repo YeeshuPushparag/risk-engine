@@ -10,7 +10,9 @@ RUN apt-get update && \
 
 COPY requirements.txt /tmp/requirements.txt
 
-RUN python -m pip install --upgrade pip setuptools wheel && \
+RUN ls -ld /usr/local/bin && \
+    ls -la /usr/local/bin | head -50 && \
+    python -m pip install --upgrade pip setuptools wheel && \
     python -m pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY . /app
