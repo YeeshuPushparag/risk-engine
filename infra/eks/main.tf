@@ -26,8 +26,8 @@ resource "aws_eks_node_group" "streaming" {
   instance_types = ["t3.large"]
 
   scaling_config {
-    min_size     = 1
-    desired_size = 1
+    min_size     = 0
+    desired_size = 0
     max_size     = 8
   }
 
@@ -85,8 +85,8 @@ resource "aws_eks_node_group" "web" {
   instance_types = ["t3.medium"]
 
   scaling_config {
-    min_size     = 1
-    desired_size = 1
+    min_size     = 0
+    desired_size = 0
     max_size     = 1
   }
 
