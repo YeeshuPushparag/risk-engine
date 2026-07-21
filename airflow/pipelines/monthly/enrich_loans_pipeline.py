@@ -251,7 +251,7 @@ def load_snowflake_table_chunked_with_retry(name, start_date_override, run_id=No
     Load table incrementally from Snowflake with retry.
     NO ALERT per table - pipeline continues if individual table fails.
     
-    For replay/backfill: loads ALL data >= start_date_override
+    For replay: loads ALL data >= start_date_override
     For incremental: loads ONLY new data based on watermark logic (handled in pipeline)
     """
     
@@ -434,10 +434,10 @@ def run_enrich_loans_pipeline(
     airflow_metadata=None,
 ):
     """
-    Complete production-grade loan enrichment pipeline with deterministic replay/backfill.
+    Complete production-grade loan enrichment pipeline with deterministic replay.
     
     Args:
-        start_date_override: datetime or date string (YYYY-MM-DD) for backfill/replay start
+        start_date_override: datetime or date string (YYYY-MM-DD) for replay start
         replay: If True, force full recompute from start_date_override
     
     Returns:
@@ -445,10 +445,9 @@ def run_enrich_loans_pipeline(
     
     Mode Determination:
         - replay=True: Full deterministic recompute from start_date_override
-        - start_date_override provided: Backfill from start_date_override
-        - both False: Incremental append-only mode
+        - if no start_date_override: Incremental append-only mode
     
-    Replay/Backfill Semantics:
+    Replay Semantics:
         - Recompute ALL months >= start_date_override
         - Remove overlapping months from existing enriched parquet
         - Append recomputed months deterministically
@@ -475,13 +474,6 @@ def run_enrich_loans_pipeline(
         print(f"  LOAN ENRICHMENT PIPELINE - REPLAY MODE")
         print(f"  run_id={run_id}")
         print(f"  replay_start={start_date_override}")
-        print(f"{'='*66}\n")
-    elif start_date_override:
-        mode = "backfill"
-        print(f"\n{'='*66}")
-        print(f"  LOAN ENRICHMENT PIPELINE - BACKFILL MODE")
-        print(f"  run_id={run_id}")
-        print(f"  backfill_start={start_date_override}")
         print(f"{'='*66}\n")
     else:
         mode = "incremental"
@@ -541,7 +533,7 @@ def run_enrich_loans_pipeline(
         
         snowflake_start_date = None
         
-        if mode in ["replay", "backfill"]:
+        if mode == "replay":
             snowflake_start_date = start_date_override
             print(f"  Loading Snowflake data from {snowflake_start_date.date()} onward")
             
@@ -719,7 +711,7 @@ def run_enrich_loans_pipeline(
         # ============================================================
         print("[STEP 9] Combining with previous data deterministically...")
         
-        if mode in ["replay", "backfill"] and recompute_start_period:
+        if mode == "replay" and recompute_start_period:
             # Replace months >= recompute_start_period with recomputed data
             final_df = replace_month_window(prev, merged, recompute_start_period)
             print(f"  Replaced months from {recompute_start_period} onward")

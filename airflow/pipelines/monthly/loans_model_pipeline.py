@@ -538,7 +538,7 @@ def write_to_postgres(df, mode, retries=3):
 
                         else:
 
-                            # BACKFILL / REFRESH MODE FOR SINGLE MONTH
+                            # REPLAY / REFRESH MODE FOR SINGLE MONTH
                             pg_cur.execute("""
                                 DELETE FROM public.loan_data
                                 WHERE month = %s
@@ -551,7 +551,7 @@ def write_to_postgres(df, mode, retries=3):
                             )
 
                             print(
-                                f"  [POSTGRES] Backfill mode: deleted {deleted:,} rows "
+                                f"  [POSTGRES] Replay mode: deleted {deleted:,} rows "
                                 f"for month {load_month}"
                             )
 
@@ -931,10 +931,10 @@ def run_loans_model_pipeline(
     airflow_metadata=None,
 ):
     """
-    Complete production-grade loans model pipeline with deterministic replay/backfill.
+    Complete production-grade loans model pipeline with deterministic replay.
     
     Args:
-        start_date_override: datetime or date string (YYYY-MM-DD) for backfill/replay start
+        start_date_override: datetime or date string (YYYY-MM-DD) for replay start
         replay: If True, force full recompute from start_date_override
     
     Returns:
@@ -942,14 +942,13 @@ def run_loans_model_pipeline(
     
     Mode Determination:
         - replay=True: Full deterministic recompute from start_date_override
-        - start_date_override provided: Backfill from start_date_override
-        - both False: Incremental append-only mode
+        - if no start_date_override: Incremental append-only mode
     
     Clean Table (LOANS):
         - Deterministic current-state table
         - NO run_mode column
         - NO duplicate replay states
-        - TRANSACTIONAL delete+insert for replay/backfill
+        - TRANSACTIONAL delete+insert for replay
         - TRANSACTIONAL delete+insert for incremental (idempotent)
     
     History Table (LOANS_HISTORY):
@@ -982,13 +981,6 @@ def run_loans_model_pipeline(
         print(f"  LOANS MODEL PIPELINE - REPLAY MODE")
         print(f"  run_id={run_id}")
         print(f"  replay_start={start_date_override}")
-        print(f"{'='*66}\n")
-    elif start_date_override:
-        mode = "backfill"
-        print(f"\n{'='*66}")
-        print(f"  LOANS MODEL PIPELINE - BACKFILL MODE")
-        print(f"  run_id={run_id}")
-        print(f"  backfill_start={start_date_override}")
         print(f"{'='*66}\n")
     else:
         mode = "incremental"
@@ -1068,16 +1060,16 @@ def run_loans_model_pipeline(
         # Get all available months in the data
         all_months = loans["date"].dt.to_period("M").sort_values().unique()
         
-        if mode in ["replay", "backfill"]:
-            # For replay/backfill: process ALL months >= start_date_override
+        if mode == "replay":
+            # For replay: process ALL months >= start_date_override
             if recompute_start_period:
                 months_to_process = [m for m in all_months if m >= recompute_start_period]
-                print(f"  Replay/backfill mode: processing {len(months_to_process)} months >= {recompute_start_period}")
+                print(f"  Replay mode: processing {len(months_to_process)} months >= {recompute_start_period}")
             else:
                 months_to_process = list(all_months)
-                print(f"  Replay/backfill mode: processing all {len(months_to_process)} months")
+                print(f"  Replay mode: processing all {len(months_to_process)} months")
             
-            # For replay/backfill, use ALL data for rolling calculations
+            # For replay, use ALL data for rolling calculations
             loans_for_rolling = loans.copy()
             
         else:
@@ -1273,7 +1265,7 @@ def run_loans_model_pipeline(
         loans_clean = enforce_snowflake_types(loans_clean)
         
         if not loans_clean.empty:
-            # For ALL modes (incremental, backfill, replay), use transactional delete+insert
+            # For ALL modes (incremental, replay), use transactional delete+insert
             # This ensures idempotency and prevents duplicate states
             clean_rows = transactional_delete_insert_snowflake_clean(
                 loans_clean,
