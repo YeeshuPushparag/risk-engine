@@ -1,4 +1,3 @@
 FROM python:3.12-slim
 
-RUN python -m pip install --upgrade pip
 RUN python -m pip install --no-cache-dir jmespath==1.1.0
