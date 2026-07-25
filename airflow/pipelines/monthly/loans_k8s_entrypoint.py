@@ -10,10 +10,7 @@ import os
 import sys
 
 
-def write_xcom(value):
-    os.makedirs("/airflow/xcom", exist_ok=True)
-    with open("/airflow/xcom/return.json", "w") as f:
-        json.dump(value, f)
+
 
 
 def main():
@@ -68,7 +65,6 @@ def main():
                 airflow_metadata=airflow_metadata,
             ) or "OK"
 
-        write_xcom(result)
         print(f"[ENTRYPOINT] {args.pipeline} finished: {result}")
 
     except Exception as e:
