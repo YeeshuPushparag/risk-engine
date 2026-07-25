@@ -30,6 +30,20 @@ resource "kubernetes_role" "airflow_operator" {
     ]
   }
 
+  rule {
+    api_groups = [""]
+
+    resources = [
+      "events"
+    ]
+
+    verbs = [
+      "get",
+      "list",
+      "watch"
+    ]
+  }
+
   depends_on = [
     kubernetes_namespace.airflow
   ]
