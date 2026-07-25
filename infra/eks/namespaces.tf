@@ -18,11 +18,6 @@ resource "kubernetes_namespace" "jenkins" {
   depends_on = [aws_eks_node_group.platform_core] 
 }
 
-resource "kubernetes_namespace" "argocd" {
-  metadata { name = "argocd" }
-  depends_on = [aws_eks_node_group.platform_core] 
-}
-
 resource "kubernetes_namespace_v1" "streaming" {
   metadata { name = "streaming" }
   depends_on = [aws_eks_node_group.streaming]      

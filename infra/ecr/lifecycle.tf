@@ -5,9 +5,21 @@ resource "aws_ecr_lifecycle_policy" "airflow" {
     rules = [
       {
         rulePriority = 1
-        description  = "Keep only last 5 images"
+        description  = "Keep only the latest untagged image"
         selection = {
-          tagStatus   = "any"
+          tagStatus   = "untagged"
+          countType   = "imageCountMoreThan"
+          countNumber = 1
+        }
+        action = {
+          type = "expire"
+        }
+      },
+      {
+        rulePriority = 2
+        description  = "Keep only the last 5 tagged images"
+        selection = {
+          tagStatus   = "tagged"
           countType   = "imageCountMoreThan"
           countNumber = 5
         }
@@ -26,9 +38,21 @@ resource "aws_ecr_lifecycle_policy" "django" {
     rules = [
       {
         rulePriority = 1
-        description  = "Keep only last 5 images"
+        description  = "Keep only the latest untagged image"
         selection = {
-          tagStatus   = "any"
+          tagStatus   = "untagged"
+          countType   = "imageCountMoreThan"
+          countNumber = 1
+        }
+        action = {
+          type = "expire"
+        }
+      },
+      {
+        rulePriority = 2
+        description  = "Keep only the last 5 tagged images"
+        selection = {
+          tagStatus   = "tagged"
           countType   = "imageCountMoreThan"
           countNumber = 5
         }
@@ -47,9 +71,21 @@ resource "aws_ecr_lifecycle_policy" "nextjs" {
     rules = [
       {
         rulePriority = 1
-        description  = "Keep only last 5 images"
+        description  = "Keep only the latest untagged image"
         selection = {
-          tagStatus   = "any"
+          tagStatus   = "untagged"
+          countType   = "imageCountMoreThan"
+          countNumber = 1
+        }
+        action = {
+          type = "expire"
+        }
+      },
+      {
+        rulePriority = 2
+        description  = "Keep only the last 5 tagged images"
+        selection = {
+          tagStatus   = "tagged"
           countType   = "imageCountMoreThan"
           countNumber = 5
         }
@@ -68,9 +104,21 @@ resource "aws_ecr_lifecycle_policy" "spark" {
     rules = [
       {
         rulePriority = 1
-        description  = "Keep only last 5 images"
+        description  = "Keep only the latest untagged image"
         selection = {
-          tagStatus   = "any"
+          tagStatus   = "untagged"
+          countType   = "imageCountMoreThan"
+          countNumber = 1
+        }
+        action = {
+          type = "expire"
+        }
+      },
+      {
+        rulePriority = 2
+        description  = "Keep only the last 5 tagged images"
+        selection = {
+          tagStatus   = "tagged"
           countType   = "imageCountMoreThan"
           countNumber = 5
         }
@@ -89,9 +137,21 @@ resource "aws_ecr_lifecycle_policy" "producer" {
     rules = [
       {
         rulePriority = 1
-        description  = "Keep only last 5 images"
+        description  = "Keep only the latest untagged image"
         selection = {
-          tagStatus   = "any"
+          tagStatus   = "untagged"
+          countType   = "imageCountMoreThan"
+          countNumber = 1
+        }
+        action = {
+          type = "expire"
+        }
+      },
+      {
+        rulePriority = 2
+        description  = "Keep only the last 5 tagged images"
+        selection = {
+          tagStatus   = "tagged"
           countType   = "imageCountMoreThan"
           countNumber = 5
         }
@@ -110,11 +170,11 @@ resource "aws_ecr_lifecycle_policy" "kaniko_cache" {
     rules = [
       {
         rulePriority = 1
-        description  = "Keep only last 5 images"
+        description  = "Keep only last 50 images"
         selection = {
           tagStatus   = "any"
           countType   = "imageCountMoreThan"
-          countNumber = 5
+          countNumber = 50
         }
         action = {
           type = "expire"
