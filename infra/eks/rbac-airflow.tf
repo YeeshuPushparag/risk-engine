@@ -15,7 +15,8 @@ resource "kubernetes_role" "airflow_operator" {
     resources = [
       "pods",
       "pods/log",
-      "pods/status"
+      "pods/status",
+      "pods/exec"
     ]
 
     verbs = [
