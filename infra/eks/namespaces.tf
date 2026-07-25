@@ -1,4 +1,3 @@
-# Namespace resources
 resource "kubernetes_namespace" "airflow" {
   metadata { name = "airflow" }
   depends_on = [aws_eks_node_group.platform_core] 
