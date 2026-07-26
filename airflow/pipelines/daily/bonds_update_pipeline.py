@@ -129,6 +129,7 @@ CONFIG: dict = {
     "features_prefix":     "historical-bonds/features/",
     "rolling_key":         "historical-bonds/rolling/bonds_features_30d.parquet",
     "run_metadata_prefix": "historical-bonds/run_metadata/",
+    "lock_prefix":         "historical-bonds/locks/",
 
     # Data quality thresholds
     "max_null_pct":     0.02,
@@ -185,6 +186,10 @@ class BondPipelineError(Exception):
 
 class DataValidationError(Exception):
     """Raised when output data fails quality or schema checks."""
+
+
+class LockError(BondPipelineError):
+    """Raised when the S3 pipeline lock is already held by another run."""
 
 
 # =============================================================
@@ -376,15 +381,125 @@ def read_parquet_from_s3(bucket: str, key: str) -> pd.DataFrame:
 
 
 def write_parquet_to_s3(df: pd.DataFrame, bucket: str, key: str) -> None:
-    """Write a DataFrame as Parquet to S3. Raises BondPipelineError on failure."""
+    """
+    Atomically write a DataFrame as Parquet to S3.
+
+    Protocol: PUT to _temp/<key> -> COPY to final <key> -> DELETE temp.
+    Guarantees the final key is never left partially written — readers
+    (including bonds_processing_pipeline.py) always see either the
+    complete previous file or the complete new file, never a truncated
+    or corrupt one mid-write.
+
+    Signature is unchanged from the previous non-atomic version, so every
+    existing call-site (_write_raw_partitions, write_layer2_features,
+    update_rolling_layer) works without modification.
+
+    Raises BondPipelineError on failure. The temp key is always cleaned
+    up, even on failure.
+    """
+    temp_key  = f"_temp/{key}"
+    s3_client = get_s3()
+
+    buf = BytesIO()
+    df.to_parquet(buf, index=False)
+    buf.seek(0)
+    raw_bytes = buf.getvalue()
+
     try:
-        print(f"  [S3 WRITE PARQUET] s3://{bucket}/{key}  rows={len(df):,}")
-        buf = BytesIO()
-        df.to_parquet(buf, index=False)
-        buf.seek(0)
-        get_s3().put_object(Bucket=bucket, Key=key, Body=buf.getvalue())
+        print(f"  [S3 ATOMIC WRITE] s3://{bucket}/{key}  rows={len(df):,}")
+
+        # Step 1: write to temp
+        s3_client.put_object(Bucket=bucket, Key=temp_key, Body=raw_bytes)
+
+        # Step 2: server-side copy to final destination
+        s3_client.copy_object(
+            Bucket=bucket,
+            CopySource={"Bucket": bucket, "Key": temp_key},
+            Key=key,
+        )
+
     except ClientError as exc:
         raise BondPipelineError(f"Failed to write s3://{bucket}/{key}: {exc}") from exc
+
+    finally:
+        # Step 3: always remove temp — even if the copy failed
+        try:
+            s3_client.delete_object(Bucket=bucket, Key=temp_key)
+        except Exception:
+            pass
+
+
+def write_json_to_s3(payload: dict, bucket: str, key: str) -> None:
+    """Write a dict as JSON to S3. Raises BondPipelineError on failure."""
+    try:
+        get_s3().put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=json.dumps(payload, default=str, indent=2).encode("utf-8"),
+        )
+    except ClientError as exc:
+        raise BondPipelineError(f"Failed to write JSON to s3://{bucket}/{key}: {exc}") from exc
+
+
+# =============================================================
+# S3 CONCURRENCY LOCKING
+# =============================================================
+
+_LOCK_KEY_SUFFIX = "pipeline.lock"
+
+
+def acquire_s3_lock(bucket: str, run_id: str) -> None:
+    """
+    Create an S3 lock file to prevent concurrent execution of
+    update_bonds_pipeline().
+
+    Mirrors the locking pattern used in market_features_s3.py. S3 has no
+    native atomic test-and-set, but for a batch pipeline that runs on a
+    schedule or is manually triggered, this check-then-write pattern is
+    sufficient to catch accidental overlapping runs (e.g. two manual
+    triggers, or a retry firing while a prior attempt is still mid-run).
+
+    Raises LockError if a lock is already held. Does NOT affect
+    bonds_processing_pipeline.py, which never calls this function.
+    """
+    lock_key = f"{CONFIG['lock_prefix']}{_LOCK_KEY_SUFFIX}"
+
+    if s3_key_exists(bucket, lock_key):
+        try:
+            raw    = get_s3().get_object(Bucket=bucket, Key=lock_key)["Body"].read()
+            info   = json.loads(raw)
+            holder = info.get("run_id", "unknown")
+            since  = info.get("acquired_at", "unknown")
+        except Exception:
+            holder, since = "unknown", "unknown"
+
+        msg = (
+            f"Pipeline locked by run_id={holder} (since {since}). "
+            f"Aborting to prevent corruption."
+        )
+        send_alert(msg, level="CRITICAL", context={"lock_key": lock_key, "held_by": holder})
+        raise LockError(msg)
+
+    write_json_to_s3(
+        {"run_id": run_id, "acquired_at": utc_now().isoformat()},
+        bucket,
+        lock_key,
+    )
+    print(f"  [LOCK] acquired -> s3://{bucket}/{lock_key}")
+
+
+def release_s3_lock(bucket: str) -> None:
+    """Release the S3 lock. Called in the finally block — must never raise."""
+    lock_key = f"{CONFIG['lock_prefix']}{_LOCK_KEY_SUFFIX}"
+    try:
+        get_s3().delete_object(Bucket=bucket, Key=lock_key)
+        print(f"  [LOCK] released -> s3://{bucket}/{lock_key}")
+    except Exception as exc:
+        send_alert(
+            f"Could not release S3 lock — manual cleanup required: s3://{bucket}/{lock_key}",
+            level="WARNING",
+            context={"error": str(exc)},
+        )
 
 
 # =============================================================
@@ -1492,6 +1607,16 @@ def update_bonds_pipeline(
     run_id    = f"run_{run_ts.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     start_str = ""   # resolved in STEP 2; used in the except block
 
+    # ── Acquire S3 lock — released in the finally block no matter what ──
+    # Guards only against concurrent update_bonds_pipeline() runs; has no
+    # effect on and is not checked by bonds_processing_pipeline.py.
+    lock_acquired = False
+    try:
+        acquire_s3_lock(bucket, run_id)
+        lock_acquired = True
+    except LockError:
+        raise   # propagate immediately — no metadata write, nothing to clean up
+
     try:
         # ── STEP 1 : Load rolling layer ──────────────────────────────────
         print("  [STEP 1] Loading rolling serving layer...")
@@ -1770,3 +1895,8 @@ def update_bonds_pipeline(
             pass
 
         raise
+
+    finally:
+        # S3 lock is ALWAYS released — even on crash / KeyboardInterrupt
+        if lock_acquired:
+            release_s3_lock(bucket)
