@@ -52,6 +52,7 @@ def main():
     parser.add_argument("--pipeline", required=True, choices=list(PIPELINE_REGISTRY.keys()))
     parser.add_argument("--start-date", default="")
     parser.add_argument("--replay", default="false")
+    parser.add_argument("--replay-from-raw", default="false")
     parser.add_argument("--dag-id", required=True)
     parser.add_argument("--task-id", required=True)
     parser.add_argument("--dag-run-id", required=True)
@@ -63,6 +64,7 @@ def main():
 
     start_date_override = args.start_date or None
     replay_flag = args.replay.strip().lower() == "true"
+    replay_from_raw_flag = args.replay_from_raw.strip().lower() == "true"   
 
     airflow_metadata = {
         "dag_id": args.dag_id,
@@ -82,10 +84,12 @@ def main():
         import importlib
         module = importlib.import_module(module_path)
         func = getattr(module, func_name)
-
+        
+        flag_value = replay_from_raw_flag if replay_kwarg == "replay_from_raw" else replay_flag
+        
         kwargs = {
             "start_date_override": start_date_override,
-            replay_kwarg: replay_flag,
+            replay_kwarg: flag_value,
             "airflow_metadata": airflow_metadata,
         }
         result = func(**kwargs) or "OK"

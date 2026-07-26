@@ -33,6 +33,7 @@ COMMON_ARGS = [
     "--logical-date", "{{ logical_date }}",
     "--start-date", "{{ dag_run.conf.get('start_date', '') if dag_run.conf else '' }}",
     "--replay", "{{ dag_run.conf.get('replay', False) if dag_run.conf else False }}",
+    "--replay-from-raw", "{{ dag_run.conf.get('replay_from_raw', False) if dag_run.conf else False }}",
 ]
 
 
