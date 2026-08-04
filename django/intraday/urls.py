@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import fx_overview_initial, fx_currency_initial, fx_ticker_initial, equity_overview, equity_manager, equity_ticker, equity_ticker_manager
+from .views import fx_overview_initial, fx_currency_initial, fx_ticker_initial, equity_overview, equity_manager, equity_ticker, equity_ticker_manager, tickers_list
 
 urlpatterns = [
     path("fx/overview/", fx_overview_initial),
