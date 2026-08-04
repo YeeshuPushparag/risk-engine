@@ -52,7 +52,7 @@
       },
       "id": 1,
       "panels": [],
-      "title": "Pod Resources",
+      "title": "Pod Resources - risk-eks",
       "type": "row"
     },
     {
@@ -136,7 +136,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "sum(rate(container_cpu_usage_seconds_total{job=\"kubelet\", metrics_path=\"/metrics/cadvisor\", container!=\"\"}[5m])) by (namespace)",
+          "expr": "sum(rate(container_cpu_usage_seconds_total{job=\"kubelet\", metrics_path=\"/metrics/cadvisor\", container!=\"\", cluster=\"risk-eks\"}[5m])) by (namespace)",
           "legendFormat": "{{namespace}}",
           "range": true,
           "refId": "A"
@@ -226,7 +226,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "sum(container_memory_working_set_bytes{job=\"kubelet\", metrics_path=\"/metrics/cadvisor\", container!=\"\"}) by (namespace)",
+          "expr": "sum(container_memory_working_set_bytes{job=\"kubelet\", metrics_path=\"/metrics/cadvisor\", container!=\"\", cluster=\"risk-eks\"}) by (namespace)",
           "legendFormat": "{{namespace}}",
           "range": true,
           "refId": "A"
@@ -316,14 +316,14 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "sum(rate(container_network_receive_bytes_total{job=\"kubelet\", metrics_path=\"/metrics/cadvisor\"}[5m])) by (namespace)",
+          "expr": "sum(rate(container_network_receive_bytes_total{job=\"kubelet\", metrics_path=\"/metrics/cadvisor\", cluster=\"risk-eks\"}[5m])) by (namespace)",
           "legendFormat": "{{namespace}} - Receive",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "builder",
-          "expr": "sum(rate(container_network_transmit_bytes_total{job=\"kubelet\", metrics_path=\"/metrics/cadvisor\"}[5m])) by (namespace)",
+          "expr": "sum(rate(container_network_transmit_bytes_total{job=\"kubelet\", metrics_path=\"/metrics/cadvisor\", cluster=\"risk-eks\"}[5m])) by (namespace)",
           "legendFormat": "{{namespace}} - Transmit",
           "range": true,
           "refId": "B"
@@ -413,7 +413,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "sum(kube_pod_container_status_restarts_total{job=\"kube-state-metrics\"}) by (namespace)",
+          "expr": "sum(kube_pod_container_status_restarts_total{job=\"kube-state-metrics\", cluster=\"risk-eks\"}) by (namespace)",
           "legendFormat": "{{namespace}}",
           "range": true,
           "refId": "A"
@@ -430,7 +430,8 @@
     "eks",
     "kubernetes",
     "pods",
-    "containers"
+    "containers",
+    "risk-eks"
   ],
   "templating": {
     "list": []
@@ -441,7 +442,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "EKS Pod/Container Monitoring",
-  "uid": "eks-pod-monitoring",
+  "title": "EKS Pod/Container Monitoring - risk-eks",
+  "uid": "eks-pod-monitoring-risk-eks",
   "version": 1
 }

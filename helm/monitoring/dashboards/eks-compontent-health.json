@@ -52,7 +52,7 @@
       },
       "id": 1,
       "panels": [],
-      "title": "API Server",
+      "title": "API Server - risk-eks",
       "type": "row"
     },
     {
@@ -136,7 +136,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "rate(apiserver_request_total{job=\"apiserver\"}[5m])",
+          "expr": "rate(apiserver_request_total{job=\"apiserver\", cluster=\"risk-eks\"}[5m])",
           "legendFormat": "Requests",
           "range": true,
           "refId": "A"
@@ -226,7 +226,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "histogram_quantile(0.99, sum(rate(apiserver_request_duration_seconds_bucket{job=\"apiserver\"}[5m])) by (le, verb))",
+          "expr": "histogram_quantile(0.99, sum(rate(apiserver_request_duration_seconds_bucket{job=\"apiserver\", cluster=\"risk-eks\"}[5m])) by (le, verb))",
           "legendFormat": "{{verb}}",
           "range": true,
           "refId": "A"
@@ -245,7 +245,7 @@
       },
       "id": 4,
       "panels": [],
-      "title": "CoreDNS",
+      "title": "CoreDNS - risk-eks",
       "type": "row"
     },
     {
@@ -329,7 +329,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "rate(coredns_dns_requests_total{job=\"coredns\"}[5m])",
+          "expr": "rate(coredns_dns_requests_total{job=\"coredns\", cluster=\"risk-eks\"}[5m])",
           "legendFormat": "Requests",
           "range": true,
           "refId": "A"
@@ -419,7 +419,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "rate(coredns_dns_responses_total{job=\"coredns\"}[5m])",
+          "expr": "rate(coredns_dns_responses_total{job=\"coredns\", cluster=\"risk-eks\"}[5m])",
           "legendFormat": "{{rcode}}",
           "range": true,
           "refId": "A"
@@ -438,7 +438,7 @@
       },
       "id": 7,
       "panels": [],
-      "title": "Kube Proxy & Kubelet",
+      "title": "Kube Proxy & Kubelet - risk-eks",
       "type": "row"
     },
     {
@@ -522,7 +522,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "histogram_quantile(0.99, sum(rate(kubeproxy_sync_proxy_rules_duration_seconds_bucket{job=\"kube-proxy\"}[5m])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(kubeproxy_sync_proxy_rules_duration_seconds_bucket{job=\"kube-proxy\", cluster=\"risk-eks\"}[5m])) by (le))",
           "legendFormat": "Kube Proxy Sync (P99)",
           "range": true,
           "refId": "A"
@@ -612,7 +612,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "kubelet_running_pods{job=\"kubelet\"}",
+          "expr": "kubelet_running_pods{job=\"kubelet\", cluster=\"risk-eks\"}",
           "legendFormat": "{{node}}",
           "range": true,
           "refId": "A"
@@ -628,7 +628,8 @@
   "tags": [
     "eks",
     "kubernetes",
-    "components"
+    "components",
+    "risk-eks"
   ],
   "templating": {
     "list": []
@@ -639,7 +640,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "EKS Component Health",
-  "uid": "eks-component-health",
+  "title": "EKS Component Health - risk-eks",
+  "uid": "eks-component-health-risk-eks",
   "version": 1
 }
