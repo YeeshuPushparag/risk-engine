@@ -135,10 +135,8 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "editorMode": "builder",
-          "expr": "rate(apiserver_request_total{job=\"apiserver\"}[5m])",
+          "expr": "rate(apiserver_request_total[5m])",
           "legendFormat": "Requests",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -225,10 +223,8 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "editorMode": "builder",
-          "expr": "histogram_quantile(0.99, sum(rate(apiserver_request_duration_seconds_bucket{job=\"apiserver\"}[5m])) by (le, verb))",
+          "expr": "histogram_quantile(0.99, sum(rate(apiserver_request_duration_seconds_bucket[5m])) by (le, verb))",
           "legendFormat": "{{verb}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -328,10 +324,8 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "editorMode": "builder",
-          "expr": "rate(coredns_dns_requests_total{job=\"coredns\"}[5m])",
+          "expr": "rate(coredns_dns_requests_total[5m])",
           "legendFormat": "Requests",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -418,10 +412,8 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "editorMode": "builder",
-          "expr": "rate(coredns_dns_responses_total{job=\"coredns\"}[5m])",
+          "expr": "rate(coredns_dns_responses_total[5m])",
           "legendFormat": "{{rcode}}",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -521,10 +513,8 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "editorMode": "builder",
-          "expr": "histogram_quantile(0.99, sum(rate(kubeproxy_sync_proxy_rules_duration_seconds_bucket{job=\"kube-proxy\"}[5m])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(kubeproxy_sync_proxy_rules_duration_seconds_bucket[5m])) by (le))",
           "legendFormat": "Kube Proxy Sync (P99)",
-          "range": true,
           "refId": "A"
         }
       ],
@@ -611,10 +601,8 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "editorMode": "builder",
-          "expr": "kubelet_running_pods{job=\"kubelet\"}",
+          "expr": "kubelet_running_pods",
           "legendFormat": "{{node}}",
-          "range": true,
           "refId": "A"
         }
       ],
