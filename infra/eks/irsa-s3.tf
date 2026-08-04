@@ -99,3 +99,51 @@ resource "aws_iam_role_policy_attachment" "airflow_s3_attach" {
 }
 
 
+############################################
+# IRSA Role: Django (namespace: django)
+############################################
+
+resource "aws_iam_role" "django_s3_irsa_role" {
+  name = "${var.cluster_name}-django-s3-irsa-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Principal = {
+          Federated = aws_iam_openid_connect_provider.eks.arn
+        },
+        Action = "sts:AssumeRoleWithWebIdentity",
+        Condition = {
+          StringEquals = {
+            "${local.oidc_issuer}:sub" = "system:serviceaccount:django:django-sa"
+          }
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_policy" "django_s3_policy" {
+  name = "${var.cluster_name}-django-s3-policy"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "s3:ListBucket",
+          "s3:GetObject"
+        ],
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "django_s3_attach" {
+  role       = aws_iam_role.django_s3_irsa_role.name
+  policy_arn = aws_iam_policy.django_s3_policy.arn
+}

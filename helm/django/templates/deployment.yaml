@@ -12,6 +12,7 @@ spec:
       labels:
         app: django
     spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
       containers:

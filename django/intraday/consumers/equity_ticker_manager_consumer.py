@@ -1,31 +1,43 @@
+"""
+equity_ticker_manager_consumer.py
+====================================
+WebSocket consumer for the ticker+manager position page. Mirrors
+equity_ticker_manager() in views.py -- both call
+build_equity_ticker_manager_payload().
+
+ALL store only, per page scope confirmed with the user.
+
+Ticker-scoped (like equity_ticker_consumer.py): always sends, including
+the "_not_found" case, so the client sees the position transition to a
+"missing market data" state live rather than freezing on stale data.
+"""
+
 import json
 import asyncio
 from redis.asyncio import Redis
 from channels.generic.websocket import AsyncWebsocketConsumer
 import os
 
-def safe_num(v):
+from ..views import build_equity_ticker_manager_payload, EQUITY_ALL_KEY
+
+
+def _parse_rows(raw):
+    if not raw:
+        return []
     try:
-        if v is None:
-            return 0
-        if isinstance(v, float) and v != v:  # NaN check
-            return 0
-        return v
+        rows = json.loads(raw)
+        return rows if isinstance(rows, list) else []
     except Exception:
-        return 0
+        return []
 
 
 class EquityTickerManagerConsumer(AsyncWebsocketConsumer):
 
     async def connect(self):
-
         self.ticker = self.scope["url_route"]["kwargs"]["ticker"]
         raw_manager = self.scope["url_route"]["kwargs"]["manager"]
 
-        # Display
         self.manager = raw_manager.replace("-", " ").title()
-        # Normalized
-        self.normalized_manager = raw_manager.replace("-", " ").lower()
 
         await self.accept()
         print(f"WS ticker+manager: {self.ticker} / {self.manager}")
@@ -47,92 +59,16 @@ class EquityTickerManagerConsumer(AsyncWebsocketConsumer):
             if message["type"] != "message":
                 continue
 
-            try:
-                rows = json.loads(message["data"])
-            except Exception:
+            all_raw  = await self.redis.get(EQUITY_ALL_KEY)
+            all_rows = _parse_rows(all_raw)
+
+            if not all_rows:
                 continue
 
-            if not rows:
-                continue
+            payload = build_equity_ticker_manager_payload(all_rows, self.ticker, self.manager)
+            payload.pop("_not_found", None)
 
-            # ---------------------------------------------
-            # Find exact row (ticker + manager)
-            # ---------------------------------------------
-            row = next(
-                (
-                    r for r in rows
-                    if r.get("ticker") == self.ticker
-                    and r.get("asset_manager", "")
-                        .replace("-", " ")
-                        .lower() == self.normalized_manager
-                ),
-                None,
-            )
-
-            if not row:
-                continue
-
-            # ---------------------------------------------
-            # Alerts (NaN safe)
-            # ---------------------------------------------
-            alerts = []
-
-            vol = row.get("vol_15m")
-            ret1 = row.get("return_1m")
-
-            if vol is not None and vol == vol and vol > 0.02:
-                alerts.append({
-                    "type": "Volatility Spike",
-                    "severity": "medium",
-                    "time": row.get("timestamp"),
-                    "trigger": "vol_15m > 0.02",
-                })
-
-            if ret1 is not None and ret1 == ret1 and abs(ret1) > 0.008:
-                alerts.append({
-                    "type": "Return Shock",
-                    "severity": "high" if abs(ret1) > 0.015 else "medium",
-                    "time": row.get("timestamp"),
-                    "trigger": "abs(return_1m) > 0.8%",
-                })
-
-            # ---------------------------------------------
-            # Payload (UNCHANGED FIELDS)
-            # ---------------------------------------------
-            payload = {
-                "timestamp": row.get("timestamp"),
-                "ticker": row.get("ticker"),
-                "manager": row.get("asset_manager"),
-
-                "totals": {
-                    "exposure": row.get("intraday_exposure"),
-                    "pnl": row.get("portfolio_intraday_pnl"),
-                    "shares": row.get("Shares"),
-                    "weight": (
-                        safe_num(row.get("intraday_exposure")) /
-                        safe_num(row.get("portfolio_intraday_exposure") or 1)
-                    ),
-                    "price": row.get("close"),
-                },
-
-                "signals": {
-                    "return_1m": row.get("return_1m"),
-                    "return_5m": row.get("return_5m"),
-                    "vol_15m": row.get("vol_15m"),
-                    "range_pct_1m": row.get("range_pct_1m"),
-                    "vwap_5m": row.get("rolling_vwap_5m"),
-                    "close_diff": row.get("close_diff"),
-                    "rolling_high": row.get("rolling_high_5m"),
-                    "rolling_low": row.get("rolling_low_5m"),
-                    "trend_slope_5m": row.get("trend_slope_5m"),
-                    "breakout_strength": row.get("breakout_strength"),
-                    "volume_burst": row.get("volume_burst"),
-                },
-
-                "alerts": alerts,
-            }
-
-            await self.send(json.dumps(payload))
+            await self.send(json.dumps(payload, default=str))
 
     async def disconnect(self, code):
         print(f"WS ticker+manager disconnected: {self.ticker} / {self.manager}")

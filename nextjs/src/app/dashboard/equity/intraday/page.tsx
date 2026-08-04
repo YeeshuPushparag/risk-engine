@@ -104,9 +104,88 @@ function TickerCard({ t }: { t: any }) {
   );
 }
 
+/* ---------------- MARKET DATA HEALTH (separate from valuation, per design doc) ---------------- */
+function MarketDataHealthSection({ health }: { health: any }) {
+  if (!health) return null;
+  const fresh = health.fresh_updates?.fresh ?? 0;
+  const total = health.fresh_updates?.total ?? 0;
+  const delayed = health.delayed_tickers_count ?? 0;
+
+  return (
+    <section className="space-y-4">
+      <div className="flex items-center gap-3 border-l-4 border-slate-600 pl-4">
+        <Clock className="w-4 h-4 text-slate-400" />
+        <h2 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em]">Market Data Health</h2>
+      </div>
+      <div className="grid grid-cols-3 gap-4 bg-slate-900/30 border border-slate-800 rounded-2xl p-5">
+        <div>
+          <p className="text-[8px] font-black text-slate-500 uppercase tracking-widest mb-1">Fresh Updates</p>
+          <p className="text-lg font-mono font-bold text-white">
+            <FlashValue value={fresh}>{fresh} / {total}</FlashValue>
+          </p>
+        </div>
+        <div>
+          <p className="text-[8px] font-black text-slate-500 uppercase tracking-widest mb-1">Last Update</p>
+          <p className="text-lg font-mono font-bold text-slate-300">
+            {health.last_market_update ? new Date(health.last_market_update).toLocaleTimeString() : "—"}
+          </p>
+        </div>
+        <div>
+          <p className="text-[8px] font-black text-slate-500 uppercase tracking-widest mb-1">Status</p>
+          <p className={`text-sm font-black uppercase ${delayed > 0 ? "text-amber-400" : "text-emerald-400"}`}>
+            {delayed > 0 ? `⚠ ${delayed} delayed` : "All current"}
+          </p>
+        </div>
+      </div>
+      {health.universe_source_available === false && (
+        <p className="text-[9px] font-bold text-amber-500 uppercase tracking-wider px-1">
+          ⚠ Static universe unavailable — totals estimated from live data only
+        </p>
+      )}
+    </section>
+  );
+}
+
+/* ---------------- DATA QUALITY ISSUES (only rendered when non-empty) ---------------- */
+function DataQualityIssuesSection({ issues, managerLinkBase }: { issues: any[]; managerLinkBase?: (ticker: string) => string }) {
+  if (!issues || issues.length === 0) return null;
+
+  return (
+    <section className="space-y-4">
+      <div className="flex items-center gap-3 border-l-4 border-amber-600 pl-4">
+        <AlertTriangle className="w-4 h-4 text-amber-500" />
+        <h2 className="text-[10px] font-black text-amber-500 uppercase tracking-[0.3em]">
+          Market Data Issues — {issues.length} ticker{issues.length > 1 ? "s" : ""} cannot currently be valued
+        </h2>
+      </div>
+      <div className="bg-amber-500/5 border border-amber-500/20 rounded-2xl divide-y divide-amber-500/10 overflow-hidden">
+        {issues.map((issue: any) => (
+          <div key={issue.ticker || issue.currency_pair} className="p-4 flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-black text-white">{issue.ticker || issue.currency_pair}</p>
+              <p className="text-[10px] font-bold text-slate-500 uppercase mt-0.5">{issue.reason}</p>
+              {issue.eod_available && (
+                <p className="text-[10px] font-bold text-slate-400 mt-0.5">EOD price available: {fmtCur(issue.eod_price)} ({issue.eod_date})</p>
+              )}
+            </div>
+            <Link
+              href={managerLinkBase ? managerLinkBase(issue.ticker) : `/dashboard/equity/daily/ticker/${issue.ticker}`}
+              className="text-[10px] font-black text-blue-500 hover:text-white uppercase tracking-widest whitespace-nowrap"
+            >
+              View Ticker →
+            </Link>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 /* ---------------- MAIN PAGE ---------------- */
 export default function IntradayEquityOverview() {
   const [summary, setSummary] = useState<any>(null);
+  const [dataHealth, setDataHealth] = useState<any>(null);
+  const [dataIssues, setDataIssues] = useState<any[]>([]);
   const [topMovers, setTopMovers] = useState<any[]>([]);
   const [alerts, setAlerts] = useState<any[]>([]);
   const [tickers, setTickers] = useState<any[]>([]);
@@ -121,7 +200,9 @@ export default function IntradayEquityOverview() {
 
   const updateState = (data: any) => {
     if (!data) return;
-    setSummary(data.totals);
+    setSummary(data.portfolio_overview);
+    setDataHealth(data.market_data_health);
+    setDataIssues(data.data_quality_issues || []);
     setTopMovers(data.top_movers);
     setAlerts(data.active_alerts || []);
     setTimestamp(data.timestamp);
@@ -314,12 +395,24 @@ useEffect(() => {
       </header>
 
       {/* METRICS ROW */}
-      <section className="grid grid-cols-2 lg:grid-cols-4 gap-6">
-        <MetricCard label="Net Exposure" value={fmtCur(summary.total_exposure)} numericValue={summary.total_exposure} subValue="Portfolio Value" />
-        <MetricCard label="Session P&L" value={fmtCur(summary.intraday_pnl)} numericValue={summary.intraday_pnl} subValue="Unrealized Delta" />
-        <MetricCard label="Active Streams" value={summary.tickers_streaming} numericValue={summary.tickers_streaming} subValue="Tickers Online" />
+      <section className="grid grid-cols-2 lg:grid-cols-5 gap-6">
+        <MetricCard label="Total Tickers" value={summary.total_tickers} numericValue={summary.total_tickers} subValue="Static Universe" />
+        <MetricCard label="Net Exposure" value={fmtCur(summary.total_exposure)} numericValue={summary.total_exposure} subValue={summary.basis_note || "Portfolio Value"} />
+        <MetricCard label="Session P&L" value={fmtCur(summary.total_pnl)} numericValue={summary.total_pnl} subValue={summary.basis_note || "Unrealized Delta"} />
+        <MetricCard
+          label="Valuation Coverage"
+          value={`${summary.valuation_coverage?.valued ?? 0} / ${summary.valuation_coverage?.total ?? 0}`}
+          numericValue={summary.valuation_coverage?.valued}
+          subValue="Tickers Valued"
+        />
         <MetricCard label="Managed Desk" value={summary.active_managers} numericValue={summary.active_managers} subValue="Managers Active" />
       </section>
+
+      {/* MARKET DATA HEALTH -- separate from valuation, per design */}
+      <MarketDataHealthSection health={dataHealth} />
+
+      {/* DATA QUALITY ISSUES -- only appears when something is actually missing */}
+      <DataQualityIssuesSection issues={dataIssues} />
 
       {/* VOLATILITY OVERVIEW */}
       <section className="space-y-6">

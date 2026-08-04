@@ -113,9 +113,9 @@ export default function TickerPage() {
           { cache: "no-store" }
         );
 
-        if (initialRes.ok) {
-          handleUpdate(await initialRes.json());
-        }
+        // Backend returns a structured body even on 404 (ticker has no
+        // current price) -- read it either way instead of skipping.
+        handleUpdate(await initialRes.json());
       } catch (e) {
         console.error("Failed to load config or data:", e);
       }
@@ -130,6 +130,10 @@ export default function TickerPage() {
   if (fxEnabled === null) return <LoadingState />;
   if (fxEnabled === false) return <MarketClosedView />;
   if (!data) return <LoadingState />;
+
+  if (data.market_data_status && data.market_data_status.intraday_price_available === false) {
+    return <MissingMarketData ticker={ticker as string} status={data.market_data_status} />;
+  }
 
   const rangePercent =
     data.high != null && data.low != null && data.close != null && data.high !== data.low
@@ -271,6 +275,48 @@ function MarketClosedView() {
         <Link href="/dashboard/fx/daily" className="inline-block mt-4 text-blue-500 text-[10px] font-black uppercase tracking-widest border border-blue-500/30 px-6 py-2 rounded-lg hover:bg-blue-500/10 transition">
           ← Back to Daily
         </Link>
+      </div>
+    </div>
+  );
+}
+
+function MissingMarketData({ ticker, status }: { ticker: string; status: any }) {
+  return (
+    <div className="min-h-screen bg-[#020617] text-slate-300 p-6 lg:p-12">
+      <div className="max-w-2xl mx-auto space-y-8">
+        <Link
+          href="/dashboard/fx/intraday"
+          className="inline-flex items-center text-[10px] font-bold text-slate-500 hover:text-blue-400 uppercase tracking-widest gap-2"
+        >
+          <ArrowLeft className="w-3 h-3" /> Back to Terminal
+        </Link>
+
+        <div className="space-y-2">
+          <h1 className="text-3xl sm:text-4xl font-black text-white tracking-tighter italic">{ticker}</h1>
+          <p className="text-amber-500 text-sm font-bold uppercase tracking-wide">⚠ Market Data Status: Intraday Price Unavailable</p>
+        </div>
+
+        <div className="bg-slate-900/40 border border-amber-500/20 rounded-2xl p-8 space-y-6">
+          <div className="grid grid-cols-2 gap-6">
+            <div>
+              <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Intraday Price</p>
+              <p className="text-lg font-mono font-bold text-red-400">Unavailable</p>
+            </div>
+            <div>
+              <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Latest EOD Price</p>
+              <p className="text-lg font-mono font-bold text-white">
+                {status?.eod_available ? `$${status.eod_price}` : "—"}
+              </p>
+              {status?.eod_date && (
+                <p className="text-[10px] text-slate-500 mt-1">as of {status.eod_date}</p>
+              )}
+            </div>
+          </div>
+          <div className="pt-4 border-t border-slate-800">
+            <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Valuation Status</p>
+            <p className="text-sm font-bold text-amber-400">{status?.valuation_status || "Excluded from portfolio totals"}</p>
+          </div>
+        </div>
       </div>
     </div>
   );

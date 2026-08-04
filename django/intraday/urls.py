@@ -9,4 +9,5 @@ urlpatterns = [
     path("equity/manager/", equity_manager),
     path("equity/ticker/", equity_ticker),
     path("equity/ticker_manager/", equity_ticker_manager),
+    path("equity/tickers-list/", tickers_list),
 ]

@@ -1552,7 +1552,7 @@ def push_pipeline_metrics(
     try:
         push_to_gateway(
             CONFIG["pushgateway_url"],
-            job=f"{pipeline_name}_{run_id}",
+            job=pipeline_name,
             registry=registry,
         )
 

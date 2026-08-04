@@ -119,6 +119,8 @@ const [market, setMarket] = useState<any>({});
 const [fundamentals, setFundamentals] = useState<any>({});
 const [alerts, setAlerts] = useState<any[]>([]);
 const [managers, setManagers] = useState<any[]>([]);
+const [marketDataStatus, setMarketDataStatus] = useState<any>(null);
+const [hasLoaded, setHasLoaded] = useState(false);
 
 // FX-style change
 const [equityEnabled, setEquityEnabled] = useState<boolean | null>(null);
@@ -174,15 +176,19 @@ useEffect(() => {
         `/api/equity/intraday/ticker?ticker=${ticker}`,
         { cache: "no-store" }
       );
-      if (!res.ok) return;
+      // Backend now returns a structured body even on 404 (ticker has
+      // no current price) -- read it either way instead of bailing out.
       const json = await res.json();
       setTotals(json.totals || {});
       setMarket(json.market || {});
       setFundamentals(json.fundamentals || {});
       setAlerts(json.alerts || []);
       setManagers(json.manager_breakdown || []);
+      setMarketDataStatus(json.market_data_status || null);
+      setHasLoaded(true);
     } catch (e) {
       console.error(e);
+      setHasLoaded(true);
     }
   }
   load();
@@ -193,11 +199,13 @@ useWebSocket(
     ? `${wsBaseUrl}/equity/ticker/${ticker}/`
     : null,
   (data) => {
-    setTotals(data.totals);
-    setMarket(data.market);
-    setFundamentals(data.fundamentals);
+    setTotals(data.totals || {});
+    setMarket(data.market || {});
+    setFundamentals(data.fundamentals || {});
     setAlerts(data.alerts || []);
     setManagers(data.manager_breakdown || []);
+    setMarketDataStatus(data.market_data_status || null);
+    setHasLoaded(true);
   }
 );
 
@@ -231,8 +239,12 @@ if (equityEnabled === false) {
   );
 }
 
-if (!market?.close) {
+if (!hasLoaded) {
   return <LoadingState />;
+}
+
+if (marketDataStatus && marketDataStatus.intraday_price_available === false) {
+  return <MissingMarketData ticker={ticker} status={marketDataStatus} />;
 }
 
   return (
@@ -248,10 +260,17 @@ if (!market?.close) {
             >
               <ArrowLeft className="w-4 h-4 text-slate-400 group-hover:text-blue-500" />
             </Link>
-            <div className="px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded flex items-center gap-2">
-              <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse shadow-[0_0_8px_#10b981]" />
-              <span className="text-[9px] font-black text-emerald-500 uppercase tracking-widest">Live Feed</span>
-            </div>
+            {marketDataStatus?.is_stale ? (
+              <div className="px-2 py-1 bg-amber-500/10 border border-amber-500/20 rounded flex items-center gap-2">
+                <div className="w-1.5 h-1.5 bg-amber-500 rounded-full" />
+                <span className="text-[9px] font-black text-amber-500 uppercase tracking-widest">Stale</span>
+              </div>
+            ) : (
+              <div className="px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded flex items-center gap-2">
+                <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse shadow-[0_0_8px_#10b981]" />
+                <span className="text-[9px] font-black text-emerald-500 uppercase tracking-widest">Live Feed</span>
+              </div>
+            )}
           </div>
 
           <h1 className="text-3xl sm:text-4xl md:text-5xl font-black text-white tracking-tighter italic leading-none">
@@ -458,6 +477,48 @@ function LoadingState() {
       <div className="flex-1 bg-[#0a0f1d] border border-slate-800 rounded-3xl flex items-center justify-center">
         <div className="text-slate-800 text-[10px] uppercase tracking-[0.5em] font-black animate-pulse">
           Establishing WebSocket Connection...
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MissingMarketData({ ticker, status }: { ticker: string; status: any }) {
+  return (
+    <div className="min-h-screen bg-[#020617] text-slate-300 p-6 lg:p-12">
+      <div className="max-w-2xl mx-auto space-y-8">
+        <Link
+          href="/dashboard/equity/intraday"
+          className="inline-flex items-center text-[10px] font-bold text-slate-500 hover:text-blue-400 uppercase tracking-widest gap-2"
+        >
+          <ArrowLeft className="w-3 h-3" /> Back to Dashboard
+        </Link>
+
+        <div className="space-y-2">
+          <h1 className="text-3xl sm:text-4xl font-black text-white tracking-tighter italic">{ticker}</h1>
+          <p className="text-amber-500 text-sm font-bold uppercase tracking-wide">⚠ Market Data Status: Intraday Price Unavailable</p>
+        </div>
+
+        <div className="bg-slate-900/40 border border-amber-500/20 rounded-2xl p-8 space-y-6">
+          <div className="grid grid-cols-2 gap-6">
+            <div>
+              <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Intraday Price</p>
+              <p className="text-lg font-mono font-bold text-red-400">Unavailable</p>
+            </div>
+            <div>
+              <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Latest EOD Price</p>
+              <p className="text-lg font-mono font-bold text-white">
+                {status?.eod_available ? `$${status.eod_price}` : "—"}
+              </p>
+              {status?.eod_date && (
+                <p className="text-[10px] text-slate-500 mt-1">as of {status.eod_date}</p>
+              )}
+            </div>
+          </div>
+          <div className="pt-4 border-t border-slate-800">
+            <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Valuation Status</p>
+            <p className="text-sm font-bold text-amber-400">{status?.valuation_status || "Excluded from portfolio totals"}</p>
+          </div>
         </div>
       </div>
     </div>

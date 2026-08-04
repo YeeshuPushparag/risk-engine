@@ -47,7 +47,7 @@ const Card = ({ children, title, icon: Icon, className = "", headerExtra }: any)
   </div>
 );
 
-const StatCard = ({ label, value, isWarning, isPositive, version }: any) => (
+const StatCard = ({ label, value, subtext, isWarning, isPositive, version }: any) => (
   <div className="p-5 rounded-2xl border border-slate-800 bg-slate-900/60 relative overflow-hidden group">
     <div key={version} className="absolute inset-0 bg-blue-500/10 pointer-events-none animate-data-flash" />
     <p className="text-[9px] font-black text-slate-500 uppercase mb-2 tracking-widest relative z-10">{label}</p>
@@ -55,6 +55,11 @@ const StatCard = ({ label, value, isWarning, isPositive, version }: any) => (
       }`}>
       {value}
     </p>
+    {subtext && (
+      <p className="text-[8px] font-black text-slate-600 uppercase mt-1 tracking-wide relative z-10">
+        {subtext}
+      </p>
+    )}
   </div>
 );
 
@@ -221,13 +226,25 @@ export default function EquityPage() {
         </div>
 
         {/* STATS */}
-        <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
+        <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-4">
           <StatCard version={version} label="Total Exposure" value={formatCurrency(ps.total_exposure)} />
           <StatCard version={version} label="Daily P&L" value={formatCurrency(ps.daily_pnl)} isWarning={ps.daily_pnl < 0} isPositive={ps.daily_pnl > 0} />
           <StatCard version={version} label="VaR 99%" value={formatCurrency(ps.var_99)} />
           <StatCard version={version} label="Ex-Ante Vol" value={formatPct(ps.ex_ante_volatility)} />
           <StatCard version={version} label="HHI Sector" value={ps.hhi_sector?.toFixed(4)} />
           <StatCard version={version} label="Alerts" value={ps.alerts_count} isWarning={ps.alerts_count > 0} />
+          <StatCard
+            version={version}
+            label="Ticker Coverage"
+            value={`${ps.ticker_count} / ${ps.total_ticker_count}`}
+            subtext="Active Today / Universe"
+          />
+          <StatCard
+            version={version}
+            label="Managers"
+            value={ps.manager_count}
+            subtext="Total Registered"
+          />
         </div>
 
         {/* LEDGER & BREACHES */}
@@ -266,6 +283,9 @@ export default function EquityPage() {
                         <Link href={`/dashboard/equity/daily/manager/${slugify(m.asset_manager)}`} className="hover:text-blue-400 cursor-pointer">
                           {m.asset_manager}
                         </Link>
+                        <p className="text-[9px] font-black text-slate-600 uppercase tracking-tight mt-0.5">
+                          {m.ticker_count} / {m.total_ticker_count} tickers
+                        </p>
                       </div>
                       <div className="text-right font-mono text-slate-300">{formatCurrency(m.exposure)}</div>
                       <div className={`text-right font-black ${m.daily_pnl < 0 ? 'text-red-400' : 'text-emerald-400'}`}>

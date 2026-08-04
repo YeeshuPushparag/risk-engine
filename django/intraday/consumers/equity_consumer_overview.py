@@ -1,19 +1,45 @@
+"""
+equity_consumer_overview.py
+============================
+WebSocket consumer for the equity main dashboard (Portfolio Overview +
+Market Data Health + Data Quality Issues). Mirrors equity_overview()
+in views.py exactly -- both call the same build_equity_overview_payload()
+so REST and WS can never silently drift apart.
+
+Needs BOTH Redis stores (confirmed with user): the all-tickers store
+("equity_stream" pubsub / "equity_latest_snapshot" key) for valuation +
+freshness, and the synced store ("equity_stream_synced" pubsub /
+"equity_latest_snapshot_synced" key), included in the payload for
+whatever the frontend needs it for.
+
+Import note: this file lives in intraday/consumers/, one level below
+views.py (intraday/views.py) -- so the import must go up two package
+levels (..views), not one (.views, which would incorrectly look for
+intraday/consumers/views.py).
+"""
+
 import json
 import asyncio
 from redis.asyncio import Redis
 from channels.generic.websocket import AsyncWebsocketConsumer
-from collections import defaultdict
 import os
 
-def safe_num(v):
+from ..views import (
+    build_equity_overview_payload,
+    load_equity_universe_tickers,
+    EQUITY_ALL_KEY,
+    EQUITY_SYNCED_KEY,
+)
+
+
+def _parse_rows(raw):
+    if not raw:
+        return []
     try:
-        if v is None:
-            return 0
-        if isinstance(v, float) and v != v:  # NaN
-            return 0
-        return v
+        rows = json.loads(raw)
+        return rows if isinstance(rows, list) else []
     except Exception:
-        return 0
+        return []
 
 
 class EquityOverviewConsumer(AsyncWebsocketConsumer):
@@ -29,7 +55,10 @@ class EquityOverviewConsumer(AsyncWebsocketConsumer):
             decode_responses=True
         )
         self.pubsub = self.redis.pubsub()
-        await self.pubsub.subscribe("equity_stream")
+        # Subscribe to BOTH channels -- either one firing means the
+        # combined payload (re-fetched fresh from both keys below) may
+        # have changed.
+        await self.pubsub.subscribe("equity_stream", "equity_stream_synced")
 
         self.stream_task = asyncio.create_task(self.stream())
 
@@ -39,159 +68,26 @@ class EquityOverviewConsumer(AsyncWebsocketConsumer):
             if message["type"] != "message":
                 continue
 
-            try:
-                rows = json.loads(message["data"])
-            except Exception:
+            # Always re-fetch BOTH keys fresh, regardless of which
+            # channel triggered this wakeup -- the other store may not
+            # have changed on this exact tick, but the combined payload
+            # must always reflect current state of both.
+            all_raw    = await self.redis.get(EQUITY_ALL_KEY)
+            synced_raw = await self.redis.get(EQUITY_SYNCED_KEY)
+
+            all_rows    = _parse_rows(all_raw)
+            synced_rows = _parse_rows(synced_raw)
+
+            if not all_rows:
                 continue
 
-            if not rows:
-                continue
+            # Blocking call (cached S3 read, ~5 min TTL) -- same
+            # accepted pattern as the yfinance call elsewhere in this
+            # codebase; only actually hits S3 on a cache miss.
+            universe_tickers = load_equity_universe_tickers()
 
-            timestamp = rows[0].get("timestamp")
-
-            # ==========================================================
-            # PORTFOLIO TOTALS (MANAGER LEVEL)
-            # ==========================================================
-            total_exposure = sum(
-                safe_num(r.get("intraday_exposure")) for r in rows
-            )
-
-            # portfolio_intraday_pnl is already summed PER MANAGER,
-            # so summing it across rows would double count.
-            # Correct approach: sum UNIQUE managers.
-            seen_managers = {}
-            for r in rows:
-                m = r.get("asset_manager")
-                if m and m not in seen_managers:
-                    seen_managers[m] = safe_num(r.get("portfolio_intraday_pnl"))
-
-            intraday_pnl = sum(seen_managers.values())
-
-            tickers_streaming = len({
-                r.get("ticker") for r in rows if r.get("ticker")
-            })
-
-            active_managers = len(seen_managers)
-
-            # ==========================================================
-            # TOP MOVERS (POSITION LEVEL: TICKER × MANAGER)
-            # ==========================================================
-            # Movers = what actually moved today → intraday_pnl
-            top_movers = sorted(
-                rows,
-                key=lambda r: abs(safe_num(r.get("intraday_pnl"))),
-                reverse=True,
-            )[:10]
-
-            # ==========================================================
-            # AGG: TICKERS (ACROSS MANAGERS)
-            # ==========================================================
-            ticker_agg = defaultdict(lambda: {
-                "ticker": None,
-                "total_exposure": 0,
-                "total_pnl": 0,
-            })
-
-            for r in rows:
-                t = r.get("ticker")
-                if not t:
-                    continue
-
-                agg = ticker_agg[t]
-                agg["ticker"] = t
-                agg["total_exposure"] += safe_num(r.get("intraday_exposure"))
-                agg["total_pnl"] += safe_num(r.get("intraday_pnl"))
-
-            top_tickers_agg = sorted(
-                ticker_agg.values(),
-                key=lambda x: abs(safe_num(x.get("total_exposure"))),
-                reverse=True,
-            )[:5]
-
-            # ==========================================================
-            # AGG: MANAGERS
-            # ==========================================================
-            manager_agg = defaultdict(lambda: {
-                "manager": None,
-                "total_exposure": 0,
-                "total_pnl": 0,
-            })
-
-            for r in rows:
-                m = r.get("asset_manager")
-                if not m:
-                    continue
-
-                agg = manager_agg[m]
-                agg["manager"] = m
-                agg["total_exposure"] += safe_num(r.get("intraday_exposure"))
-                agg["total_pnl"] += safe_num(r.get("intraday_pnl"))
-
-            top_managers_agg = sorted(
-                manager_agg.values(),
-                key=lambda x: abs(safe_num(x.get("total_exposure"))),
-                reverse=True,
-            )[:5]
-
-            # ==========================================================
-            # ALERTS (POSITION LEVEL, EXPOSURE AWARE)
-            # ==========================================================
-            alerts = []
-
-            for r in rows:
-                vol = safe_num(r.get("vol_15m"))
-                ret1 = safe_num(r.get("return_1m"))
-                exposure = abs(safe_num(r.get("intraday_exposure")))
-
-                if vol > 0.02 and exposure > 0:
-                    alerts.append({
-                        "type": "Volatility Spike",
-                        "ticker": r.get("ticker"),
-                        "manager": r.get("asset_manager"),
-                        "severity": "medium" if exposure < 1_000_000 else "high",
-                        "time": r.get("timestamp"),
-                        "trigger": "vol_15m > 0.02",
-                        "_sort": exposure,
-                    })
-
-                if abs(ret1) > 0.008 and exposure > 0:
-                    alerts.append({
-                        "type": "Return Shock",
-                        "ticker": r.get("ticker"),
-                        "manager": r.get("asset_manager"),
-                        "severity": "high" if abs(ret1) > 0.015 else "medium",
-                        "time": r.get("timestamp"),
-                        "trigger": "abs(return_1m) > 0.8%",
-                        "_sort": exposure,
-                    })
-
-            alerts = sorted(
-                alerts,
-                key=lambda x: safe_num(x.get("_sort")),
-                reverse=True
-            )[:10]
-
-            for a in alerts:
-                a.pop("_sort", None)
-
-            # ==========================================================
-            # PAYLOAD
-            # ==========================================================
-            payload = {
-                "timestamp": timestamp,
-                "totals": {
-                    "total_exposure": total_exposure,
-                    "intraday_pnl": intraday_pnl,
-                    "tickers_streaming": tickers_streaming,
-                    "active_managers": active_managers,
-                },
-                "top_movers": top_movers,             
-                "top_tickers_agg": top_tickers_agg,
-                "top_managers_agg": top_managers_agg,
-                "active_alerts": alerts,
-            }
-
-            await self.send(json.dumps(payload))
+            payload = build_equity_overview_payload(all_rows, synced_rows, universe_tickers)
+            await self.send(json.dumps(payload, default=str))
 
     async def disconnect(self, code):
         print("Equity Overview WS disconnected")

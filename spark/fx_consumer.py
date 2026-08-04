@@ -454,14 +454,11 @@ PROM_REPLAY_DURATION_SECONDS = Histogram(
     registry=_prom_registry,
 )
 
-# Shared run_id for Pushgateway job label (set in __main__)
-_consumer_run_id: str = "unknown"
-
 
 def _push_metrics() -> None:
     """
     Push accumulated Prometheus metrics to Pushgateway.
-    Mirrors the Airflow pattern: push_to_gateway(url, job=<pipeline>_<run_id>, registry).
+    Mirrors the Airflow pattern: push_to_gateway(url, job=<pipeline_name>, registry).
     Non-fatal — a Pushgateway failure must never stop the consumer.
 
     Called:
@@ -470,7 +467,7 @@ def _push_metrics() -> None:
         REPLAY   : once after the replay job completes.
     """
     try:
-        job_name = f"{CONFIG['consumer_pipeline_name']}_{CONFIG['run_mode']}_{_consumer_run_id}"
+        job_name = CONFIG['consumer_pipeline_name']
         
         # ── LOG success (no Slack) ──────────────────────────────────────
         log("INFO", "Pushing metrics to Pushgateway",
@@ -1763,6 +1760,26 @@ def add_lineage(
     return row_dict
 
 
+# Fields that belong in S3 (audit/provenance) and must NEVER be
+# published to Redis. Kept as one explicit list so both Redis paths
+# (Redis #1 synced, Redis #2 all-pairs) strip identically.
+LINEAGE_FIELDS = [
+    "consumer_pipeline_name", "pipeline_run_id", "processing_timestamp",
+    "data_source", "transformation", "record_created_at", "run_mode",
+    "producer_pipeline_name", "producer_run_id", "source_fetch_time",
+    "batch_id",
+]
+
+
+def strip_lineage_for_redis(row: dict) -> dict:
+    """
+    Return a copy of `row` with every LINEAGE_FIELDS key removed.
+    Lineage is for S3/audit only — it must never reach Redis, for
+    either the synced store or the all-pairs store.
+    """
+    return {k: v for k, v in row.items() if k not in LINEAGE_FIELDS}
+
+
 def add_prev_ohlcv_to_bar(row_dict: dict, buffer: list) -> dict:
     """
     Add previous OHLCV values to an FX bar dict from the pair buffer.
@@ -2518,6 +2535,9 @@ def process_batch(
     # minute as the batch's max minute, so every pair in this snapshot
     # is genuinely as-of one identical instant (e.g. 44 tickers at
     # 2:36pm and 6 stragglers still at 2:35pm -> only the 44 go here).
+    # Lineage is stripped here — for Redis only; strip_lineage_for_redis
+    # returns a NEW dict rather than mutating, so output_rows/df_out
+    # (written to S3 below, with full lineage) are unaffected.
     synced_rows: list = []
     if output_rows:
         ts_index = pd.to_datetime(
@@ -2526,7 +2546,8 @@ def process_batch(
         floored_minutes = ts_index.floor("min")
         max_minute      = floored_minutes.max()
         synced_rows = [
-            row for row, minute in zip(output_rows, floored_minutes)
+            strip_lineage_for_redis(row)
+            for row, minute in zip(output_rows, floored_minutes)
             if minute == max_minute
         ]
 
@@ -2537,15 +2558,19 @@ def process_batch(
         df_out = df_out.where(pd.notnull(df_out), None)
         save_to_parquet(df_out, str(batch_id))
 
-    # ── Step 6: Redis — LIVE ONLY, two independent stores ──────────────
+    # ── Step 6: Redis — LIVE ONLY, two independent stores, NEITHER
+    # carries lineage (batch_id/pipeline_run_id/etc.) — S3-only ────────
     # Redis #1 "fx_latest_snapshot"/"fx_stream": only the synchronized
     #   subset above — for anything needing cross-pair consistency.
     # Redis #2 "fx_latest_snapshot_all"/"fx_stream_all": EVERY pair ever
     #   seen, rebuilt straight from pair_buffers (which the loop above
-    #   already kept current, including late-but-real bars) — published
-    #   every live batch regardless of whether output_rows is empty this
-    #   cycle, so a pair is never dropped from view just because it
-    #   didn't have fresh data this batch.
+    #   already kept current, including late-but-real bars — pair_buffers
+    #   entries never receive lineage in the first place, since
+    #   add_lineage is only ever applied to compute_exposure_rows()'
+    #   freshly-built per-ticker output dicts, not to clean_bar itself)
+    #   — published every live batch regardless of whether output_rows
+    #   is empty this cycle, so a pair is never dropped from view just
+    #   because it didn't have fresh data this batch.
     if IS_LIVE:
         if synced_rows:
             pairs = sorted(set(r["currency_pair"] for r in synced_rows))
@@ -2795,7 +2820,6 @@ EVENT_SCHEMA = StructType([
 
 if __name__ == "__main__":
     run_id = str(uuid.uuid4())
-    _consumer_run_id = run_id   # used by _push_metrics for Pushgateway job label
 
     # Start /metrics HTTP server in live mode only.
     # Backfill and replay push metrics directly; no scrape server needed.

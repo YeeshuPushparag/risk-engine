@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback} from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useWebSocket } from "@/hooks/useWebSocket";
-import { Clock, Activity, Globe, ArrowLeft, TrendingUp, MoveHorizontal } from "lucide-react";
+import { Clock, Activity, Globe, ArrowLeft, TrendingUp, MoveHorizontal, AlertTriangle } from "lucide-react";
 
 /* ---------------- UPDATED FORMATTERS ---------------- */
 const fmtCur = (v?: number) => {
@@ -20,6 +20,73 @@ const fmtCur = (v?: number) => {
 
 const fmtNum = (n?: number | null) => (n == null ? "—" : new Intl.NumberFormat("en-US").format(n));
 const fmtFX = (n?: number | null) => (n == null ? "—" : n.toFixed(4));
+
+/* ---------------- MARKET DATA HEALTH (separate from valuation, per design doc) ---------------- */
+function MarketDataHealthSection({ health }: { health: any }) {
+  if (!health) return null;
+  const fresh = health.fresh_updates?.fresh ?? 0;
+  const total = health.fresh_updates?.total ?? 0;
+  const delayed = health.delayed_tickers_count ?? 0;
+
+  return (
+    <section>
+      <div className="flex items-center gap-3 border-l-4 border-slate-600 pl-4 mb-3">
+        <Clock className="w-4 h-4 text-slate-400" />
+        <h2 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em]">Market Data Health</h2>
+      </div>
+      <div className="grid grid-cols-3 gap-4 bg-slate-900/40 border border-slate-800 rounded-2xl p-5">
+        <div>
+          <p className="text-[8px] font-black text-slate-600 uppercase tracking-widest mb-1">Fresh Updates</p>
+          <p className="text-md font-mono font-bold text-white">{fresh} / {total}</p>
+        </div>
+        <div>
+          <p className="text-[8px] font-black text-slate-600 uppercase tracking-widest mb-1">Last Update</p>
+          <p className="text-md font-mono font-bold text-slate-300">
+            {health.last_market_update ? new Date(health.last_market_update).toLocaleTimeString() : "—"}
+          </p>
+        </div>
+        <div>
+          <p className="text-[8px] font-black text-slate-600 uppercase tracking-widest mb-1">Status</p>
+          <p className={`text-sm font-black uppercase ${delayed > 0 ? "text-amber-400" : "text-emerald-400"}`}>
+            {delayed > 0 ? `⚠ ${delayed} delayed` : "All current"}
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/* ---------------- DATA QUALITY ISSUES (only rendered when non-empty) ---------------- */
+function DataQualityIssuesSection({ issues }: { issues: any[] }) {
+  if (!issues || issues.length === 0) return null;
+
+  return (
+    <section>
+      <div className="flex items-center gap-3 border-l-4 border-amber-600 pl-4 mb-3">
+        <AlertTriangle className="w-4 h-4 text-amber-500" />
+        <h2 className="text-[10px] font-black text-amber-500 uppercase tracking-[0.3em]">
+          Market Data Issues — {issues.length} ticker{issues.length > 1 ? "s" : ""} unpriced
+        </h2>
+      </div>
+      <div className="bg-amber-500/5 border border-amber-500/20 rounded-2xl divide-y divide-amber-500/10 overflow-hidden">
+        {issues.map((issue: any) => (
+          <div key={issue.ticker} className="p-4 flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-black text-white">{issue.ticker}</p>
+              <p className="text-[10px] font-bold text-slate-500 uppercase mt-0.5">{issue.reason}</p>
+            </div>
+            <Link
+              href={`/dashboard/fx/daily/ticker/${issue.ticker}`}
+              className="text-[10px] font-black text-blue-500 hover:text-white uppercase tracking-widest whitespace-nowrap"
+            >
+              View Ticker →
+            </Link>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
 
 /* ---------------- ANIMATED METRIC COMPONENT ---------------- */
 function MetricCard({ label, value, trigger }: { label: string; value: React.ReactNode; trigger?: number | null }) {
@@ -139,12 +206,19 @@ export default function CurrencyPage() {
       </header>
 
       {/* TOP METRICS - 2 COL ON MOBILE */}
-      <section className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-5">
-        <MetricCard label="Tickers" value={fmtNum(data.totals.ticker_count)} />
-        <MetricCard label="Exposure" value={fmtCur(data.totals.total_exposure)} />
-        <MetricCard label="Total P&L" value={fmtCur(data.totals.total_fx_pnl)} trigger={data.totals.total_fx_pnl} />
-        <MetricCard label="Worst VaR" value={fmtCur(data.totals.worst_var_95)} />
+      <section className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-5">
+        <MetricCard label="Tickers" value={fmtNum(data.portfolio_overview.ticker_count)} />
+        <MetricCard label="Exposure" value={fmtCur(data.portfolio_overview.total_exposure)} />
+        <MetricCard label="Total P&L" value={fmtCur(data.portfolio_overview.total_fx_pnl)} trigger={data.portfolio_overview.total_fx_pnl} />
+        <MetricCard label="Worst VaR" value={fmtCur(data.portfolio_overview.worst_var_95)} />
+        <MetricCard label="Coverage" value={`${data.portfolio_overview.valuation_coverage?.valued ?? 0}/${data.portfolio_overview.valuation_coverage?.total ?? 0}`} />
       </section>
+
+      {/* MARKET DATA HEALTH -- separate from valuation, per design */}
+      <MarketDataHealthSection health={data.market_data_health} />
+
+      {/* DATA QUALITY ISSUES -- only appears when a ticker is actually missing */}
+      <DataQualityIssuesSection issues={data.data_quality_issues} />
 
       {/* MARKET SNAPSHOTS - RESPONSIVE GRID */}
       {data.market && (

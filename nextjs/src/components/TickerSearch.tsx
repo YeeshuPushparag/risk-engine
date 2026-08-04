@@ -11,24 +11,25 @@ export default function TickerSearch({ ticker_url }: { ticker_url: string }) {
   const router = useRouter();
   const dropdownRef = useRef<HTMLDivElement>(null);
 
- useEffect(() => {
-  async function loadTickers() {
-    try {
-      const type = ticker_url?.includes("intraday") ? "intraday" : "daily";
+  useEffect(() => {
+    async function loadTickers() {
+      try {
+        const endpoint = ticker_url?.includes("intraday")
+          ? "/api/equity/intraday/tickers-list"
+          : "/api/equity/daily/main/tickers-list";
 
-      const res = await fetch(
-        `/api/equity/daily/main/tickers-list?type=${type}`
-      );
+        const res = await fetch(endpoint);
 
-      const data: string[] = await res.json();
-      setTickers(data);
-    } catch (err) {
-      console.error("Failed to load tickers:", err);
+        const data: string[] = await res.json();
+        setTickers(data);
+      } catch (err) {
+        console.error("Failed to load tickers:", err);
+      }
     }
-  }
 
-  loadTickers();
-}, [ticker_url]);
+    loadTickers();
+  }, [ticker_url]);
+
 
   // Close dropdown when clicking outside
   useEffect(() => {

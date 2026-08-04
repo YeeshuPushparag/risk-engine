@@ -1,0 +1,216 @@
+{
+  "title": "Daily Pipelines Overview (6 Assets)",
+  "uid": "daily-pipelines-overview",
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5m",
+  "time": {
+    "from": "now-90d",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Daily Batch Pipelines \u2014 6 Assets (latest run)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Last Run Status \u2014 All 10 Daily Pipelines",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "pipeline_status{pipeline=~\"market_features_s3|equity_risk_prediction_pipeline|fx_exposure_pipeline|fx_update_pipeline|commodity_update_pipeline|commodity_processing_pipeline|bonds_update_pipeline|bonds_processing_pipeline|derivatives_pipeline|collateral_pipeline\"}",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "renameByName": {
+              "pipeline": "Pipeline",
+              "run_type": "Mode",
+              "run_id": "Run ID",
+              "dag_run_id": "DAG Run ID",
+              "Value": "Status (1=OK / 0=FAILED)"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "custom": {
+            "cellOptions": {
+              "type": "color-background"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Status (1=OK / 0=FAILED)"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Pipelines Failing (Today)",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 11
+      },
+      "targets": [
+        {
+          "expr": "count(pipeline_status{pipeline=~\"market_features_s3|equity_risk_prediction_pipeline|fx_exposure_pipeline|fx_update_pipeline|commodity_update_pipeline|commodity_processing_pipeline|bonds_update_pipeline|bonds_processing_pipeline|derivatives_pipeline|collateral_pipeline\"} == 0)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Pipelines Healthy (Today)",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 11
+      },
+      "targets": [
+        {
+          "expr": "count(pipeline_status{pipeline=~\"market_features_s3|equity_risk_prediction_pipeline|fx_exposure_pipeline|fx_update_pipeline|commodity_update_pipeline|commodity_processing_pipeline|bonds_update_pipeline|bonds_processing_pipeline|derivatives_pipeline|collateral_pipeline\"} == 1)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "bargauge",
+      "title": "Last Run Duration (seconds)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 11
+      },
+      "targets": [
+        {
+          "expr": "pipeline_runtime_seconds{pipeline=~\"market_features_s3|equity_risk_prediction_pipeline|fx_exposure_pipeline|fx_update_pipeline|commodity_update_pipeline|commodity_processing_pipeline|bonds_update_pipeline|bonds_processing_pipeline|derivatives_pipeline|collateral_pipeline\"}",
+          "legendFormat": "{{pipeline}}"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient"
+      }
+    },
+    {
+      "id": 6,
+      "type": "row",
+      "title": "Status History (last 90 days)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      }
+    },
+    {
+      "id": 7,
+      "type": "state-timeline",
+      "title": "Pass/Fail per Pipeline per Day",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "targets": [
+        {
+          "expr": "pipeline_status{pipeline=~\"market_features_s3|equity_risk_prediction_pipeline|fx_exposure_pipeline|fx_update_pipeline|commodity_update_pipeline|commodity_processing_pipeline|bonds_update_pipeline|bonds_processing_pipeline|derivatives_pipeline|collateral_pipeline\"}",
+          "legendFormat": "{{pipeline}}"
+        }
+      ]
+    }
+  ]
+}

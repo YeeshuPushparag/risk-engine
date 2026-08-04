@@ -233,14 +233,14 @@ PROM_INVALID_TICKERS = Gauge(
 )
 
 
-def _push_metrics(producer_run_id: str) -> None:
+def _push_metrics() -> None:
     """
     Push accumulated Prometheus metrics to Pushgateway.
-    Mirrors the Airflow pattern: push_to_gateway(url, job=<pipeline>_<run_id>, registry=registry).
+    Mirrors the Airflow pattern: push_to_gateway(url, job=<pipeline_name>, registry=registry).
     Non-fatal — a Pushgateway failure must never stop the producer.
     """
     try:
-        job_name = f"{CONFIG['pipeline_name']}_{CONFIG['run_mode']}_{producer_run_id}"
+        job_name = CONFIG['pipeline_name']
         
         # ── LOG success (no Slack) ──────────────────────────────────────
         log("INFO", "Pushing metrics to Pushgateway",
@@ -1623,7 +1623,7 @@ def run_backfill(producer_run_id: str, tickers: list[str], producer: KafkaProduc
         PROM_DURATION_SECONDS.observe(cycle_duration)
 
         # Push ONE final summary to Pushgateway
-        _push_metrics(producer_run_id)
+        _push_metrics()
 
     log(
         "INFO",
@@ -1721,7 +1721,7 @@ def main():
             )
         else:
             try:
-                _push_metrics(producer_run_id)
+                _push_metrics()
             except Exception:
                 pass          
             time.sleep(120)  # 2 minutes

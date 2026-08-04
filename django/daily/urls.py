@@ -3,13 +3,12 @@ from .views import *
 
 urlpatterns = [
     path("latest-date/", equity_latest_date),
-    path("status/", equity_status),
     path("equity/overview/", equity_overview),
     path("equity/managers/", equity_managers),
     path("equity/risk-drivers/", equity_daily_risk_drivers),
     path("equity/alerts/", equity_alerts),
-    path("equity/managers-list/", latest_asset_managers),
-    path("equity/tickers-list/", latest_tickers),
+    path("equity/managers-list/", asset_managers_list),
+    path("equity/tickers-list/", tickers_list),
     path("equity/manager/overview/", equity_manager_overview),
     path("equity/manager/holdings/", equity_manager_holdings),
     path("equity/manager/risk/", equity_manager_risk_contributors),

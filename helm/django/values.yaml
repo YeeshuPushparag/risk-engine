@@ -8,6 +8,11 @@ image:
 service:
   port: 8000
 
+serviceAccount:
+  create: true
+  name: django-sa
+  roleArn: arn:aws:iam::363267429137:role/risk-eks-django-s3-irsa-role
+
 nodeSelector:
   role: web
 

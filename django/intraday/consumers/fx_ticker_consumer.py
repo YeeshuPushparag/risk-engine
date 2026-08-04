@@ -1,8 +1,35 @@
+"""
+fx_ticker_consumer.py
+========================
+WebSocket consumer for the individual FX ticker page. Mirrors
+fx_ticker_initial() in views.py -- both call build_fx_ticker_payload().
+
+ALL-pairs store only ("fx_stream_all"), per page scope confirmed with
+the user.
+
+Ticker-scoped (like the equity ticker consumers): always sends, including
+the "_not_found" case, so the client sees the ticker transition to a
+"missing market data" state live.
+"""
+
 import json
 import asyncio
 from redis.asyncio import Redis
 from channels.generic.websocket import AsyncWebsocketConsumer
 import os
+
+from ..views import build_fx_ticker_payload, FX_ALL_KEY
+
+
+def _parse_rows(raw):
+    if not raw:
+        return []
+    try:
+        rows = json.loads(raw)
+        return rows if isinstance(rows, list) else []
+    except Exception:
+        return []
+
 
 class TickerConsumer(AsyncWebsocketConsumer):
 
@@ -19,69 +46,25 @@ class TickerConsumer(AsyncWebsocketConsumer):
             decode_responses=True
         )
         self.pubsub = self.redis.pubsub()
-        await self.pubsub.subscribe("fx_stream")
+        await self.pubsub.subscribe("fx_stream_all")
 
         self.stream_task = asyncio.create_task(self.stream())
-
-    # ---------------- SAFE NUMBER ----------------
-    def _num(self, x):
-        if x is None:
-            return 0.0
-        try:
-            return float(x)
-        except Exception:
-            return 0.0
 
     async def stream(self):
         async for message in self.pubsub.listen():
             if message.get("type") != "message":
                 continue
 
-            try:
-                rows = json.loads(message.get("data") or "[]")
-            except Exception:
+            all_raw  = await self.redis.get(FX_ALL_KEY)
+            all_rows = _parse_rows(all_raw)
+
+            if not all_rows:
                 continue
 
-            # Find THIS ticker
-            row = next(
-                (r for r in rows if r.get("ticker") == self.ticker),
-                None
-            )
+            payload = build_fx_ticker_payload(all_rows, self.ticker)
+            payload.pop("_not_found", None)
 
-            if not row:
-                continue
-
-            position_size = self._num(row.get("position_size"))
-            fx_pnl = self._num(row.get("fx_pnl"))
-            var_95 = self._num(row.get("VaR_95_15m"))
-
-            payload = {
-                "ticker": self.ticker,
-                "currency_pair": row.get("currency_pair"),
-                "timestamp": row.get("timestamp"),
-
-                "open": row.get("open"),
-                "high": row.get("high"),
-                "low": row.get("low"),
-                "close": row.get("close"),
-                "prev_close": row.get("prev_close"),
-
-                "fx_return_1m": row.get("fx_return_1m"),
-                "fx_return_5m": row.get("fx_return_5m"),
-                "fx_vol_15m": row.get("fx_vol_15m"),
-
-                "position_size": position_size,
-                "fx_pnl": fx_pnl,
-                "VaR_95_15m": var_95,
-
-                "totals": {
-                    "total_exposure": position_size,
-                    "total_fx_pnl": fx_pnl,
-                    "worst_var_95": var_95,
-                },
-            }
-
-            await self.send(json.dumps(payload))
+            await self.send(json.dumps(payload, default=str))
 
     async def disconnect(self, code):
         print("Ticker WS disconnected:", self.ticker)

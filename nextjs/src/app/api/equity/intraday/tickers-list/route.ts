@@ -8,7 +8,7 @@ export async function GET() {
   }
 
   const res = await fetch(
-    `${baseUrl}/api/daily/equity/tickers-list/`,
+    `${baseUrl}/api/intraday/equity/tickers-list/`,
     { cache: "no-store" }
   );
 

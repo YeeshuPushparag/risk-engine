@@ -1,30 +1,46 @@
+"""
+equity_manager_consumer.py
+============================
+WebSocket consumer for the equity manager page. Mirrors equity_manager()
+in views.py -- both call build_equity_manager_payload().
+
+Needs BOTH Redis stores (confirmed with user), filtered to this manager.
+
+Unlike the ticker-scoped consumers, if this manager doesn't appear in a
+given message's rows, the message is simply skipped (not sent) -- a
+manager not being found is a URL/identity mismatch, not a transient
+market-data-availability condition, so there's nothing meaningful to
+push to the client for that tick.
+"""
+
 import json
 import asyncio
 from redis.asyncio import Redis
 from channels.generic.websocket import AsyncWebsocketConsumer
 import os
 
-def safe_num(v):
+from ..views import (
+    build_equity_manager_payload,
+    EQUITY_ALL_KEY,
+    EQUITY_SYNCED_KEY,
+)
+
+
+def _parse_rows(raw):
+    if not raw:
+        return []
     try:
-        if v is None:
-            return 0
-        if isinstance(v, float) and v != v:  # NaN
-            return 0
-        return v
+        rows = json.loads(raw)
+        return rows if isinstance(rows, list) else []
     except Exception:
-        return 0
+        return []
 
 
 class EquityManagerConsumer(AsyncWebsocketConsumer):
 
     async def connect(self):
         raw_manager = self.scope["url_route"]["kwargs"]["manager"]
-
-        # Display version (title case)
         self.manager = raw_manager.replace("-", " ").title()
-
-        # Normalized version for filtering
-        self.normalized_manager = raw_manager.replace("-", " ").lower()
 
         await self.accept()
         print(f"Manager WS connected: {self.manager}")
@@ -36,136 +52,30 @@ class EquityManagerConsumer(AsyncWebsocketConsumer):
             decode_responses=True
         )
         self.pubsub = self.redis.pubsub()
-        await self.pubsub.subscribe("equity_stream")
+        await self.pubsub.subscribe("equity_stream", "equity_stream_synced")
 
         self.stream_task = asyncio.create_task(self.stream())
 
     async def stream(self):
         async for message in self.pubsub.listen():
+
             if message["type"] != "message":
                 continue
 
-            try:
-                rows = json.loads(message["data"])
-            except Exception:
+            all_raw    = await self.redis.get(EQUITY_ALL_KEY)
+            synced_raw = await self.redis.get(EQUITY_SYNCED_KEY)
+
+            all_rows    = _parse_rows(all_raw)
+            synced_rows = _parse_rows(synced_raw)
+
+            if not all_rows:
                 continue
 
-            if not rows:
+            payload = build_equity_manager_payload(all_rows, synced_rows, self.manager)
+            if payload is None:
                 continue
 
-            # ---------------------------------------------
-            # Filter rows for this manager
-            # ---------------------------------------------
-            filtered = [
-                r for r in rows
-                if r.get("asset_manager", "").replace("-", " ").lower()
-                == self.normalized_manager
-            ]
-
-            if not filtered:
-                continue
-
-            # ---------------------------------------------
-            # Aggregates
-            # ---------------------------------------------
-            exposure = sum(safe_num(r.get("intraday_exposure")) for r in filtered)
-            pnl = sum(safe_num(r.get("portfolio_intraday_pnl")) for r in filtered)
-
-            count = len(filtered)
-
-            avg_return_1m = (
-                sum(safe_num(r.get("return_1m")) for r in filtered) / count
-                if count else 0
-            )
-            avg_return_5m = (
-                sum(safe_num(r.get("return_5m")) for r in filtered) / count
-                if count else 0
-            )
-            avg_vol_15m = (
-                sum(safe_num(r.get("vol_15m")) for r in filtered) / count
-                if count else 0
-            )
-
-            portfolio_total_exposure = sum(
-                safe_num(r.get("intraday_exposure")) for r in rows
-            )
-            weight = (
-                exposure / portfolio_total_exposure
-                if portfolio_total_exposure else 0
-            )
-
-            holdings_count = count
-            timestamp = rows[0].get("timestamp")
-
-            # ---------------------------------------------
-            # Holdings (top 50 by exposure)
-            # ---------------------------------------------
-            holdings = sorted(
-                filtered,
-                key=lambda r: safe_num(r.get("intraday_exposure")),
-                reverse=True
-            )[:50]
-
-            # ---------------------------------------------
-            # Alerts (ranked by exposure)
-            # ---------------------------------------------
-            alerts = []
-
-            for r in filtered:
-                vol = r.get("vol_15m")
-                ret1 = r.get("return_1m")
-                row_exposure = safe_num(r.get("intraday_exposure"))
-
-                if vol is not None and vol == vol and vol > 0.02:
-                    alerts.append({
-                        "type": "Volatility Spike",
-                        "ticker": r.get("ticker"),
-                        "severity": "medium",
-                        "time": r.get("timestamp"),
-                        "trigger": "vol_15m > 0.02",
-                        "_exposure": row_exposure,
-                    })
-
-                if ret1 is not None and ret1 == ret1 and abs(ret1) > 0.008:
-                    alerts.append({
-                        "type": "Return Shock",
-                        "ticker": r.get("ticker"),
-                        "severity": "high" if abs(ret1) > 0.015 else "medium",
-                        "time": r.get("timestamp"),
-                        "trigger": "abs(return_1m) > 0.8%",
-                        "_exposure": row_exposure,
-                    })
-
-            alerts = sorted(
-                alerts,
-                key=lambda a: safe_num(a.get("_exposure")),
-                reverse=True
-            )[:10]
-
-            for a in alerts:
-                a.pop("_exposure", None)
-
-            # ---------------------------------------------
-            # Payload (UNCHANGED)
-            # ---------------------------------------------
-            payload = {
-                "manager": self.manager,
-                "timestamp": timestamp,
-                "totals": {
-                    "intraday_exposure": exposure,
-                    "intraday_pnl": pnl,
-                    "return_1m": avg_return_1m,
-                    "return_5m": avg_return_5m,
-                    "vol_15m": avg_vol_15m,
-                    "alerts": len(alerts),
-                    "weight": weight,
-                    "holdings_count": holdings_count,
-                },
-                "holdings": holdings,
-                "alerts": alerts,
-            }
-
-            await self.send(json.dumps(payload))
+            await self.send(json.dumps(payload, default=str))
 
     async def disconnect(self, code):
         print(f"Manager WS disconnected: {self.manager}")

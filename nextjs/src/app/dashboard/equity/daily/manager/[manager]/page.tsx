@@ -6,7 +6,7 @@ import Link from "next/link";
 import {
   ArrowLeft, ShieldAlert, TrendingUp, PieChart,
   AlertTriangle, FileText, Activity, Globe, RefreshCcw, 
-  ChevronRight, MoveRight
+  ChevronRight, MoveRight, Database
 } from "lucide-react";
 import StressTestingControls from "@/components/StressTesting";
 
@@ -27,7 +27,7 @@ const fmtPct = (v?: number) => v == null ? "—" : `${(v * 100).toFixed(2)}%`;
 
 
 /* ---------------- Dark Terminal Components ---------------- */
-const MetricCard = ({ label, value, icon, trend, status, version }: any) => (
+const MetricCard = ({ label, value, icon, trend, status, subtext, version }: any) => (
   <div className="bg-slate-900/40 border border-slate-800 p-4 sm:p-5 rounded-2xl backdrop-blur-md relative overflow-hidden group">
     <div key={version} className="absolute inset-0 bg-blue-500/5 pointer-events-none animate-data-flash" />
     <div className="flex items-center gap-2 text-slate-500 mb-3 relative z-10">
@@ -41,6 +41,11 @@ const MetricCard = ({ label, value, icon, trend, status, version }: any) => (
       }`}>
       {value}
     </div>
+    {subtext && (
+      <p className="text-[8px] font-black text-slate-600 uppercase mt-1 tracking-wide relative z-10">
+        {subtext}
+      </p>
+    )}
   </div>
 );
 
@@ -156,13 +161,20 @@ export default function ManagerPage() {
         </section>
 
         {/* METRICS */}
-        <section className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4">
+        <section className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-3 sm:gap-4">
           <MetricCard version={version} label="Exposure" value={fmtUsd(overview.exposure)} icon={<PieChart size={14} />} />
           <MetricCard version={version} label="Daily P&L" value={fmtUsd(overview.portfolio_daily_pnl)} icon={<TrendingUp size={14} />} trend={overview.portfolio_daily_pnl >= 0 ? 'up' : 'down'} />
           <MetricCard version={version} label="VaR 95%" value={fmtUsd(overview.daily_portfolio_var_95)} icon={<ShieldAlert size={14} />} />
           <MetricCard version={version} label="VaR 99%" value={fmtUsd(overview.daily_portfolio_var_99)} icon={<ShieldAlert size={14} />} status="danger" />
           <MetricCard version={version} label="Portfolio Wt" value={fmtPct(overview.portfolio_weight)} icon={<Activity size={14} />} />
           <MetricCard version={version} label="Alerts" value={overview.alerts} icon={<AlertTriangle size={14} />} status={overview.alerts > 0 ? 'danger' : 'neutral'} />
+          <MetricCard
+            version={version}
+            label="Ticker Coverage"
+            value={`${overview.tickers_count} / ${overview.total_ticker_count}`}
+            icon={<Database size={14} />}
+            subtext="Active Today / Universe"
+          />
         </section>
 
         {/* CONTENT */}

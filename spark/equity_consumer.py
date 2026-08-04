@@ -420,13 +420,6 @@ PROM_TICKERS_IN_BUFFER = Gauge(
     "Number of tickers currently in buffer",
     registry=_prom_registry,
 )
-
-
-
-# Shared run_id for Pushgateway job label (set in __main__)
-_consumer_run_id: str = "unknown"
-
-
 def _push_metrics() -> None:
     """
     Push accumulated Prometheus metrics to Pushgateway.
@@ -438,7 +431,7 @@ def _push_metrics() -> None:
       REPLAY   : called once at replay job completion.
     """
     try:
-        job_name = f"{CONFIG['consumer_pipeline_name']}_{CONFIG['run_mode']}_{_consumer_run_id}"
+        job_name = CONFIG['consumer_pipeline_name']
         
         # ── LOG success (no Slack) ──────────────────────────────────────
         log("INFO", "Pushing metrics to Pushgateway",
@@ -1636,6 +1629,12 @@ def save_latest_snapshot_all_tickers(
             pd.isna(row_ts) or row_ts.tz_convert("America/New_York") < late_cutoff
         )
 
+        # Defensive: ticker_buffers should never contain lineage fields
+        # (the live loop builds a separate copy before stamping lineage
+        # specifically to avoid this), but strip here too in case that
+        # ever regresses — lineage must never reach Redis.
+        latest_row = strip_lineage_for_redis(latest_row)
+
         latest_rows.append(latest_row)
 
     if not latest_rows:
@@ -1720,6 +1719,26 @@ def add_lineage(
     row_dict["run_mode"]               = CONFIG["run_mode"]
     row_dict["batch_id"]               = batch_id
     return row_dict
+
+
+# Fields that belong in S3 (audit/provenance) and must NEVER be
+# published to Redis. Kept as one explicit list so both Redis paths
+# (Redis #1 synced, Redis #2 all-tickers) strip identically.
+LINEAGE_FIELDS = [
+    "consumer_pipeline_name", "pipeline_run_id", "processing_timestamp",
+    "data_source", "transformation", "record_created_at", "run_mode",
+    "producer_pipeline_name", "producer_run_id", "source_fetch_time",
+    "batch_id",
+]
+
+
+def strip_lineage_for_redis(row: dict) -> dict:
+    """
+    Return a copy of `row` with every LINEAGE_FIELDS key removed.
+    Lineage is for S3/audit only — it must never reach Redis, for
+    either the synced store or the all-tickers store.
+    """
+    return {k: v for k, v in row.items() if k not in LINEAGE_FIELDS}
 
 
 # =============================================================
@@ -2084,18 +2103,25 @@ def process_batch(
                      "batch_id": str(batch_id)})
                 continue
 
-            # Lineage stamping — run_mode set from CONFIG["run_mode"] directly
-            row_dict = add_lineage(
-                row_dict             = row_dict,
+            # Lineage stamping — build a SEPARATE copy here. row_dict is
+            # the same object reference sitting inside
+            # ticker_buffers[ticker] (the buffer we updated above) —
+            # mutating it further with lineage fields would leak
+            # batch_id/pipeline_run_id/etc. into ticker_buffers, and
+            # therefore into Redis #2, which must never carry lineage.
+            # Lineage belongs in S3 only.
+            output_row = dict(row_dict)
+            output_row = add_lineage(
+                row_dict             = output_row,
                 batch_id             = str(batch_id),
                 pipeline_run_id      = pipeline_run_id,
                 processing_timestamp = processing_timestamp,
             )
-            row_dict["producer_pipeline_name"] = row["producer_pipeline_name"]
-            row_dict["producer_run_id"]        = row["producer_run_id"]
-            row_dict["source_fetch_time"]      = row["source_fetch_time"]
+            output_row["producer_pipeline_name"] = row["producer_pipeline_name"]
+            output_row["producer_run_id"]        = row["producer_run_id"]
+            output_row["source_fetch_time"]      = row["source_fetch_time"]
 
-            snapshot_rows.append(row_dict)
+            snapshot_rows.append(output_row)
             metrics["events_processed"] += 1
             PROM_RECORDS_PROCESSED_TOTAL.inc()
 
@@ -2124,22 +2150,15 @@ def process_batch(
         {"batch_id": batch_id, "event_count": len(snapshot_rows),
          "run_mode": CONFIG["run_mode"]})
 
-    # ── Build Redis #1's synchronized subset ────────────────────────
-    # From the fresh + deduped rows, keep only those floored to the SAME
-    # minute as the batch's max minute, so every ticker in this snapshot
-    # is genuinely as-of one identical instant.
-    synced_rows: list = []
+    # ── Enrich with positions FIRST — both S3 and both Redis stores must
+    # share the exact same schema (intraday_exposure, portfolio_intraday_pnl,
+    # asset_manager, Shares, etc. from positions_df). Redis #1's
+    # synchronized subset is derived below FROM the enriched rows, not
+    # from the raw pre-enrichment snapshot_rows — otherwise
+    # equity_latest_snapshot_synced would silently be missing every
+    # enrichment field that equity_latest_snapshot has.
+    enriched_rows: list = []
     if snapshot_rows:
-        ts_index = pd.to_datetime(
-            [r["timestamp"] for r in snapshot_rows], utc=True, errors="coerce"
-        ).tz_convert("America/New_York")
-        floored_minutes = ts_index.floor("min")
-        max_minute      = floored_minutes.max()
-        synced_rows = [
-            row for row, minute in zip(snapshot_rows, floored_minutes)
-            if minute == max_minute
-        ]
-
         log("INFO", "ENRICH_START")
         snapshot_df = pd.DataFrame(snapshot_rows)
         snapshot_df = enrich_intraday_with_positions(snapshot_df, positions_df)
@@ -2152,16 +2171,41 @@ def process_batch(
         save_to_parquet(snapshot_df, str(batch_id))
         log("INFO", "SAVE_DONE")
 
-    # ── Redis — LIVE ONLY, two independent stores ──────────────────────
+        enriched_rows = snapshot_df.to_dict("records")
+
+    # ── Build Redis #1's synchronized subset — from the ENRICHED rows ──
+    # From the fresh + deduped + enriched rows, keep only those floored
+    # to the SAME minute as the batch's max minute, so every ticker in
+    # this snapshot is genuinely as-of one identical instant. Lineage is
+    # stripped here — for Redis only, never for what was already written
+    # to S3 above (snapshot_df/enriched_rows keep full lineage).
+    synced_rows: list = []
+    if enriched_rows:
+        ts_index = pd.to_datetime(
+            [r["timestamp"] for r in enriched_rows], utc=True, errors="coerce"
+        ).tz_convert("America/New_York")
+        floored_minutes = ts_index.floor("min")
+        max_minute      = floored_minutes.max()
+        synced_rows = [
+            strip_lineage_for_redis(row)
+            for row, minute in zip(enriched_rows, floored_minutes)
+            if minute == max_minute
+        ]
+
+    # ── Redis — LIVE ONLY, two independent stores, NEITHER carries
+    # lineage (batch_id/pipeline_run_id/etc.) — lineage is S3-only ──────
     # Redis #1 "equity_latest_snapshot_synced"/"equity_stream_synced":
-    #   only the synchronized subset above.
+    #   only the synchronized subset above. Same schema as Redis #2
+    #   below (both positions-enriched) minus is_stale — Redis #1 rows
+    #   are never stale by construction, so the field doesn't apply.
     # Redis #2 "equity_latest_snapshot"/"equity_stream" (pre-existing
     #   key names, unchanged): EVERY ticker ever seen, rebuilt straight
     #   from ticker_buffers (which the loop above already kept current,
-    #   including late-but-real rows) — published every live batch
-    #   regardless of whether snapshot_rows is empty this cycle, so a
-    #   ticker is never dropped from view just because it didn't have
-    #   fresh data this batch.
+    #   including late-but-real rows, and which never receives lineage —
+    #   see the separate `output_row` copy built above) — published
+    #   every live batch regardless of whether snapshot_rows is empty
+    #   this cycle, so a ticker is never dropped from view just because
+    #   it didn't have fresh data this batch.
     if IS_LIVE:
         if synced_rows:
             publish_equity_synced_snapshot(synced_rows)
@@ -2396,7 +2440,6 @@ EVENT_SCHEMA = StructType([
 
 if __name__ == "__main__":
     run_id = str(uuid.uuid4())
-    _consumer_run_id = run_id  # used by _push_metrics for Pushgateway job label
 
     log("INFO", "Consumer starting",
         {"run_mode":    CONFIG["run_mode"],

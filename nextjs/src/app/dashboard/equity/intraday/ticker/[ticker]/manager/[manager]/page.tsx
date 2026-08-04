@@ -96,6 +96,8 @@ export default function TickerManagerIntradayPage() {
   const [totals, setTotals] = useState<any>(null);
   const [signals, setSignals] = useState<any>(null);
   const [alerts, setAlerts] = useState<any[]>([]);
+  const [marketDataStatus, setMarketDataStatus] = useState<any>(null);
+  const [hasLoaded, setHasLoaded] = useState(false);
 
   // FX-style change
   const [equityEnabled, setEquityEnabled] = useState<boolean | null>(null);
@@ -151,14 +153,18 @@ export default function TickerManagerIntradayPage() {
           `/api/equity/intraday/ticker_manager?ticker=${ticker}&manager=${manager}`,
           { cache: "no-store" }
         );
-        if (!res.ok) return;
+        // Backend returns a structured body even on 404 -- read it
+        // either way instead of bailing out.
         const json = await res.json();
         setTimestamp(json.timestamp);
         setTotals(json.totals);
         setSignals(json.signals);
         setAlerts(json.alerts ?? []);
+        setMarketDataStatus(json.market_data_status || null);
+        setHasLoaded(true);
       } catch (e) {
         console.error(e);
+        setHasLoaded(true);
       }
     }
     load();
@@ -173,6 +179,8 @@ export default function TickerManagerIntradayPage() {
       setTotals(json.totals);
       setSignals(json.signals);
       setAlerts(json.alerts ?? []);
+      setMarketDataStatus(json.market_data_status || null);
+      setHasLoaded(true);
     }
   );
 
@@ -199,6 +207,14 @@ export default function TickerManagerIntradayPage() {
         </div>
       </div>
     );
+  }
+
+  if (!hasLoaded) {
+    return <LoadingState />;
+  }
+
+  if (marketDataStatus && marketDataStatus.intraday_price_available === false) {
+    return <MissingMarketData ticker={ticker} manager={manager} status={marketDataStatus} />;
   }
 
   if (!totals || !signals) {
@@ -365,6 +381,50 @@ function LoadingState() {
     <div className="p-8 bg-[#020617] min-h-screen flex items-center justify-center">
       <div className="text-blue-500 font-black animate-pulse tracking-widest text-xs uppercase">
         Initialising Tactical Engine...
+      </div>
+    </div>
+  );
+}
+
+function MissingMarketData({ ticker, manager, status }: { ticker: string; manager: string; status: any }) {
+  return (
+    <div className="min-h-screen bg-[#020617] text-slate-300 p-6 lg:p-12">
+      <div className="max-w-2xl mx-auto space-y-8">
+        <Link
+          href={`/dashboard/equity/intraday/ticker/${ticker}`}
+          className="inline-flex items-center text-[10px] font-bold text-slate-500 hover:text-blue-400 uppercase tracking-widest gap-2"
+        >
+          <ArrowLeft className="w-3 h-3" /> Back to {ticker}
+        </Link>
+
+        <div className="space-y-2">
+          <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tighter italic">
+            {ticker} <span className="text-blue-500">×</span> {manager}
+          </h1>
+          <p className="text-amber-500 text-sm font-bold uppercase tracking-wide">⚠ Market Data Status: Intraday Price Unavailable</p>
+        </div>
+
+        <div className="bg-slate-900/40 border border-amber-500/20 rounded-2xl p-8 space-y-6">
+          <div className="grid grid-cols-2 gap-6">
+            <div>
+              <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Intraday Price</p>
+              <p className="text-lg font-mono font-bold text-red-400">Unavailable</p>
+            </div>
+            <div>
+              <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Latest EOD Price</p>
+              <p className="text-lg font-mono font-bold text-white">
+                {status?.eod_available ? `$${status.eod_price}` : "—"}
+              </p>
+              {status?.eod_date && (
+                <p className="text-[10px] text-slate-500 mt-1">as of {status.eod_date}</p>
+              )}
+            </div>
+          </div>
+          <div className="pt-4 border-t border-slate-800">
+            <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Valuation Status</p>
+            <p className="text-sm font-bold text-amber-400">{status?.valuation_status || "Excluded from portfolio totals"}</p>
+          </div>
+        </div>
       </div>
     </div>
   );

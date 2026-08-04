@@ -3,15 +3,17 @@ from django.db.models import Sum, Avg, Count, Q, F, FloatField, ExpressionWrappe
 from ..models import EquityData
 from django.db.models.functions import NullIf, Coalesce
 import yfinance as yf
-import redis, json
+import json
+import boto3
 import os
+import pandas as pd
+from io import StringIO, BytesIO
+from django.core.cache import cache
 
-redis_client = redis.Redis(
-    host=os.getenv("REDIS_HOST"),  
-    port=int(os.getenv("REDIS_PORT", 6379)),   
-    db=int(os.environ.get("REDIS_DB_STREAM", 1)),   
-    decode_responses=True
-)
+s3 = boto3.client("s3")
+
+BUCKET_NAME = "pushpa-equity-bucket"
+
 # Global scenario dictionary
 # ------------------------
 SCENARIOS = {
@@ -41,85 +43,137 @@ def equity_latest_date(request):
         "latest_date": latest_date
     })
 
-def equity_status(request):
+
+
+def read_csv_from_s3(key):
+    response = s3.get_object(
+        Bucket=BUCKET_NAME,
+        Key=key
+    )
+
+    return pd.read_csv(
+        StringIO(response["Body"].read().decode("utf-8"))
+    )
+
+def read_parquet_from_s3(key):
+    cache_key = "ticker_manager_mapping_df"
+
+    df = cache.get(cache_key)
+
+    if df is None:
+        response = s3.get_object(
+            Bucket=BUCKET_NAME,
+            Key=key
+        )
+
+        df = pd.read_parquet(
+            BytesIO(response["Body"].read())
+        )
+
+        cache.set(cache_key, df, timeout=3600)
+
+    return df
+
+def asset_managers_list(request):
+    cache_key = "asset_managers_list"
+
+    managers = cache.get(cache_key)
+
+    if managers is None:
+        df = read_csv_from_s3(
+            "historical-equity/asset_managers.csv"
+        )
+
+        managers = df["asset_manager"].tolist()
+
+        cache.set(cache_key, managers, timeout=3600)
+
+    return JsonResponse(managers, safe=False)
+
+
+def tickers_list(request):
+    cache_key = "tickers_list"
+
+    tickers = cache.get(cache_key)
+
+    if tickers is None:
+        df = read_csv_from_s3(
+            "historical-equity/final_tickers.csv"
+        )
+
+        tickers = df["ticker"].tolist()
+
+        cache.set(cache_key, tickers, timeout=3600)
+
+    return JsonResponse(tickers, safe=False)
+
+def get_total_ticker_count():
+    cache_key = "total_ticker_count"
+
+    count = cache.get(cache_key)
+
+    if count is None:
+        df = read_csv_from_s3(
+            "historical-equity/final_tickers.csv"
+        )
+
+        count = len(df)
+
+        cache.set(cache_key, count, timeout=3600)
+
+    return count   
+
+def get_total_manager_count():
+    cache_key = "total_manager_count"
+
+    count = cache.get(cache_key)
+
+    if count is None:
+        df = read_csv_from_s3(
+            "historical-equity/asset_managers.csv"
+        )
+
+        count = len(df)
+
+        cache.set(cache_key, count, timeout=3600)
+
+    return count
+
+# ------------------------------------------------
+# SHARED DATE RESOLVER
+# ------------------------------------------------
+def _resolve_equity_date(requested_date, **filters):
+    """
+    Returns:
+        (effective_date, is_stale, error_response)
+
+    If requested date exists:
+        -> requested_date, False, None
+
+    If requested date doesn't exist:
+        -> latest available date for same filters, True, None
+
+    If absolutely no data exists:
+        -> None, None, JsonResponse({"message": "No data available"})
+    """
+
+    base_qs = EquityData.objects.filter(**filters)
+
+    if not base_qs.exists():
+        return None, None, JsonResponse({
+            "data_available": False
+        })
+
+    if requested_date and base_qs.filter(date=requested_date).exists():
+        return requested_date, False, None
+
     latest_date = (
-        EquityData.objects
-        .order_by("-date")
+        base_qs.order_by("-date")
         .values_list("date", flat=True)
         .first()
     )
 
-    return JsonResponse({
-        "latest_daily_date": latest_date,
-        "intraday_enabled": False,  # later make dynamic
-    })
-
-def latest_asset_managers(request):
-    latest_date = EquityData.objects.aggregate(
-        latest=Max("date")
-    )["latest"]
-
-    managers = (
-        EquityData.objects
-        .filter(date=latest_date)
-        .values_list("asset_manager", flat=True)
-        .distinct()
-        .order_by("asset_manager")
-    )
-
-    return JsonResponse(list(managers), safe=False)
-
-def latest_tickers(request):
-    # ---------------------------------
-    # SOURCE OF TRUTH (ORDER MATTERS)
-    # ---------------------------------
-    req_type = request.GET.get("type")
-
-    if not req_type:
-        if "intraday" in request.path:
-            req_type = "intraday"
-        else:
-            req_type = "daily"
-
-    # -------------------------------
-    # INTRADAY → REDIS
-    # -------------------------------
-    if req_type == "intraday":
-        snapshot = redis_client.get("equity_latest_snapshot")
-
-        if snapshot:
-            try:
-                data = json.loads(snapshot)
-                tickers = sorted({
-                    row.get("ticker")
-                    for row in data
-                    if row.get("ticker")
-                })
-
-                if tickers:
-                    return JsonResponse(tickers, safe=False)
-
-            except Exception:
-                pass  # fallback to daily
-
-    # -------------------------------
-    # DAILY → DATABASE (FALLBACK)
-    # -------------------------------
-    latest_date = EquityData.objects.aggregate(
-        latest=Max("date")
-    )["latest"]
-
-    tickers = (
-        EquityData.objects
-        .filter(date=latest_date)
-        .values_list("ticker", flat=True)
-        .distinct()
-        .order_by("ticker")
-    )
-
-    return JsonResponse(list(tickers), safe=False)
-
-   
+    return latest_date, True, None
 
 # ------------------------------------------------
 # SHARED STRESS PARSER (NO DUPLICATION)
@@ -181,7 +235,8 @@ def equity_overview(request):
         data["cvar_99"] *= var
         data["ex_ante_volatility"] *= vol
 
-    data["manager_count"] = qs.values("asset_manager").distinct().count()
+    data["manager_count"] = get_total_manager_count()
+    data["total_ticker_count"] = get_total_ticker_count()
     data["ticker_count"] = qs.values("ticker").distinct().count()
     data["is_stressed"] = is_stressed
 
@@ -212,7 +267,6 @@ def equity_managers(request):
             book_pct=Sum("mtm_value") / total_exposure,
             ticker_count=Count("ticker", distinct=True),
 
-            # ✅ VAR AS PERCENTAGE
             var_usage_pct=ExpressionWrapper(
                 Sum(F("mtm_value") * F("daily_var_95")) /
                 NullIf(Sum("mtm_value"), 0),
@@ -224,11 +278,29 @@ def equity_managers(request):
         .order_by("-exposure")[:10]
     )
 
+    mapping_df = read_parquet_from_s3(
+        "historical-equity/ticker_manager_mapping.parquet"
+    )
+
+    manager_total_counts = (
+        mapping_df
+        .groupby("asset_manager")["ticker"]
+        .nunique()
+        .to_dict()
+    )
+
     data = []
+
     for row in qs:
         if is_stressed:
             row["daily_pnl"] += row["exposure"] * ret
             row["var_usage_pct"] *= var
+
+        row["total_ticker_count"] = manager_total_counts.get(
+            row["asset_manager"],
+            0
+        )
+
         row["is_stressed"] = is_stressed
         data.append(row)
 
@@ -370,6 +442,16 @@ def equity_manager_overview(request):
 
     data["alerts"] = qs.filter(portfolio_weight__gt=0.05).count()
     data["tickers_count"] = qs.values("ticker").distinct().count()
+    mapping_df = read_parquet_from_s3(
+        "historical-equity/ticker_manager_mapping.parquet"
+    )
+
+    data["total_ticker_count"] = (
+        mapping_df[
+            mapping_df["asset_manager"].str.lower() == manager_normalized.lower()
+        ]["ticker"]
+        .nunique()
+    )
     data["is_stressed"] = is_stressed
 
     return JsonResponse(data)
@@ -499,6 +581,14 @@ def equity_ticker_market(request):
     ticker = request.GET.get("ticker")
     _, _, _, is_stressed, _ = _get_stress_params(request)
 
+    date, is_stale, error = _resolve_equity_date(
+        date,
+        ticker=ticker,
+    )
+
+    if error:
+        return error
+
     row = (
         EquityData.objects
         .filter(date=date, ticker=ticker)
@@ -520,28 +610,30 @@ def equity_ticker_market(request):
         .first()
     )
 
-    if row:
-        row["is_stressed"] = is_stressed
-        if prev_row:
-            row.update({
-                "prev_date": prev_row["date"],
-                "prev_open": prev_row["open"],
-                "prev_high": prev_row["high"],
-                "prev_low": prev_row["low"],
-                "prev_close": prev_row["close"],
-                "prev_volume": prev_row["volume"],
-            })
-        else:
-            row.update({
-                "prev_date": None,
-                "prev_open": None,
-                "prev_high": None,
-                "prev_low": None,
-                "prev_close": None,
-                "prev_volume": None,
-            })
+    row["data_available"] = True
+    row["is_stressed"] = is_stressed
+    row["is_stale"] = is_stale
 
-    return JsonResponse(row or {})
+    if prev_row:
+        row.update({
+            "prev_date": prev_row["date"],
+            "prev_open": prev_row["open"],
+            "prev_high": prev_row["high"],
+            "prev_low": prev_row["low"],
+            "prev_close": prev_row["close"],
+            "prev_volume": prev_row["volume"],
+        })
+    else:
+        row.update({
+            "prev_date": None,
+            "prev_open": None,
+            "prev_high": None,
+            "prev_low": None,
+            "prev_close": None,
+            "prev_volume": None,
+        })
+
+    return JsonResponse(row)
 
 
 # ------------------------------------------------
@@ -551,6 +643,14 @@ def equity_ticker_risk(request):
     date = request.GET.get("date")
     ticker = request.GET.get("ticker")
     ret, _, var, is_stressed, _ = _get_stress_params(request)
+
+    date, is_stale, error = _resolve_equity_date(
+        date,
+        ticker=ticker,
+    )
+
+    if error:
+        return error
 
     data = (
         EquityData.objects
@@ -574,6 +674,8 @@ def equity_ticker_risk(request):
         data["daily_cvar_99"] *= var
 
     data["is_stressed"] = is_stressed
+    data["is_stale"] = is_stale
+
     return JsonResponse(data)
 
 
@@ -584,6 +686,14 @@ def equity_ticker_volatility(request):
     date = request.GET.get("date")
     ticker = request.GET.get("ticker")
     _, vol, _, is_stressed, _ = _get_stress_params(request)
+
+    date, is_stale, error = _resolve_equity_date(
+        date,
+        ticker=ticker,
+    )
+
+    if error:
+        return error
 
     row = (
         EquityData.objects
@@ -598,16 +708,16 @@ def equity_ticker_volatility(request):
         .first()
     )
 
-    if row and is_stressed:
+    if is_stressed:
         row["volatility_21d"] *= vol
         row["vol_5d"] *= vol
         row["vol_20d"] *= vol
 
-    if row:
-        row["is_stressed"] = is_stressed
+    row["is_stressed"] = is_stressed
+    row["is_stale"] = is_stale
 
-    return JsonResponse(row or {})
 
+    return JsonResponse(row)
 
 # ------------------------------------------------
 # 4️⃣ TICKER LIQUIDITY
@@ -616,6 +726,14 @@ def equity_ticker_liquidity(request):
     date = request.GET.get("date")
     ticker = request.GET.get("ticker")
     _, vol, _, is_stressed, _ = _get_stress_params(request)
+
+    date, is_stale, error = _resolve_equity_date(
+        date,
+        ticker=ticker,
+    )
+
+    if error:
+        return error
 
     row = (
         EquityData.objects
@@ -628,25 +746,34 @@ def equity_ticker_liquidity(request):
         .first()
     )
 
-    if row and is_stressed:
+    if is_stressed:
         row["liquidity_risk_score"] *= vol
 
-    if row:
-        row["is_stressed"] = is_stressed
+    row["is_stressed"] = is_stressed
+    row["is_stale"] = is_stale
 
-    return JsonResponse(row or {})
+    return JsonResponse(row)
 
 
 # ------------------------------------------------
 # 5️⃣ TICKER FUNDAMENTALS (NO STRESS)
 # ------------------------------------------------
 def equity_ticker_fundamentals(request):
+    date = request.GET.get("date")
     ticker = request.GET.get("ticker")
     _, _, _, is_stressed, _ = _get_stress_params(request)
 
+    date, is_stale, error = _resolve_equity_date(
+        date,
+        ticker=ticker,
+    )
+
+    if error:
+        return error
+
     row = (
         EquityData.objects
-        .filter(ticker=ticker)
+        .filter(date=date, ticker=ticker)
         .values(
             "issuer_name", "class_name", "cusip",
             "sector", "industry",
@@ -668,11 +795,11 @@ def equity_ticker_fundamentals(request):
     except Exception:
         pass
 
-    if row:
-        row["market_cap"] = fetched_market_cap or row.get("market_cap")
-        row["is_stressed"] = is_stressed
+    row["market_cap"] = fetched_market_cap or row.get("market_cap")
+    row["is_stressed"] = is_stressed
+    row["is_stale"] = is_stale
 
-    return JsonResponse(row or {})
+    return JsonResponse(row)
 
 
 # ------------------------------------------------
@@ -683,11 +810,22 @@ def equity_ticker_aggregate(request):
     ticker = request.GET.get("ticker")
     ret, _, var, is_stressed, _ = _get_stress_params(request)
 
+    date, is_stale, error = _resolve_equity_date(
+        date,
+        ticker=ticker,
+    )
+
+    if error:
+        return error
+
     qs = EquityData.objects.filter(date=date, ticker=ticker)
 
-    total_exposure = EquityData.objects.filter(date=date).aggregate(
-        total=Sum("mtm_value")
-    )["total"] or 0.0
+    total_exposure = (
+        EquityData.objects
+        .filter(date=date)
+        .aggregate(total=Sum("mtm_value"))["total"]
+        or 0.0
+    )
 
     data = qs.aggregate(
         exposureUsd=Sum("mtm_value"),
@@ -703,6 +841,8 @@ def equity_ticker_aggregate(request):
         data["sector_beta_weighted"] *= var
 
     data["is_stressed"] = is_stressed
+    data["is_stale"] = is_stale
+
     return JsonResponse(data)
 
 # ------------------------------------------------
@@ -712,6 +852,14 @@ def equity_ticker_managers(request):
     date = request.GET.get("date")
     ticker = request.GET.get("ticker")
     ret, _, var, is_stressed, _ = _get_stress_params(request)
+
+    date, is_stale, error = _resolve_equity_date(
+        date,
+        ticker=ticker,
+    )
+
+    if error:
+        return error
 
     rows = (
         EquityData.objects
@@ -732,14 +880,16 @@ def equity_ticker_managers(request):
         if is_stressed:
             r["dailyPnlUsd"] += exposure * ret
             # ❗ weights are NOT stressed
+
         r["is_stressed"] = is_stressed
+        r["is_stale"] = is_stale
         data.append(r)
 
     return JsonResponse(data, safe=False)
 
 
 # ------------------------------------------------
-# POSITION SUMMARY
+# 1️⃣ POSITION SUMMARY (Ticker * Manager Page)
 # ------------------------------------------------
 def equity_position_summary(request):
     ticker = request.GET.get("ticker")
@@ -748,15 +898,20 @@ def equity_position_summary(request):
 
     ret, _, _, is_stressed, _ = _get_stress_params(request)
 
-    qs = EquityData.objects.filter(
+    date, is_stale, error = _resolve_equity_date(
+        date,
         ticker=ticker,
         asset_manager__iexact=manager,
     )
-    if date:
-        qs = qs.filter(date=date)
 
-    if not qs.exists():
-        return JsonResponse({})
+    if error:
+        return error
+
+    qs = EquityData.objects.filter(
+        ticker=ticker,
+        asset_manager__iexact=manager,
+        date=date,
+    )
 
     data = qs.aggregate(
         exposure_usd=Sum("mtm_value"),
@@ -772,14 +927,17 @@ def equity_position_summary(request):
     data.update({
         "ticker": ticker,
         "manager": manager,
+        "date": date,
+        "data_available": True,
         "is_stressed": is_stressed,
+        "is_stale": is_stale,
     })
 
     return JsonResponse(data)
 
 
 # ------------------------------------------------
-# POSITION INTELLIGENCE
+# 2️⃣ POSITION INTELLIGENCE
 # ------------------------------------------------
 def equity_position_intelligence(request):
     ticker = request.GET.get("ticker")
@@ -788,12 +946,20 @@ def equity_position_intelligence(request):
 
     ret, vol, var, is_stressed, _ = _get_stress_params(request)
 
-    qs = EquityData.objects.filter(
+    date, is_stale, error = _resolve_equity_date(
+        date,
         ticker=ticker,
         asset_manager__iexact=manager,
     )
-    if date:
-        qs = qs.filter(date=date)
+
+    if error:
+        return error
+
+    qs = EquityData.objects.filter(
+        ticker=ticker,
+        asset_manager__iexact=manager,
+        date=date,
+    )
 
     row = qs.aggregate(
         pred_ret_1d=Max("pred_ret_1d"),
@@ -841,11 +1007,13 @@ def equity_position_intelligence(request):
     )
 
     row["is_stressed"] = is_stressed
+    row["is_stale"] = is_stale
+
     return JsonResponse(row)
 
 
 # ------------------------------------------------
-# POSITION ALERTS
+# 3️⃣ POSITION ALERTS
 # ------------------------------------------------
 def equity_position_alerts(request):
     ticker = request.GET.get("ticker")
@@ -854,15 +1022,20 @@ def equity_position_alerts(request):
 
     _, vol, var, is_stressed, _ = _get_stress_params(request)
 
-    qs = EquityData.objects.filter(
+    date, is_stale, error = _resolve_equity_date(
+        date,
         ticker=ticker,
         asset_manager__iexact=manager,
     )
-    if date:
-        qs = qs.filter(date=date)
 
-    if not qs.exists():
-        return JsonResponse([], safe=False)
+    if error:
+        return error
+
+    qs = EquityData.objects.filter(
+        ticker=ticker,
+        asset_manager__iexact=manager,
+        date=date,
+    )
 
     row = qs.aggregate(
         exposure=Max("mtm_value"),
@@ -914,5 +1087,6 @@ def equity_position_alerts(request):
 
     for a in alerts:
         a["is_stressed"] = is_stressed
+        a["is_stale"] = is_stale
 
     return JsonResponse(alerts, safe=False)

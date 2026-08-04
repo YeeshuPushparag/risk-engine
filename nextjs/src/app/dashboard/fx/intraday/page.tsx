@@ -9,6 +9,7 @@ import {
   TrendingDown,
   Globe,
   MoveHorizontal,
+  AlertTriangle,
 } from "lucide-react";
 import TickerSearch from "@/components/TickerSearch";
 import { useWebSocket } from "@/hooks/useWebSocket";
@@ -26,6 +27,73 @@ const fmt = (v?: number) => {
 };
 
 const fmtFX = (n?: number) => (n == null ? "—" : n.toFixed(4));
+
+/* ---------------- MARKET DATA HEALTH (separate from valuation, per design doc) ---------------- */
+function MarketDataHealthSection({ health }: { health: any }) {
+  if (!health) return null;
+  const fresh = health.fresh_updates?.fresh ?? 0;
+  const total = health.fresh_updates?.total ?? 0;
+  const delayed = health.delayed_pairs_count ?? health.delayed_tickers_count ?? 0;
+
+  return (
+    <section className="mb-6">
+      <div className="flex items-center gap-3 border-l-4 border-slate-600 pl-4 mb-3">
+        <Clock className="w-4 h-4 text-slate-400" />
+        <h2 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em]">Market Data Health</h2>
+      </div>
+      <div className="grid grid-cols-3 gap-4 bg-slate-900/30 border border-slate-800 rounded-2xl p-5">
+        <div>
+          <p className="text-[8px] font-black text-slate-500 uppercase tracking-widest mb-1">Fresh Updates</p>
+          <p className="text-lg font-mono font-bold text-white">{fresh} / {total}</p>
+        </div>
+        <div>
+          <p className="text-[8px] font-black text-slate-500 uppercase tracking-widest mb-1">Last Update</p>
+          <p className="text-lg font-mono font-bold text-slate-300">
+            {health.last_market_update ? new Date(health.last_market_update).toLocaleTimeString() : "—"}
+          </p>
+        </div>
+        <div>
+          <p className="text-[8px] font-black text-slate-500 uppercase tracking-widest mb-1">Status</p>
+          <p className={`text-sm font-black uppercase ${delayed > 0 ? "text-amber-400" : "text-emerald-400"}`}>
+            {delayed > 0 ? `⚠ ${delayed} delayed` : "All current"}
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/* ---------------- DATA QUALITY ISSUES (currency pairs, not tickers, for FX overview) ---------------- */
+function DataQualityIssuesSection({ issues }: { issues: any[] }) {
+  if (!issues || issues.length === 0) return null;
+
+  return (
+    <section className="mb-6">
+      <div className="flex items-center gap-3 border-l-4 border-amber-600 pl-4 mb-3">
+        <AlertTriangle className="w-4 h-4 text-amber-500" />
+        <h2 className="text-[10px] font-black text-amber-500 uppercase tracking-[0.3em]">
+          Market Data Issues — {issues.length} currency pair{issues.length > 1 ? "s" : ""} unpriced
+        </h2>
+      </div>
+      <div className="bg-amber-500/5 border border-amber-500/20 rounded-2xl divide-y divide-amber-500/10 overflow-hidden">
+        {issues.map((issue: any) => (
+          <div key={issue.currency_pair} className="p-4 flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-black text-white">{issue.currency_pair}</p>
+              <p className="text-[10px] font-bold text-slate-500 uppercase mt-0.5">{issue.reason}</p>
+            </div>
+            <Link
+              href={`/dashboard/fx/daily/currency/${issue.currency_pair}`}
+              className="text-[10px] font-black text-blue-500 hover:text-white uppercase tracking-widest whitespace-nowrap"
+            >
+              View Pair →
+            </Link>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
 
 /* --- ANIMATED COMPONENTS --- */
 
@@ -217,19 +285,26 @@ export default function FxIntradayMain() {
       </div>
 
       {/* STATS */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-10">
-        <StatCard label="Total Exposure" value={fmt(data.totals.total_exposure)} numericValue={data.totals.total_exposure} />
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4 mb-6">
+        <StatCard label="Currency Pairs" value={`${data.portfolio_overview.valuation_coverage?.valued ?? 0}/${data.portfolio_overview.total_currency_pairs ?? 0}`} numericValue={data.portfolio_overview.valuation_coverage?.valued} />
+        <StatCard label="Total Exposure" value={fmt(data.portfolio_overview.total_exposure)} numericValue={data.portfolio_overview.total_exposure} />
         <StatCard
           label="Session P&L"
-          value={fmt(data.totals.total_fx_pnl)}
-          numericValue={data.totals.total_fx_pnl}
-          trend={data.totals.total_fx_pnl >= 0 ? "up" : "down"}
+          value={fmt(data.portfolio_overview.total_fx_pnl)}
+          numericValue={data.portfolio_overview.total_fx_pnl}
+          trend={data.portfolio_overview.total_fx_pnl >= 0 ? "up" : "down"}
         />
-        <StatCard label="Worst VaR" value={fmt(data.totals.worst_var_95)} numericValue={data.totals.worst_var_95} color="text-red-400" />
-        <StatCard label="Active Pairs" value={data.totals.active_currency_pairs} numericValue={data.totals.active_currency_pairs} />
+        <StatCard label="Worst VaR" value={fmt(data.portfolio_overview.worst_var_95)} numericValue={data.portfolio_overview.worst_var_95} color="text-red-400" />
+        <StatCard label="Total Pairs" value={data.portfolio_overview.total_currency_pairs} numericValue={data.portfolio_overview.total_currency_pairs} />
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
+      {/* MARKET DATA HEALTH -- separate from valuation, per design */}
+      <MarketDataHealthSection health={data.market_data_health} />
+
+      {/* DATA QUALITY ISSUES -- only appears when a pair is actually missing */}
+      <DataQualityIssuesSection issues={data.data_quality_issues} />
+
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-8 mt-10">
         {/* LEFT: POSITION TABLE */}
         <div className="xl:col-span-2 space-y-4">
           <div className="flex items-center justify-between px-2">
