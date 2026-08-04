@@ -52,7 +52,7 @@
       },
       "id": 1,
       "panels": [],
-      "title": "Node Overview - risk-eks",
+      "title": "Node Overview",
       "type": "row"
     },
     {
@@ -112,8 +112,10 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+          "editorMode": "builder",
+          "expr": "100 - (avg(rate(node_cpu_seconds_total{job=\"node-exporter\", mode=\"idle\"}[5m])) * 100)",
           "legendFormat": "CPU",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -177,8 +179,10 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "(1 - (avg(node_memory_MemAvailable_bytes) / avg(node_memory_MemTotal_bytes))) * 100",
+          "editorMode": "builder",
+          "expr": "(1 - (avg(node_memory_MemAvailable_bytes{job=\"node-exporter\"}) / avg(node_memory_MemTotal_bytes{job=\"node-exporter\"}))) * 100",
           "legendFormat": "Memory",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -242,8 +246,10 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "(1 - (avg(node_filesystem_avail_bytes{mountpoint=\"/\"}) / avg(node_filesystem_size_bytes{mountpoint=\"/\"}))) * 100",
+          "editorMode": "builder",
+          "expr": "(1 - (avg(node_filesystem_avail_bytes{job=\"node-exporter\", mountpoint=\"/\"}) / avg(node_filesystem_size_bytes{job=\"node-exporter\", mountpoint=\"/\"}))) * 100",
           "legendFormat": "Disk",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -307,8 +313,10 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "avg(node_load1)",
+          "editorMode": "builder",
+          "expr": "avg(node_load1{job=\"node-exporter\"})",
           "legendFormat": "Load",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -377,8 +385,10 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "min(kube_node_status_condition{condition=\"Ready\", status=\"true\"})",
+          "editorMode": "builder",
+          "expr": "min(kube_node_status_condition{job=\"kube-state-metrics\", condition=\"Ready\", status=\"true\"})",
           "legendFormat": "Status",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -478,8 +488,10 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) by (instance) * 100)",
+          "editorMode": "builder",
+          "expr": "100 - (avg(rate(node_cpu_seconds_total{job=\"node-exporter\", mode=\"idle\"}[5m])) by (instance) * 100)",
           "legendFormat": "{{instance}}",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -566,8 +578,10 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100",
+          "editorMode": "builder",
+          "expr": "(1 - (node_memory_MemAvailable_bytes{job=\"node-exporter\"} / node_memory_MemTotal_bytes{job=\"node-exporter\"})) * 100",
           "legendFormat": "{{instance}}",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -654,8 +668,10 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "node_load1",
+          "editorMode": "builder",
+          "expr": "node_load1{job=\"node-exporter\"}",
           "legendFormat": "{{instance}} - 1m",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -742,8 +758,10 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "count by (node) (kube_pod_info)",
+          "editorMode": "builder",
+          "expr": "count by (node) (kube_pod_info{job=\"kube-state-metrics\"})",
           "legendFormat": "{{node}}",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -843,13 +861,17 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "rate(node_network_receive_bytes_total{device=\"ens5\"}[5m]) * 8",
+          "editorMode": "builder",
+          "expr": "rate(node_network_receive_bytes_total{job=\"node-exporter\", device=\"ens5\"}[5m]) * 8",
           "legendFormat": "{{instance}} - Receive",
+          "range": true,
           "refId": "A"
         },
         {
-          "expr": "rate(node_network_transmit_bytes_total{device=\"ens5\"}[5m]) * 8",
+          "editorMode": "builder",
+          "expr": "rate(node_network_transmit_bytes_total{job=\"node-exporter\", device=\"ens5\"}[5m]) * 8",
           "legendFormat": "{{instance}} - Transmit",
+          "range": true,
           "refId": "B"
         }
       ],
@@ -936,13 +958,17 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "rate(node_disk_read_bytes_total{device=\"nvme0n1\"}[5m])",
+          "editorMode": "builder",
+          "expr": "rate(node_disk_read_bytes_total{job=\"node-exporter\", device=\"nvme0n1\"}[5m])",
           "legendFormat": "{{instance}} - Read",
+          "range": true,
           "refId": "A"
         },
         {
-          "expr": "rate(node_disk_written_bytes_total{device=\"nvme0n1\"}[5m])",
+          "editorMode": "builder",
+          "expr": "rate(node_disk_written_bytes_total{job=\"node-exporter\", device=\"nvme0n1\"}[5m])",
           "legendFormat": "{{instance}} - Write",
+          "range": true,
           "refId": "B"
         }
       ],
@@ -956,8 +982,7 @@
   "tags": [
     "eks",
     "kubernetes",
-    "nodes",
-    "risk-eks"
+    "nodes"
   ],
   "templating": {
     "list": []
@@ -968,7 +993,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "EKS Node Monitoring - risk-eks",
-  "uid": "eks-node-monitoring-risk-eks",
+  "title": "EKS Node Monitoring",
+  "uid": "eks-node-monitoring",
   "version": 1
 }

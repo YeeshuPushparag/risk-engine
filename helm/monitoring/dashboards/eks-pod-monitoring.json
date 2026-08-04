@@ -52,7 +52,7 @@
       },
       "id": 1,
       "panels": [],
-      "title": "Pod Resources - risk-eks",
+      "title": "Pod Resources",
       "type": "row"
     },
     {
@@ -135,8 +135,10 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "sum(rate(container_cpu_usage_seconds_total{container!=\"\"}[5m])) by (namespace)",
+          "editorMode": "builder",
+          "expr": "sum(rate(container_cpu_usage_seconds_total{job=\"kubelet\", metrics_path=\"/metrics/cadvisor\", container!=\"\"}[5m])) by (namespace)",
           "legendFormat": "{{namespace}}",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -223,8 +225,10 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "sum(container_memory_working_set_bytes{container!=\"\"}) by (namespace)",
+          "editorMode": "builder",
+          "expr": "sum(container_memory_working_set_bytes{job=\"kubelet\", metrics_path=\"/metrics/cadvisor\", container!=\"\"}) by (namespace)",
           "legendFormat": "{{namespace}}",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -311,13 +315,17 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "sum(rate(container_network_receive_bytes_total[5m])) by (namespace)",
+          "editorMode": "builder",
+          "expr": "sum(rate(container_network_receive_bytes_total{job=\"kubelet\", metrics_path=\"/metrics/cadvisor\"}[5m])) by (namespace)",
           "legendFormat": "{{namespace}} - Receive",
+          "range": true,
           "refId": "A"
         },
         {
-          "expr": "sum(rate(container_network_transmit_bytes_total[5m])) by (namespace)",
+          "editorMode": "builder",
+          "expr": "sum(rate(container_network_transmit_bytes_total{job=\"kubelet\", metrics_path=\"/metrics/cadvisor\"}[5m])) by (namespace)",
           "legendFormat": "{{namespace}} - Transmit",
+          "range": true,
           "refId": "B"
         }
       ],
@@ -404,8 +412,10 @@
       "pluginVersion": "9.0.0",
       "targets": [
         {
-          "expr": "sum(kube_pod_container_status_restarts_total) by (namespace)",
+          "editorMode": "builder",
+          "expr": "sum(kube_pod_container_status_restarts_total{job=\"kube-state-metrics\"}) by (namespace)",
           "legendFormat": "{{namespace}}",
+          "range": true,
           "refId": "A"
         }
       ],
@@ -420,8 +430,7 @@
     "eks",
     "kubernetes",
     "pods",
-    "containers",
-    "risk-eks"
+    "containers"
   ],
   "templating": {
     "list": []
@@ -432,7 +441,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "EKS Pod/Container Monitoring - risk-eks",
-  "uid": "eks-pod-monitoring-risk-eks",
+  "title": "EKS Pod/Container Monitoring",
+  "uid": "eks-pod-monitoring",
   "version": 1
 }
