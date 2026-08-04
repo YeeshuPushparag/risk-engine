@@ -228,7 +228,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "100 - (avg(rate(node_cpu_seconds_total{job=\"node-exporter\", mode=\"idle\"}[5m])) * 100)",
+          "expr": "100 - (avg(rate(node_cpu_seconds_total{job=\"node-exporter\", mode=\"idle\"}[5m]) and on(instance) kube_node_info{job=\"kube-state-metrics\"}) * 100)",
           "legendFormat": "CPU",
           "range": true,
           "refId": "A"
@@ -294,7 +294,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "(1 - (sum(node_memory_MemAvailable_bytes{job=\"node-exporter\"}) / sum(node_memory_MemTotal_bytes{job=\"node-exporter\"}))) * 100",
+          "expr": "(1 - (sum(node_memory_MemAvailable_bytes{job=\"node-exporter\"} and on(instance) kube_node_info{job=\"kube-state-metrics\"}) / sum(node_memory_MemTotal_bytes{job=\"node-exporter\"} and on(instance) kube_node_info{job=\"kube-state-metrics\"}))) * 100",
           "legendFormat": "Memory",
           "range": true,
           "refId": "A"
@@ -469,7 +469,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "100 - (avg(rate(node_cpu_seconds_total{job=\"node-exporter\", mode=\"idle\"}[5m])) by (instance) * 100)",
+          "expr": "100 - (avg(rate(node_cpu_seconds_total{job=\"node-exporter\", mode=\"idle\"}[5m])) by (instance) * 100 and on(instance) kube_node_info{job=\"kube-state-metrics\"})",
           "legendFormat": "{{instance}}",
           "range": true,
           "refId": "A"
@@ -559,7 +559,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "(1 - (node_memory_MemAvailable_bytes{job=\"node-exporter\"} / node_memory_MemTotal_bytes{job=\"node-exporter\"})) * 100",
+          "expr": "(1 - (node_memory_MemAvailable_bytes{job=\"node-exporter\"} / node_memory_MemTotal_bytes{job=\"node-exporter\"})) * 100 and on(instance) kube_node_info{job=\"kube-state-metrics\"}",
           "legendFormat": "{{instance}}",
           "range": true,
           "refId": "A"
