@@ -18,8 +18,7 @@ kube-prometheus-stack:
 
     prometheusSpec:
       retention: 90d
-      externalLabels:
-        cluster: risk-eks
+
       nodeSelector:
         role: monitoring
 

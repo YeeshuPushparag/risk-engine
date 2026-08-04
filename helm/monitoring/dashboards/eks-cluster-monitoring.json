@@ -104,7 +104,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "count(kube_node_info{job=\"kube-state-metrics\", cluster=\"risk-eks\"})",
+          "expr": "count(kube_node_info{job=\"kube-state-metrics\"})",
           "legendFormat": "Nodes",
           "range": true,
           "refId": "A"
@@ -162,7 +162,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "count(kube_pod_info{job=\"kube-state-metrics\", cluster=\"risk-eks\"})",
+          "expr": "count(kube_pod_info{job=\"kube-state-metrics\"})",
           "legendFormat": "Pods",
           "range": true,
           "refId": "A"
@@ -228,7 +228,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "100 - (avg(rate(node_cpu_seconds_total{job=\"node-exporter\", mode=\"idle\", cluster=\"risk-eks\"}[5m])) * 100)",
+          "expr": "100 - (avg(rate(node_cpu_seconds_total{job=\"node-exporter\", mode=\"idle\"}[5m])) * 100)",
           "legendFormat": "CPU",
           "range": true,
           "refId": "A"
@@ -294,7 +294,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "(1 - (sum(node_memory_MemAvailable_bytes{job=\"node-exporter\", cluster=\"risk-eks\"}) / sum(node_memory_MemTotal_bytes{job=\"node-exporter\", cluster=\"risk-eks\"}))) * 100",
+          "expr": "(1 - (sum(node_memory_MemAvailable_bytes{job=\"node-exporter\"}) / sum(node_memory_MemTotal_bytes{job=\"node-exporter\"}))) * 100",
           "legendFormat": "Memory",
           "range": true,
           "refId": "A"
@@ -366,7 +366,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "min(kube_node_status_condition{job=\"kube-state-metrics\", condition=\"Ready\", status=\"true\", cluster=\"risk-eks\"})",
+          "expr": "min(kube_node_status_condition{job=\"kube-state-metrics\", condition=\"Ready\", status=\"true\"})",
           "legendFormat": "Nodes Ready",
           "range": true,
           "refId": "A"
@@ -385,7 +385,7 @@
       },
       "id": 7,
       "panels": [],
-      "title": "Node Resources - risk-eks",
+      "title": "Node Resources",
       "type": "row"
     },
     {
@@ -469,7 +469,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "100 - (avg(rate(node_cpu_seconds_total{job=\"node-exporter\", mode=\"idle\", cluster=\"risk-eks\"}[5m])) by (instance) * 100)",
+          "expr": "100 - (avg(rate(node_cpu_seconds_total{job=\"node-exporter\", mode=\"idle\"}[5m])) by (instance) * 100)",
           "legendFormat": "{{instance}}",
           "range": true,
           "refId": "A"
@@ -559,7 +559,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "(1 - (node_memory_MemAvailable_bytes{job=\"node-exporter\", cluster=\"risk-eks\"} / node_memory_MemTotal_bytes{job=\"node-exporter\", cluster=\"risk-eks\"})) * 100",
+          "expr": "(1 - (node_memory_MemAvailable_bytes{job=\"node-exporter\"} / node_memory_MemTotal_bytes{job=\"node-exporter\"})) * 100",
           "legendFormat": "{{instance}}",
           "range": true,
           "refId": "A"
@@ -578,7 +578,7 @@
       },
       "id": 10,
       "panels": [],
-      "title": "Pods Overview - risk-eks",
+      "title": "Pods Overview",
       "type": "row"
     },
     {
@@ -662,7 +662,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "count by (namespace) (kube_pod_info{job=\"kube-state-metrics\", cluster=\"risk-eks\"})",
+          "expr": "count by (namespace) (kube_pod_info{job=\"kube-state-metrics\"})",
           "legendFormat": "{{namespace}}",
           "range": true,
           "refId": "A"
@@ -752,7 +752,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "count by (phase) (kube_pod_status_phase{job=\"kube-state-metrics\", cluster=\"risk-eks\"})",
+          "expr": "count by (phase) (kube_pod_status_phase{job=\"kube-state-metrics\"})",
           "legendFormat": "{{phase}}",
           "range": true,
           "refId": "A"
@@ -771,7 +771,7 @@
       },
       "id": 13,
       "panels": [],
-      "title": "Cluster Components - risk-eks",
+      "title": "Cluster Components",
       "type": "row"
     },
     {
@@ -855,7 +855,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "rate(apiserver_request_total{job=\"apiserver\", cluster=\"risk-eks\"}[5m])",
+          "expr": "rate(apiserver_request_total{job=\"apiserver\"}[5m])",
           "legendFormat": "API Requests",
           "range": true,
           "refId": "A"
@@ -945,7 +945,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "rate(coredns_dns_requests_total{job=\"coredns\", cluster=\"risk-eks\"}[5m])",
+          "expr": "rate(coredns_dns_requests_total{job=\"coredns\"}[5m])",
           "legendFormat": "DNS Requests",
           "range": true,
           "refId": "A"
