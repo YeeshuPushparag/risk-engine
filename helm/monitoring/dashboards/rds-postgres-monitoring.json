@@ -112,7 +112,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_rds_cpuutilization_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_cpuutilization_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "CPU",
           "range": true,
           "refId": "A"
@@ -178,7 +178,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_rds_freeablememory_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_freeable_memory_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Free Memory",
           "range": true,
           "refId": "A"
@@ -244,7 +244,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_rds_freestoragespace_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_free_storage_space_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Free Storage",
           "range": true,
           "refId": "A"
@@ -310,7 +310,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_rds_databaseconnections_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_database_connections_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Connections",
           "range": true,
           "refId": "A"
@@ -376,7 +376,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_rds_burstbalance_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_burst_balance_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Burst Balance",
           "range": true,
           "refId": "A"
@@ -466,14 +466,14 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_rds_cpuutilization_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_cpuutilization_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "CPU Average",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_rds_cpuutilization_maximum{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_cpuutilization_maximum{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "CPU Maximum",
           "range": true,
           "refId": "B"
@@ -563,14 +563,14 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_rds_freeablememory_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_freeable_memory_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Free Memory",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_rds_swapusage_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_swap_usage_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Swap Usage",
           "range": true,
           "refId": "B"
@@ -660,7 +660,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_rds_freestoragespace_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_free_storage_space_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Free Storage",
           "range": true,
           "refId": "A"
@@ -750,14 +750,14 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_rds_readiops_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_read_iops_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Read IOPS",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_rds_writeiops_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_write_iops_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Write IOPS",
           "range": true,
           "refId": "B"
@@ -847,14 +847,14 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_rds_readthroughput_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_read_throughput_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Read Throughput",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_rds_writethroughput_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_write_throughput_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Write Throughput",
           "range": true,
           "refId": "B"
@@ -944,28 +944,28 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_rds_readlatency_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_read_latency_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Read Latency",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_rds_writelatency_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_write_latency_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Write Latency",
           "range": true,
           "refId": "B"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_rds_readlatency_maximum{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_read_latency_maximum{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Read Latency Max",
           "range": true,
           "refId": "C"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_rds_writelatency_maximum{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_write_latency_maximum{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Write Latency Max",
           "range": true,
           "refId": "D"
@@ -1055,14 +1055,14 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_rds_networkreceivethroughput_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_network_receive_throughput_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Network Receive",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_rds_networktransmitthroughput_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_network_transmit_throughput_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Network Transmit",
           "range": true,
           "refId": "B"
@@ -1152,21 +1152,21 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_rds_databaseconnections_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_database_connections_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Database Connections",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_rds_databaseconnections_maximum{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_database_connections_maximum{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Database Connections Max",
           "range": true,
           "refId": "B"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_rds_diskqueuedepth_average{dbinstanceidentifier=\"risk-postgres\"}",
+          "expr": "aws_rds_disk_queue_depth_average{dbinstance_identifier=\"risk-postgres\"}",
           "legendFormat": "Disk Queue Depth",
           "range": true,
           "refId": "C"

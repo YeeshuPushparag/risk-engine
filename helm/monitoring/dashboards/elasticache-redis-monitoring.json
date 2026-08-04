@@ -112,7 +112,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_cpuutilization_average{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_cpuutilization_average{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "CPU",
           "range": true,
           "refId": "A"
@@ -178,7 +178,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_databasememoryusagepercentage_average{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_database_memory_usage_percentage_average{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Memory Usage",
           "range": true,
           "refId": "A"
@@ -202,7 +202,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "red",
                 "value": null
               },
               {
@@ -210,8 +210,8 @@
                 "value": 500000000
               },
               {
-                "color": "red",
-                "value": 100000000
+                "color": "green",
+                "value": 1000000000
               }
             ]
           },
@@ -244,7 +244,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_freeablememory_average{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_freeable_memory_average{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Free Memory",
           "range": true,
           "refId": "A"
@@ -310,7 +310,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_currconnections_average{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_curr_connections_average{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Connections",
           "range": true,
           "refId": "A"
@@ -376,7 +376,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_curritems_average{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_curr_items_average{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Items",
           "range": true,
           "refId": "A"
@@ -442,7 +442,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_evictions_sum{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_evictions_sum{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Evictions",
           "range": true,
           "refId": "A"
@@ -475,7 +475,7 @@
               },
               {
                 "color": "red",
-                "value": 1
+                "value": 0.8
               }
             ]
           },
@@ -508,7 +508,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_cachehits_sum{cacheclusterid=\"risk-redis\"} / (aws_elasticache_cachehits_sum{cacheclusterid=\"risk-redis\"} + aws_elasticache_cachemisses_sum{cacheclusterid=\"risk-redis\"})",
+          "expr": "aws_elasticache_cache_hits_sum{cache_cluster_id=\"risk-redis\"} / (aws_elasticache_cache_hits_sum{cache_cluster_id=\"risk-redis\"} + aws_elasticache_cache_misses_sum{cache_cluster_id=\"risk-redis\"})",
           "legendFormat": "Hit Rate",
           "range": true,
           "refId": "A"
@@ -537,15 +537,15 @@
               },
               {
                 "color": "yellow",
-                "value": 1000
+                "value": 10
               },
               {
                 "color": "red",
-                "value": 5000
+                "value": 30
               }
             ]
           },
-          "unit": "short"
+          "unit": "s"
         },
         "overrides": []
       },
@@ -574,7 +574,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_replicationlag_average{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_replication_lag_average{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Replication Lag",
           "range": true,
           "refId": "A"
@@ -664,21 +664,21 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_cpuutilization_average{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_cpuutilization_average{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "CPU Average",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_cpuutilization_maximum{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_cpuutilization_maximum{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "CPU Maximum",
           "range": true,
           "refId": "B"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_enginecpuutilization_average{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_engine_cpuutilization_average{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Engine CPU",
           "range": true,
           "refId": "C"
@@ -768,14 +768,14 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_databasememoryusagepercentage_average{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_database_memory_usage_percentage_average{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Memory Usage %",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_databasememoryusagepercentage_maximum{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_database_memory_usage_percentage_maximum{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Memory Usage % Max",
           "range": true,
           "refId": "B"
@@ -865,14 +865,14 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_freeablememory_average{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_freeable_memory_average{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Free Memory",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_swapusage_average{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_swap_usage_average{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Swap Usage",
           "range": true,
           "refId": "B"
@@ -962,21 +962,21 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_currconnections_average{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_curr_connections_average{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Current Connections",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_currconnections_maximum{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_curr_connections_maximum{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Current Connections Max",
           "range": true,
           "refId": "B"
         },
         {
           "editorMode": "builder",
-          "expr": "rate(aws_elasticache_newconnections_sum{cacheclusterid=\"risk-redis\"}[5m])",
+          "expr": "rate(aws_elasticache_new_connections_sum{cache_cluster_id=\"risk-redis\"}[5m])",
           "legendFormat": "New Connections/s",
           "range": true,
           "refId": "C"
@@ -1066,21 +1066,21 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_cachehits_sum{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_cache_hits_sum{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Cache Hits",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_cachemisses_sum{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_cache_misses_sum{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Cache Misses",
           "range": true,
           "refId": "B"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_evictions_sum{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_evictions_sum{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Evictions",
           "range": true,
           "refId": "C"
@@ -1170,7 +1170,7 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_curritems_average{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_curr_items_average{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Current Items",
           "range": true,
           "refId": "A"
@@ -1260,14 +1260,14 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_networkbytesin_average{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_network_bytes_in_average{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Network In",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_networkbytesout_average{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_network_bytes_out_average{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Network Out",
           "range": true,
           "refId": "B"
@@ -1357,14 +1357,14 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_replicationlag_average{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_replication_lag_average{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Replication Lag",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "builder",
-          "expr": "aws_elasticache_replicationlag_maximum{cacheclusterid=\"risk-redis\"}",
+          "expr": "aws_elasticache_replication_lag_maximum{cache_cluster_id=\"risk-redis\"}",
           "legendFormat": "Replication Lag Max",
           "range": true,
           "refId": "B"

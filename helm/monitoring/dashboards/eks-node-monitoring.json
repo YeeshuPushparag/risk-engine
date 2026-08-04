@@ -52,7 +52,7 @@
       },
       "id": 1,
       "panels": [],
-      "title": "Cluster Overview",
+      "title": "Node Overview",
       "type": "row"
     },
     {
@@ -65,122 +65,7 @@
           "color": {
             "mode": "thresholds"
           },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 0,
-        "y": 1
-      },
-      "id": 2,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "pluginVersion": "9.0.0",
-      "targets": [
-        {
-          "editorMode": "builder",
-          "expr": "count(kube_node_info{job=\"kube-state-metrics\"})",
-          "legendFormat": "Nodes",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Total Nodes",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 4,
-        "y": 1
-      },
-      "id": 3,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "pluginVersion": "9.0.0",
-      "targets": [
-        {
-          "editorMode": "builder",
-          "expr": "count(kube_pod_info{job=\"kube-state-metrics\"})",
-          "legendFormat": "Pods",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Total Pods",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
+          "decimals": 2,
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -204,12 +89,12 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 4,
+        "h": 6,
         "w": 4,
-        "x": 8,
+        "x": 0,
         "y": 1
       },
-      "id": 4,
+      "id": 2,
       "options": {
         "colorMode": "value",
         "graphMode": "area",
@@ -234,7 +119,7 @@
           "refId": "A"
         }
       ],
-      "title": "Cluster CPU Usage",
+      "title": "Avg CPU Usage",
       "type": "stat"
     },
     {
@@ -247,6 +132,7 @@
           "color": {
             "mode": "thresholds"
           },
+          "decimals": 2,
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -270,7 +156,141 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 4,
+        "h": 6,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [
+        {
+          "editorMode": "builder",
+          "expr": "(1 - (avg(node_memory_MemAvailable_bytes{job=\"node-exporter\"}) / avg(node_memory_MemTotal_bytes{job=\"node-exporter\"}))) * 100",
+          "legendFormat": "Memory",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Avg Memory Usage",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 75
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [
+        {
+          "editorMode": "builder",
+          "expr": "(1 - (avg(node_filesystem_avail_bytes{job=\"node-exporter\", mountpoint=\"/\"}) / avg(node_filesystem_size_bytes{job=\"node-exporter\", mountpoint=\"/\"}))) * 100",
+          "legendFormat": "Disk",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Avg Disk Usage",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 2
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
         "w": 4,
         "x": 12,
         "y": 1
@@ -294,13 +314,13 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "(1 - (sum(node_memory_MemAvailable_bytes{job=\"node-exporter\"}) / sum(node_memory_MemTotal_bytes{job=\"node-exporter\"}))) * 100",
-          "legendFormat": "Memory",
+          "expr": "avg(node_load1{job=\"node-exporter\"})",
+          "legendFormat": "Load",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Cluster Memory Usage",
+      "title": "Avg Load (1m)",
       "type": "stat"
     },
     {
@@ -318,11 +338,11 @@
               "options": {
                 "0": {
                   "color": "red",
-                  "text": "Warning"
+                  "text": "DOWN"
                 },
                 "1": {
                   "color": "green",
-                  "text": "OK"
+                  "text": "UP"
                 }
               },
               "type": "value"
@@ -342,7 +362,7 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 4,
+        "h": 6,
         "w": 4,
         "x": 16,
         "y": 1
@@ -367,12 +387,12 @@
         {
           "editorMode": "builder",
           "expr": "min(kube_node_status_condition{job=\"kube-state-metrics\", condition=\"Ready\", status=\"true\"})",
-          "legendFormat": "Nodes Ready",
+          "legendFormat": "Status",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Cluster Health",
+      "title": "Node Status",
       "type": "stat"
     },
     {
@@ -381,11 +401,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 5
+        "y": 7
       },
       "id": 7,
       "panels": [],
-      "title": "Node Resources",
+      "title": "Node Resources Over Time",
       "type": "row"
     },
     {
@@ -450,7 +470,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 6
+        "y": 8
       },
       "id": 8,
       "options": {
@@ -475,7 +495,7 @@
           "refId": "A"
         }
       ],
-      "title": "Node CPU Usage",
+      "title": "CPU Usage by Node",
       "type": "timeseries"
     },
     {
@@ -540,7 +560,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 6
+        "y": 8
       },
       "id": 9,
       "options": {
@@ -565,21 +585,8 @@
           "refId": "A"
         }
       ],
-      "title": "Node Memory Usage",
+      "title": "Memory Usage by Node",
       "type": "timeseries"
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 14
-      },
-      "id": 10,
-      "panels": [],
-      "title": "Pods Overview",
-      "type": "row"
     },
     {
       "datasource": {
@@ -643,7 +650,97 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 15
+        "y": 16
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "9.0.0",
+      "targets": [
+        {
+          "editorMode": "builder",
+          "expr": "node_load1{job=\"node-exporter\"}",
+          "legendFormat": "{{instance}} - 1m",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Node Load Average (1m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
       },
       "id": 11,
       "options": {
@@ -662,103 +759,13 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "count by (namespace) (kube_pod_info{job=\"kube-state-metrics\"})",
-          "legendFormat": "{{namespace}}",
+          "expr": "count by (node) (kube_pod_info{job=\"kube-state-metrics\"})",
+          "legendFormat": "{{node}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Pods by Namespace",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 15
-      },
-      "id": 12,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "9.0.0",
-      "targets": [
-        {
-          "editorMode": "builder",
-          "expr": "count by (phase) (kube_pod_status_phase{job=\"kube-state-metrics\"})",
-          "legendFormat": "{{phase}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "Pod Status",
+      "title": "Pods per Node",
       "type": "timeseries"
     },
     {
@@ -767,11 +774,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 23
+        "y": 24
       },
-      "id": 13,
+      "id": 12,
       "panels": [],
-      "title": "Cluster Components",
+      "title": "Node Network & Disk",
       "type": "row"
     },
     {
@@ -828,7 +835,7 @@
               }
             ]
           },
-          "unit": "reqps"
+          "unit": "bps"
         },
         "overrides": []
       },
@@ -836,9 +843,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 24
+        "y": 25
       },
-      "id": 14,
+      "id": 13,
       "options": {
         "legend": {
           "calcs": [],
@@ -855,13 +862,20 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "rate(apiserver_request_total{job=\"apiserver\"}[5m])",
-          "legendFormat": "API Requests",
+          "expr": "rate(node_network_receive_bytes_total{job=\"node-exporter\", device=\"ens5\"}[5m]) * 8",
+          "legendFormat": "{{instance}} - Receive",
           "range": true,
           "refId": "A"
+        },
+        {
+          "editorMode": "builder",
+          "expr": "rate(node_network_transmit_bytes_total{job=\"node-exporter\", device=\"ens5\"}[5m]) * 8",
+          "legendFormat": "{{instance}} - Transmit",
+          "range": true,
+          "refId": "B"
         }
       ],
-      "title": "API Server Requests",
+      "title": "Network Traffic by Node",
       "type": "timeseries"
     },
     {
@@ -918,7 +932,7 @@
               }
             ]
           },
-          "unit": "reqps"
+          "unit": "bytes"
         },
         "overrides": []
       },
@@ -926,9 +940,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 24
+        "y": 25
       },
-      "id": 15,
+      "id": 14,
       "options": {
         "legend": {
           "calcs": [],
@@ -945,13 +959,20 @@
       "targets": [
         {
           "editorMode": "builder",
-          "expr": "rate(coredns_dns_requests_total{job=\"coredns\"}[5m])",
-          "legendFormat": "DNS Requests",
+          "expr": "rate(node_disk_read_bytes_total{job=\"node-exporter\", device=\"nvme0n1\"}[5m])",
+          "legendFormat": "{{instance}} - Read",
           "range": true,
           "refId": "A"
+        },
+        {
+          "editorMode": "builder",
+          "expr": "rate(node_disk_written_bytes_total{job=\"node-exporter\", device=\"nvme0n1\"}[5m])",
+          "legendFormat": "{{instance}} - Write",
+          "range": true,
+          "refId": "B"
         }
       ],
-      "title": "CoreDNS Requests",
+      "title": "Disk I/O by Node",
       "type": "timeseries"
     }
   ],
@@ -961,7 +982,7 @@
   "tags": [
     "eks",
     "kubernetes",
-    "cluster"
+    "nodes"
   ],
   "templating": {
     "list": []
@@ -972,7 +993,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "EKS Cluster Overview",
-  "uid": "eks-cluster-overview",
+  "title": "EKS Node Monitoring",
+  "uid": "eks-node-monitoring",
   "version": 1
 }
