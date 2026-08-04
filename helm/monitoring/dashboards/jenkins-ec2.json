@@ -1,0 +1,136 @@
+{
+  "dashboard": {
+    "title": "Jenkins EC2 Monitoring",
+    "tags": ["jenkins", "ec2", "aws"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "CPU Usage",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "100 - (avg(rate(node_cpu_seconds_total{job=\"jenkins-ec2\",mode=\"idle\"}[5m])) * 100)",
+            "legendFormat": "CPU %"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 100
+          }
+        }
+      },
+      {
+        "title": "Memory Usage",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+        "targets": [
+          {
+            "expr": "(1 - (node_memory_MemAvailable_bytes{job=\"jenkins-ec2\"} / node_memory_MemTotal_bytes{job=\"jenkins-ec2\"})) * 100",
+            "legendFormat": "Memory %"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 100
+          }
+        }
+      },
+      {
+        "title": "Disk Usage",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+        "targets": [
+          {
+            "expr": "(1 - (node_filesystem_avail_bytes{job=\"jenkins-ec2\",mountpoint=\"/\"} / node_filesystem_size_bytes{job=\"jenkins-ec2\",mountpoint=\"/\"})) * 100",
+            "legendFormat": "Disk %"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 100
+          }
+        }
+      },
+      {
+        "title": "Network Traffic",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+        "targets": [
+          {
+            "expr": "rate(node_network_receive_bytes_total{job=\"jenkins-ec2\"}[5m])",
+            "legendFormat": "In"
+          },
+          {
+            "expr": "rate(node_network_transmit_bytes_total{job=\"jenkins-ec2\"}[5m])",
+            "legendFormat": "Out"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "bytes"
+          }
+        }
+      },
+      {
+        "title": "System Load",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+        "targets": [
+          {
+            "expr": "node_load1{job=\"jenkins-ec2\"}",
+            "legendFormat": "1 min"
+          },
+          {
+            "expr": "node_load5{job=\"jenkins-ec2\"}",
+            "legendFormat": "5 min"
+          },
+          {
+            "expr": "node_load15{job=\"jenkins-ec2\"}",
+            "legendFormat": "15 min"
+          }
+        ]
+      },
+      {
+        "title": "Process Count",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 12, "x": 12, "y": 16},
+        "targets": [
+          {
+            "expr": "node_procs_running{job=\"jenkins-ec2\"}",
+            "legendFormat": "Running"
+          },
+          {
+            "expr": "node_procs_blocked{job=\"jenkins-ec2\"}",
+            "legendFormat": "Blocked"
+          }
+        ]
+      },
+      {
+        "title": "Up Time",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 12, "x": 0, "y": 24},
+        "targets": [
+          {
+            "expr": "time() - node_boot_time_seconds{job=\"jenkins-ec2\"}",
+            "legendFormat": "Uptime"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "decimals": 0
+          }
+        }
+      }
+    ],
+    "schemaVersion": 27,
+    "version": 0
+  }
+}

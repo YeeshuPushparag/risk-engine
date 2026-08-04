@@ -1,0 +1,96 @@
+{
+  "dashboard": {
+    "title": "EKS Cluster Monitoring",
+    "tags": ["kubernetes", "eks", "aws"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "Node CPU Usage",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+            "legendFormat": "{{instance}}"
+          }
+        ]
+      },
+      {
+        "title": "Node Memory Usage",
+        "type": "graph",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+        "targets": [
+          {
+            "expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100",
+            "legendFormat": "{{instance}}"
+          }
+        ]
+      },
+      {
+        "title": "Pod Status by Namespace",
+        "type": "stat",
+        "gridPos": {"h": 6, "w": 8, "x": 0, "y": 8},
+        "targets": [
+          {
+            "expr": "count(kube_pod_status_phase{phase=\"Running\"}) by (namespace)",
+            "legendFormat": "Running"
+          },
+          {
+            "expr": "count(kube_pod_status_phase{phase=\"Pending\"}) by (namespace)",
+            "legendFormat": "Pending"
+          },
+          {
+            "expr": "count(kube_pod_status_phase{phase=\"Failed\"}) by (namespace)",
+            "legendFormat": "Failed"
+          }
+        ]
+      },
+      {
+        "title": "API Server Request Rate",
+        "type": "graph",
+        "gridPos": {"h": 6, "w": 8, "x": 8, "y": 8},
+        "targets": [
+          {
+            "expr": "sum(rate(apiserver_request_total[5m])) by (code)",
+            "legendFormat": "{{code}}"
+          }
+        ]
+      },
+      {
+        "title": "API Server Latency",
+        "type": "graph",
+        "gridPos": {"h": 6, "w": 8, "x": 16, "y": 8},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(apiserver_request_duration_seconds_bucket[5m])) by (verb,le))",
+            "legendFormat": "{{verb}}"
+          }
+        ]
+      },
+      {
+        "title": "CoreDNS Request Rate",
+        "type": "graph",
+        "gridPos": {"h": 6, "w": 12, "x": 0, "y": 14},
+        "targets": [
+          {
+            "expr": "sum(rate(coredns_dns_requests_total[5m])) by (type)",
+            "legendFormat": "{{type}}"
+          }
+        ]
+      },
+      {
+        "title": "Node Disk Usage",
+        "type": "graph",
+        "gridPos": {"h": 6, "w": 12, "x": 12, "y": 14},
+        "targets": [
+          {
+            "expr": "(1 - (node_filesystem_avail_bytes / node_filesystem_size_bytes)) * 100",
+            "legendFormat": "{{instance}}"
+          }
+        ]
+      }
+    ],
+    "schemaVersion": 27,
+    "version": 0
+  }
+}
