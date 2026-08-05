@@ -1,5 +1,5 @@
 {
-  "title": "Daily Pipelines Overview (6 Assets)",
+  "title": "Daily Pipelines Overview (10 Assets)",
   "uid": "daily-pipelines-overview",
   "timezone": "utc",
   "schemaVersion": 39,
@@ -13,7 +13,7 @@
     {
       "id": 1,
       "type": "row",
-      "title": "Daily Batch Pipelines \u2014 6 Assets (latest run)",
+      "title": "Daily Batch Pipelines \u2014 10 Assets (latest run)",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -33,7 +33,7 @@
       },
       "targets": [
         {
-          "expr": "pipeline_status{pipeline=~\"market_features_s3|equity_risk_prediction_pipeline|fx_exposure_pipeline|fx_update_pipeline|commodity_update_pipeline|commodity_processing_pipeline|bonds_update_pipeline|bonds_processing_pipeline|derivatives_pipeline|collateral_pipeline\"}",
+          "expr": "pipeline_status{job=\"pushgateway\", pipeline=~\"market_features_s3|equity_risk_prediction_pipeline|fx_exposure_pipeline|fx_update_pipeline|commodity_update_pipeline|commodity_processing_pipeline|bonds_update_pipeline|bonds_processing_pipeline|derivatives_pipeline|collateral_pipeline\"}",
           "format": "table",
           "instant": true
         }
@@ -46,7 +46,8 @@
               "Time": true,
               "__name__": true,
               "instance": true,
-              "job": true
+              "job": true,
+              "exported_job": true
             },
             "renameByName": {
               "pipeline": "Pipeline",
@@ -109,7 +110,7 @@
       },
       "targets": [
         {
-          "expr": "count(pipeline_status{pipeline=~\"market_features_s3|equity_risk_prediction_pipeline|fx_exposure_pipeline|fx_update_pipeline|commodity_update_pipeline|commodity_processing_pipeline|bonds_update_pipeline|bonds_processing_pipeline|derivatives_pipeline|collateral_pipeline\"} == 0)"
+          "expr": "count(pipeline_status{job=\"pushgateway\", pipeline=~\"market_features_s3|equity_risk_prediction_pipeline|fx_exposure_pipeline|fx_update_pipeline|commodity_update_pipeline|commodity_processing_pipeline|bonds_update_pipeline|bonds_processing_pipeline|derivatives_pipeline|collateral_pipeline\"} == 0)"
         }
       ],
       "fieldConfig": {
@@ -142,7 +143,7 @@
       },
       "targets": [
         {
-          "expr": "count(pipeline_status{pipeline=~\"market_features_s3|equity_risk_prediction_pipeline|fx_exposure_pipeline|fx_update_pipeline|commodity_update_pipeline|commodity_processing_pipeline|bonds_update_pipeline|bonds_processing_pipeline|derivatives_pipeline|collateral_pipeline\"} == 1)"
+          "expr": "count(pipeline_status{job=\"pushgateway\", pipeline=~\"market_features_s3|equity_risk_prediction_pipeline|fx_exposure_pipeline|fx_update_pipeline|commodity_update_pipeline|commodity_processing_pipeline|bonds_update_pipeline|bonds_processing_pipeline|derivatives_pipeline|collateral_pipeline\"} == 1)"
         }
       ],
       "fieldConfig": {
@@ -175,7 +176,7 @@
       },
       "targets": [
         {
-          "expr": "pipeline_runtime_seconds{pipeline=~\"market_features_s3|equity_risk_prediction_pipeline|fx_exposure_pipeline|fx_update_pipeline|commodity_update_pipeline|commodity_processing_pipeline|bonds_update_pipeline|bonds_processing_pipeline|derivatives_pipeline|collateral_pipeline\"}",
+          "expr": "pipeline_runtime_seconds{job=\"pushgateway\", pipeline=~\"market_features_s3|equity_risk_prediction_pipeline|fx_exposure_pipeline|fx_update_pipeline|commodity_update_pipeline|commodity_processing_pipeline|bonds_update_pipeline|bonds_processing_pipeline|derivatives_pipeline|collateral_pipeline\"}",
           "legendFormat": "{{pipeline}}"
         }
       ],
@@ -207,7 +208,7 @@
       },
       "targets": [
         {
-          "expr": "pipeline_status{pipeline=~\"market_features_s3|equity_risk_prediction_pipeline|fx_exposure_pipeline|fx_update_pipeline|commodity_update_pipeline|commodity_processing_pipeline|bonds_update_pipeline|bonds_processing_pipeline|derivatives_pipeline|collateral_pipeline\"}",
+          "expr": "pipeline_status{job=\"pushgateway\", pipeline=~\"market_features_s3|equity_risk_prediction_pipeline|fx_exposure_pipeline|fx_update_pipeline|commodity_update_pipeline|commodity_processing_pipeline|bonds_update_pipeline|bonds_processing_pipeline|derivatives_pipeline|collateral_pipeline\"}",
           "legendFormat": "{{pipeline}}"
         }
       ]
