@@ -67,6 +67,26 @@ resource "kubernetes_role" "streaming_scaler" {
     ]
   }
 
+  # Spark PersistentVolumeClaims
+  rule {
+    api_groups = [""]
+
+    resources = [
+      "persistentvolumeclaims"
+    ]
+
+    verbs = [
+      "create",
+      "delete",
+      "deletecollection",
+      "get",
+      "list",
+      "watch",
+      "patch",
+      "update"
+    ]
+  }
+
   depends_on = [
     kubernetes_namespace_v1.streaming
   ]

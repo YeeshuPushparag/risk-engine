@@ -1188,39 +1188,83 @@ def rebuild_state_from_s3() -> None:
 
     # Filter to only events within the rebuild window
     if "timestamp" not in combined.columns:
-        log("WARNING", "FX state rebuild: timestamp column missing — skipping rebuild")
+        log(
+            "WARNING",
+            "FX state rebuild: timestamp column missing - skipping rebuild"
+        )
         return
 
-    combined["_evt_dt"] = pd.to_datetime(
+    # Normalize every event timestamp to timezone-aware UTC.
+    # Using UTC internally prevents tz-naive/tz-aware comparison errors.
+    combined["_evt_dt_utc"] = pd.to_datetime(
         combined["timestamp"],
         utc=True,
-        errors="coerce"
-    ).dt.tz_convert("America/New_York")
+        errors="coerce",
+    )
 
-    combined = combined.dropna(subset=["_evt_dt"])
+    # Remove rows whose timestamps could not be parsed.
+    combined = combined.dropna(subset=["_evt_dt_utc"])
 
-    # Compare entirely in ET — no UTC intermediate — so rebuild
-    # filtering matches the ET-based partitioning used everywhere else.
-    rebuild_start_et_ts = pd.Timestamp(rebuild_start_et)
-    now_et_ts           = pd.Timestamp(now_et)
+    # Convert Pendulum ET boundaries to standard UTC Pandas timestamps.
+    rebuild_start_utc = pd.to_datetime(
+        rebuild_start_et.isoformat(),
+        utc=True,
+    )
 
+    rebuild_end_utc = pd.to_datetime(
+        now_et.isoformat(),
+        utc=True,
+    )
+
+    log(
+        "INFO",
+        "FX state rebuild timestamp normalization",
+        {
+            "event_dtype": str(combined["_evt_dt_utc"].dtype),
+            "rebuild_start_utc": rebuild_start_utc.isoformat(),
+            "rebuild_end_utc": rebuild_end_utc.isoformat(),
+            "valid_timestamp_rows": int(
+                combined["_evt_dt_utc"].notna().sum()
+            ),
+        },
+    )
+
+    # Filter using timezone-aware UTC values on both sides.
     combined = combined[
-        (combined["_evt_dt"] >= rebuild_start_et_ts)
-        & (combined["_evt_dt"] <= now_et_ts)
+        combined["_evt_dt_utc"].between(
+            rebuild_start_utc,
+            rebuild_end_utc,
+            inclusive="both",
+        )
     ]
 
     if combined.empty:
-        log("INFO", "FX state rebuild: no events in rebuild window after filtering",
-            {"rebuild_start_et": rebuild_start_et.isoformat(),
-             "now_et":           now_et.isoformat()})
+        log(
+            "INFO",
+            "FX state rebuild: no events in rebuild window after filtering",
+            {
+                "rebuild_start_et": rebuild_start_et.isoformat(),
+                "now_et": now_et.isoformat(),
+            },
+        )
         return
 
-    # Sort chronologically so buffer order matches live ingestion order
-    combined = combined.sort_values("_evt_dt").reset_index(drop=True)
-    combined = combined.drop(columns=["_evt_dt"])
+    # Sort chronologically so buffer order matches live ingestion order.
+    combined = combined.sort_values(
+        "_evt_dt_utc"
+    ).reset_index(drop=True)
+
+    # Remove temporary internal timestamp column.
+    combined = combined.drop(columns=["_evt_dt_utc"])
 
     # Required OHLC columns for compute_fx_metrics
-    required_cols = {"currency_pair", "open", "high", "low", "close"}
+    required_cols = {
+        "currency_pair",
+        "open",
+        "high",
+        "low",
+        "close",
+    }
     missing = required_cols - set(combined.columns)
     if missing:
         log("WARNING", "FX state rebuild: required columns missing — skipping rebuild",
@@ -2879,11 +2923,29 @@ if __name__ == "__main__":
         log("INFO", "Starting Kafka stream pipeline",
             {"topic": CONFIG["topic"], "run_mode": CONFIG["run_mode"]})
 
-        # State rebuild — live recovery only.
-        # Skipped automatically for: backfill, fresh session starts
-        # (within grace window after weekly open), closed market periods.
-        # Previous weekly session data is NEVER loaded.
-        rebuild_state_from_s3()
+        # State rebuild - live recovery only.
+        # Skipped automatically for backfill, fresh session starts,
+        # closed market periods and replay mode.
+        #
+        # A rebuild failure must not terminate the Kafka consumer.
+        try:
+            rebuild_state_from_s3()
+
+        except Exception as exc:
+            log(
+                "ERROR",
+                "FX state rebuild failed - continuing with empty buffers",
+                {
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+
+            # State rebuild is a recovery optimization.
+            # Live processing can start with empty rolling buffers and warm up again.
+            pair_buffers.clear()
+
+        # Continue starting Kafka regardless of state-rebuild result.
         wait_for_topic()
 
         if IS_LIVE:

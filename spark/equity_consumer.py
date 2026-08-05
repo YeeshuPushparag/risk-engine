@@ -1009,29 +1009,68 @@ def rebuild_state_from_s3() -> None:
         log("WARNING", "State rebuild: timestamp column missing — skipping rebuild")
         return
 
-    combined["_evt_dt"] = pd.to_datetime(
-        combined["timestamp"], utc=True, errors="coerce"
-    ).dt.tz_convert("America/New_York")
-    combined = combined.dropna(subset=["_evt_dt"])
+    # Normalize stored event timestamps to timezone-aware UTC.
+    combined["_evt_dt_utc"] = pd.to_datetime(
+        combined["timestamp"],
+        utc=True,
+        errors="coerce",
+    )
 
-    # Compare entirely in ET — no UTC intermediate — so rebuild
-    # filtering matches the ET-based partitioning used everywhere else.
-    rebuild_start_et_ts = pd.Timestamp(rebuild_start_et)
-    now_et_ts           = pd.Timestamp(now_et)
+    # Remove rows with invalid or unparseable timestamps.
+    combined = combined.dropna(subset=["_evt_dt_utc"])
 
+    # Convert Pendulum ET boundaries to UTC-aware Pandas timestamps.
+    # Convert through ISO strings to avoid Pendulum/Pandas timezone issues.
+    rebuild_start_utc = pd.to_datetime(
+        rebuild_start_et.isoformat(),
+        utc=True,
+    )
+
+    rebuild_end_utc = pd.to_datetime(
+        now_et.isoformat(),
+        utc=True,
+    )
+
+    log(
+        "INFO",
+        "Equity state rebuild timestamp normalization",
+        {
+            "event_dtype": str(combined["_evt_dt_utc"].dtype),
+            "rebuild_start_utc": rebuild_start_utc.isoformat(),
+            "rebuild_end_utc": rebuild_end_utc.isoformat(),
+            "valid_timestamp_rows": int(
+                combined["_evt_dt_utc"].notna().sum()
+            ),
+        },
+    )
+
+    # Compare UTC-aware timestamps on both sides.
     combined = combined[
-        (combined["_evt_dt"] >= rebuild_start_et_ts)
-        & (combined["_evt_dt"] <= now_et_ts)
+        combined["_evt_dt_utc"].between(
+            rebuild_start_utc,
+            rebuild_end_utc,
+            inclusive="both",
+        )
     ]
 
     if combined.empty:
-        log("INFO", "State rebuild: no events in rebuild window after filtering",
-            {"rebuild_start_et": rebuild_start_et.isoformat(),
-             "now_et":           now_et.isoformat()})
+        log(
+            "INFO",
+            "State rebuild: no events in rebuild window after filtering",
+            {
+                "rebuild_start_et": rebuild_start_et.isoformat(),
+                "now_et": now_et.isoformat(),
+            },
+        )
         return
 
-    combined = combined.sort_values("_evt_dt").reset_index(drop=True)
-    combined = combined.drop(columns=["_evt_dt"])
+    # Sort chronologically using the normalized UTC timestamp.
+    combined = combined.sort_values(
+        "_evt_dt_utc"
+    ).reset_index(drop=True)
+
+    # Remove only the temporary timestamp column.
+    combined = combined.drop(columns=["_evt_dt_utc"])
 
     required_cols = {"ticker", "open", "high", "low", "close", "volume"}
     missing = required_cols - set(combined.columns)
@@ -2496,7 +2535,24 @@ if __name__ == "__main__":
         # Skipped automatically for: backfill, replay, fresh session starts,
         # pre-market startups, and weekends. Previous trading session data
         # is NEVER loaded.
-        rebuild_state_from_s3()
+        try:
+            rebuild_state_from_s3()
+
+        except Exception as exc:
+            log(
+                "ERROR",
+                "Equity state rebuild failed - continuing with empty buffers",
+                {
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+
+            # Rebuild is a recovery optimization.
+            # Live data will rebuild the buffers naturally.
+            ticker_buffers.clear()
+
+        # Start Kafka even if state rebuild fails.
         wait_for_topic()
 
         if IS_LIVE:   
