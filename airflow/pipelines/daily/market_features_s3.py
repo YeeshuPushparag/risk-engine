@@ -1485,7 +1485,11 @@ def write_dlq(
         if not failed_tickers:
             continue
 
-        failed = sorted(set(failed_tickers))
+        # Deduplicate with normalization to handle special characters consistently
+        ticker_map = {}
+        for t in failed_tickers:
+            ticker_map[t.strip().upper()] = t
+        failed = sorted(ticker_map.values())
 
         key = f"{prefix}dlq/run_id={run_id}/date={date_str}/failed_tickers.json"
 
