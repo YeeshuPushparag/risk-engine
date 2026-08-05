@@ -185,6 +185,7 @@ CONFIG: dict = {
     "replay_date": os.getenv("REPLAY_DATE", ""),   # "YYYY-MM-DD"
     "replay_hour": os.getenv("REPLAY_HOUR", ""),   # "HH" optional
 
+    "backfill_date": os.getenv("BACKFILL_DATE", ""),
     # S3
     "read_bucket":   "pushpa-equity-bucket",
     "write_bucket":  "risk-platform-pushpa-analytics",

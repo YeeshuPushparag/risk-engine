@@ -178,6 +178,9 @@ CONFIG: dict = {
     # Run mode
     "run_mode":              os.getenv("RUN_MODE", "live").lower(),
 
+    "backfill_start_date":   os.getenv("BACKFILL_START_DATE", ""),
+    "backfill_end_date":     os.getenv("BACKFILL_END_DATE", ""),
+
     # Replay
     "replay_path":           os.getenv("REPLAY_PATH", "live"),   # "live" | "backfill"
     "replay_start_date":     os.getenv("REPLAY_START_DATE", ""),   # "YYYY-MM-DD"
@@ -3088,8 +3091,8 @@ if __name__ == "__main__":
             
             send_alert(
                 f"FX BACKFILL COMPLETE | "
-                f"start date={CONFIG['replay_start_date']}"
-                f"end date={CONFIG['replay_end_date']}"
+                f"start date={CONFIG['backfill_start_date']}"
+                f"end date={CONFIG['backfill_end_date']}"
             )
             # Sleep 10 minutes after backfill completes before exiting
             log("INFO", "Backfill complete - waiting 10 minutes before final exit")
