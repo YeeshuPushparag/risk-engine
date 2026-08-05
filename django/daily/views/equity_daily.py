@@ -56,22 +56,36 @@ def read_csv_from_s3(key):
     )
 
 def read_parquet_from_s3(key):
+    print("ENTER read_parquet_from_s3")
+
     cache_key = "ticker_manager_mapping_df"
 
+    print("Before cache.get")
     df = cache.get(cache_key)
+    print("After cache.get:", type(df))
 
     if df is None:
+        print("Before s3.get_object")
+
         response = s3.get_object(
             Bucket=BUCKET_NAME,
             Key=key
         )
 
-        df = pd.read_parquet(
-            BytesIO(response["Body"].read())
-        )
+        print("After s3.get_object")
+
+        body = response["Body"].read()
+        print("After body.read()", len(body))
+
+        df = pd.read_parquet(BytesIO(body))
+        print("After pd.read_parquet", df.shape)
 
         cache.set(cache_key, df, timeout=3600)
+        print("After cache.set")
+    else:
+        print("Cache hit", df.shape)
 
+    print("EXIT read_parquet_from_s3")
     return df
 
 def asset_managers_list(request):
@@ -206,21 +220,12 @@ def _get_stress_params(request):
 # 1️⃣ EQUITY OVERVIEW
 # ------------------------------------------------
 def equity_overview(request):
-    print("=== equity_overview START ===")
-
     date = request.GET.get("date")
-    print(f"date={date}")
-
     ret, vol, var, is_stressed, scenario = _get_stress_params(request)
-    print("Stress params loaded")
 
     qs = EquityData.objects.filter(date=date)
-    print(f"Rows={qs.count()}")
 
     exposure = qs.aggregate(total=Sum("mtm_value"))["total"] or 0.0
-    print(f"Exposure={exposure}")
-
-    print("Running aggregate")
 
     data = qs.aggregate(
         total_exposure=Sum("mtm_value"),
@@ -235,12 +240,7 @@ def equity_overview(request):
         hhi_sector=Avg("hhi_sector"),
     )
 
-    print("Aggregate complete")
-    print(data)
-
     if is_stressed:
-        print("Applying stress")
-
         data["daily_pnl"] += exposure * ret
         data["expected_return"] += ret
         data["var_95"] *= var
@@ -249,33 +249,25 @@ def equity_overview(request):
         data["cvar_99"] *= var
         data["ex_ante_volatility"] *= vol
 
-        print("Stress complete")
-
-    print("Getting manager count")
     data["manager_count"] = get_total_manager_count()
-    print(data["manager_count"])
-
-    print("Getting total ticker count")
     data["total_ticker_count"] = get_total_ticker_count()
-    print(data["total_ticker_count"])
-
-    print("Getting available ticker count")
     data["ticker_count"] = qs.values("ticker").distinct().count()
-    print(data["ticker_count"])
-
     data["is_stressed"] = is_stressed
 
-    print("Returning response")
-    print("=== equity_overview END ===")
-
     return JsonResponse(data)
+
 
 # ------------------------------------------------
 # 2️⃣ MANAGERS
 # ------------------------------------------------
 def equity_managers(request):
+    print("=== equity_managers START ===")
+
     date = request.GET.get("date")
+    print(f"date={date}")
+
     ret, vol, var, is_stressed, scenario = _get_stress_params(request)
+    print("Stress params loaded")
 
     total_exposure = (
         EquityData.objects
@@ -283,6 +275,9 @@ def equity_managers(request):
         .aggregate(total=Sum("mtm_value"))["total"]
         or 0.0
     )
+    print(f"total_exposure={total_exposure}")
+
+    print("Building queryset")
 
     qs = (
         EquityData.objects
@@ -305,9 +300,18 @@ def equity_managers(request):
         .order_by("-exposure")[:10]
     )
 
+    print("Queryset built")
+
+    print("Reading parquet")
     mapping_df = read_parquet_from_s3(
         "historical-equity/ticker_manager_mapping.parquet"
     )
+
+    print("Parquet loaded")
+    print("Columns:", mapping_df.columns.tolist())
+    print("Shape:", mapping_df.shape)
+
+    print("Creating manager_total_counts")
 
     manager_total_counts = (
         mapping_df
@@ -316,20 +320,35 @@ def equity_managers(request):
         .to_dict()
     )
 
+    print("manager_total_counts created")
+    print("Managers:", len(manager_total_counts))
+
     data = []
 
-    for row in qs:
+    print("Iterating queryset")
+
+    for i, row in enumerate(qs):
+        print(f"Row {i}: {row['asset_manager']}")
+
         if is_stressed:
             row["daily_pnl"] += row["exposure"] * ret
             row["var_usage_pct"] *= var
+
+        print("Looking up total ticker count")
 
         row["total_ticker_count"] = manager_total_counts.get(
             row["asset_manager"],
             0
         )
 
+        print(f"total_ticker_count={row['total_ticker_count']}")
+
         row["is_stressed"] = is_stressed
         data.append(row)
+
+    print(f"Total rows returned={len(data)}")
+    print("Returning JsonResponse")
+    print("=== equity_managers END ===")
 
     return JsonResponse(data, safe=False)
 
@@ -527,7 +546,7 @@ def equity_manager_overview(request):
     print("=== equity_manager_overview END ===")
 
     return JsonResponse(data)
-
+    
 # ------------------------------------------------
 # MANAGER HOLDINGS
 # ------------------------------------------------
