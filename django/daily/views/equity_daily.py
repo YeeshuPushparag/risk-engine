@@ -206,12 +206,21 @@ def _get_stress_params(request):
 # 1️⃣ EQUITY OVERVIEW
 # ------------------------------------------------
 def equity_overview(request):
+    print("=== equity_overview START ===")
+
     date = request.GET.get("date")
+    print(f"date={date}")
+
     ret, vol, var, is_stressed, scenario = _get_stress_params(request)
+    print("Stress params loaded")
 
     qs = EquityData.objects.filter(date=date)
+    print(f"Rows={qs.count()}")
 
     exposure = qs.aggregate(total=Sum("mtm_value"))["total"] or 0.0
+    print(f"Exposure={exposure}")
+
+    print("Running aggregate")
 
     data = qs.aggregate(
         total_exposure=Sum("mtm_value"),
@@ -226,7 +235,12 @@ def equity_overview(request):
         hhi_sector=Avg("hhi_sector"),
     )
 
+    print("Aggregate complete")
+    print(data)
+
     if is_stressed:
+        print("Applying stress")
+
         data["daily_pnl"] += exposure * ret
         data["expected_return"] += ret
         data["var_95"] *= var
@@ -235,13 +249,26 @@ def equity_overview(request):
         data["cvar_99"] *= var
         data["ex_ante_volatility"] *= vol
 
+        print("Stress complete")
+
+    print("Getting manager count")
     data["manager_count"] = get_total_manager_count()
+    print(data["manager_count"])
+
+    print("Getting total ticker count")
     data["total_ticker_count"] = get_total_ticker_count()
+    print(data["total_ticker_count"])
+
+    print("Getting available ticker count")
     data["ticker_count"] = qs.values("ticker").distinct().count()
+    print(data["ticker_count"])
+
     data["is_stressed"] = is_stressed
 
-    return JsonResponse(data)
+    print("Returning response")
+    print("=== equity_overview END ===")
 
+    return JsonResponse(data)
 
 # ------------------------------------------------
 # 2️⃣ MANAGERS
@@ -391,24 +418,35 @@ def equity_alerts(request):
 # MANAGER OVERVIEW
 # ------------------------------------------------
 def equity_manager_overview(request):
+    print("=== equity_manager_overview START ===")
+
     date = request.GET.get("date")
     manager = request.GET.get("manager")
+    print(f"date={date}, manager={manager}")
+
     manager_normalized = manager.replace("-", " ") if manager else None
+    print(f"manager_normalized={manager_normalized}")
 
     if not date or not manager:
+        print("Missing date or manager")
         return JsonResponse({"error": "date and manager required"}, status=400)
 
     ret, vol, var, is_stressed, scenario = _get_stress_params(request)
+    print("Stress params loaded")
 
     total_exposure = EquityData.objects.filter(date=date).aggregate(
         total=Sum("mtm_value")
     )["total"] or 0.0
+    print(f"total_exposure={total_exposure}")
 
     qs = EquityData.objects.filter(
-        date=date, asset_manager__iexact=manager_normalized
+        date=date,
+        asset_manager__iexact=manager_normalized
     )
+    print(f"qs.count()={qs.count()}")
 
     if not qs.exists():
+        print("No rows found")
         return JsonResponse({
             "exposure": 0,
             "portfolio_daily_pnl": 0,
@@ -422,6 +460,8 @@ def equity_manager_overview(request):
             "is_stressed": is_stressed,
         })
 
+    print("Running aggregate...")
+
     data = qs.aggregate(
         exposure=Sum("mtm_value"),
         portfolio_daily_pnl=Sum("daily_pnl"),
@@ -432,30 +472,61 @@ def equity_manager_overview(request):
         daily_portfolio_cvar_99=Sum(F("mtm_value") * F("daily_cvar_99")),
     )
 
+    print("Aggregate completed")
+    print(data)
+
     if is_stressed:
+        print("Applying stress")
+
         exposure = data["exposure"] or 0.0
+
         data["portfolio_daily_pnl"] += exposure * ret
         data["daily_portfolio_var_95"] *= var
         data["daily_portfolio_var_99"] *= var
         data["daily_portfolio_cvar_95"] *= var
         data["daily_portfolio_cvar_99"] *= var
 
+        print("Stress applied")
+
+    print("Counting alerts")
     data["alerts"] = qs.filter(portfolio_weight__gt=0.05).count()
+    print(data["alerts"])
+
+    print("Counting tickers")
     data["tickers_count"] = qs.values("ticker").distinct().count()
+    print(data["tickers_count"])
+
+    print("Reading parquet")
     mapping_df = read_parquet_from_s3(
         "historical-equity/ticker_manager_mapping.parquet"
     )
 
-    data["total_ticker_count"] = (
-        mapping_df[
-            mapping_df["asset_manager"].str.lower() == manager_normalized.lower()
-        ]["ticker"]
-        .nunique()
-    )
+    print("Parquet loaded")
+    print(mapping_df.columns.tolist())
+    print(mapping_df.shape)
+    print(mapping_df.head())
+
+    print("Filtering manager")
+
+    filtered = mapping_df[
+        mapping_df["asset_manager"].str.lower() == manager_normalized.lower()
+    ]
+
+    print("Filter completed")
+    print(filtered.shape)
+
+    print("Counting unique tickers")
+
+    data["total_ticker_count"] = filtered["ticker"].nunique()
+
+    print(f"total_ticker_count={data['total_ticker_count']}")
+
     data["is_stressed"] = is_stressed
 
-    return JsonResponse(data)
+    print("Returning response")
+    print("=== equity_manager_overview END ===")
 
+    return JsonResponse(data)
 
 # ------------------------------------------------
 # MANAGER HOLDINGS
