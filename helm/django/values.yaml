@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/django
-  tag: "15"
+  tag: "16"
   pullPolicy: IfNotPresent
 
 service:
