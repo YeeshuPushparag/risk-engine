@@ -3,7 +3,7 @@
   "uid": "equity-final",
   "timezone": "utc",
   "schemaVersion": 39,
-  "version": 4,
+  "version": 5,
   "refresh": "5m",
   "time": {
     "from": "now-90d",
@@ -299,9 +299,46 @@
       },
       "targets": [
         {
-          "expr": "max(consumer_records_processed_total{job=\"equity_stream_consumer\",mode=\"$run_mode\"} or consumer_records_processed_total{exported_job=\"equity_stream_consumer\",mode=\"$run_mode\"})"
+          "expr": "max(consumer_records_processed_total{job=\"equity_stream_consumer\",mode=\"$run_mode\"} or consumer_records_processed_total{exported_job=\"equity_stream_consumer\",mode=\"$run_mode\"})",
+          "refId": "A",
+          "format": "time_series",
+          "instant": false,
+          "range": true,
+          "legendFormat": "Final records processed"
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "spanNulls": true,
+            "showPoints": "always",
+            "pointSize": 6,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
     }
   ],
   "description": "Final Equity Kafka producer and consumer metrics pushed through Pushgateway. Real-time live pod metrics are intentionally excluded.",
