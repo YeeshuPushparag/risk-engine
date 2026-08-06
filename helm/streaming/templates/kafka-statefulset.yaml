@@ -3,22 +3,33 @@ kind: StatefulSet
 metadata:
   name: kafka
   namespace: streaming
+
 spec:
   serviceName: kafka
+
   persistentVolumeClaimRetentionPolicy:
     whenDeleted: Retain
     whenScaled: Retain
+
   replicas: {{ .Values.replicas.kafka }}
+
   selector:
     matchLabels:
       app: kafka
+
   template:
     metadata:
       labels:
         app: kafka
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+
     spec:
+      terminationGracePeriodSeconds: 90
+
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}
+
       serviceAccountName: {{ .Values.serviceAccount.name }}
 
       securityContext:
@@ -47,20 +58,36 @@ spec:
             runAsGroup: 1000
 
           ports:
-            - containerPort: 9092
+            - name: broker
+              containerPort: 9092
+
           env:
             - name: KAFKA_BROKER_ID
               value: "1"
+
             - name: KAFKA_ZOOKEEPER_CONNECT
               value: "zookeeper.streaming.svc.cluster.local:2181"
+
             - name: KAFKA_LISTENERS
               value: "PLAINTEXT://0.0.0.0:9092"
+
             - name: KAFKA_ADVERTISED_LISTENERS
               value: "PLAINTEXT://kafka.streaming.svc.cluster.local:9092"
+
             - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
               value: "1"
+
             - name: KAFKA_LOG_DIRS
               value: "/var/lib/kafka/data/kafka-logs"
+
+          resources:
+            requests:
+              cpu: {{ .Values.resources.kafka.requests.cpu | quote }}
+              memory: {{ .Values.resources.kafka.requests.memory | quote }}
+            limits:
+              cpu: {{ .Values.resources.kafka.limits.cpu | quote }}
+              memory: {{ .Values.resources.kafka.limits.memory | quote }}
+
           volumeMounts:
             - name: kafka-data
               mountPath: /var/lib/kafka/data
@@ -69,7 +96,8 @@ spec:
     - metadata:
         name: kafka-data
       spec:
-        accessModes: ["ReadWriteOnce"]
+        accessModes:
+          - ReadWriteOnce
         storageClassName: {{ .Values.storageClassName }}
         resources:
           requests:

@@ -61,6 +61,23 @@ zookeeperStorageSize: 5Gi
 nodeSelector:
   role: streaming
 
+resources:
+  kafka:
+    requests:
+      cpu: "500m"
+      memory: "2Gi"
+    limits:
+      cpu: "1"
+      memory: "4Gi"
+
+  zookeeper:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "500m"
+      memory: "1Gi"
+
 spark:
   k8sMasterUrl: k8s://https://kubernetes.default.svc
 
