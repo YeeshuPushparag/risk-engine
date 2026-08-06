@@ -2777,11 +2777,16 @@ def load_s3_replay_partitions(
             )
 
     if "topic" not in existing_cols:
-        source_topic = (
-            CONFIG["topic_backfill"]
-            if replay_path_lower == "backfill"
-            else CONFIG["topic_live"]
-        )
+        if replay_path_lower == "backfill":
+            source_topic = CONFIG["topic_backfill"]
+        elif replay_path_lower == "live":
+            source_topic = CONFIG["topic_live"]
+        else:
+            raise ValueError(
+                f"Unsupported REPLAY_PATH: {replay_path_lower}. "
+                "Expected 'live' or 'backfill'."
+            )
+
         batch_df = batch_df.withColumn(
             "topic",
             lit(source_topic).cast("string"),
