@@ -3,7 +3,7 @@
   "uid": "fx-final",
   "timezone": "utc",
   "schemaVersion": 39,
-  "version": 8,
+  "version": 9,
   "refresh": "5m",
   "time": {
     "from": "now-90d",
@@ -286,66 +286,9 @@
           "instant": true
         }
       ]
-    },
-    {
-      "id": 18,
-      "type": "timeseries",
-      "title": "Final Records Processed Over Time — All Modes",
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 14
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "last_over_time(consumer_records_processed_total{job=\"pushgateway\",exported_job=\"fx_stream_consumer\",mode=~\"live|backfill|replay\"}[1h])",
-          "legendFormat": "{{mode}}",
-          "format": "time_series",
-          "instant": false,
-          "range": true,
-          "interval": "1m"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "stepAfter",
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "spanNulls": true,
-            "showPoints": "auto",
-            "pointSize": 5,
-            "axisPlacement": "auto",
-            "axisLabel": "",
-            "scaleDistribution": {
-              "type": "linear"
-            }
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "description": "Historical final consumer record counts scraped from Pushgateway. Shows live, backfill, and replay series when available."
     }
   ],
-  "description": "Final producer and consumer metrics from Prometheus Pushgateway. The history panel displays all final run modes directly and does not depend on the dashboard mode selector.",
+  "description": "Final producer and consumer metrics from Prometheus Pushgateway. The historical records-processed time-series panel has been removed.",
   "templating": {
     "list": [
       {
