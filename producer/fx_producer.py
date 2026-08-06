@@ -1008,6 +1008,7 @@ def fetch_backfill_for_date(
     start_str         = target_date.strftime("%Y-%m-%d")
     end_str           = (target_date + timedelta(days=2)).strftime("%Y-%m-%d")
     source_fetch_time = pendulum.now("America/New_York").to_iso8601_string()
+    symbols = [pair + "=X" for pair in pairs]
 
     df = None
     for attempt in range(1, CONFIG["fetch_max_retries"] + 1):
