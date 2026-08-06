@@ -442,6 +442,9 @@ def _push_metrics() -> None:
             CONFIG["pushgateway_url"],
             job=job_name,
             registry=_prom_registry,
+            grouping_key={
+                "mode": CONFIG["run_mode"],
+            },
         )
         
         # ── Log success after push ──────────────────────────────────────

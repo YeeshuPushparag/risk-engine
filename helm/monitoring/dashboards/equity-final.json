@@ -1,9 +1,9 @@
 {
-  "title": "Equity Final",
+  "title": "Equity Final Metrics",
   "uid": "equity-final",
   "timezone": "utc",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "refresh": "5m",
   "time": {
     "from": "now-90d",
@@ -13,7 +13,7 @@
     {
       "id": 1,
       "type": "row",
-      "title": "Producer \u2014 All-time totals (mode not distinguishable: job has no run_mode label)",
+      "title": "Producer — Final Metrics",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -33,7 +33,7 @@
       },
       "targets": [
         {
-          "expr": "producer_runs_total{job=\"equity_kafka_producer\"}",
+          "expr": "max(producer_runs_total{job=\"equity_kafka_producer\",mode=\"$run_mode\"} or producer_runs_total{exported_job=\"equity_kafka_producer\",mode=\"$run_mode\"})",
           "instant": true
         }
       ]
@@ -50,7 +50,7 @@
       },
       "targets": [
         {
-          "expr": "producer_failures_total{job=\"equity_kafka_producer\"}",
+          "expr": "max(producer_failures_total{job=\"equity_kafka_producer\",mode=\"$run_mode\"} or producer_failures_total{exported_job=\"equity_kafka_producer\",mode=\"$run_mode\"})",
           "instant": true
         }
       ]
@@ -67,7 +67,7 @@
       },
       "targets": [
         {
-          "expr": "producer_dlq_total{job=\"equity_kafka_producer\"}",
+          "expr": "max(producer_dlq_total{job=\"equity_kafka_producer\",mode=\"$run_mode\"} or producer_dlq_total{exported_job=\"equity_kafka_producer\",mode=\"$run_mode\"})",
           "instant": true
         }
       ]
@@ -84,7 +84,7 @@
       },
       "targets": [
         {
-          "expr": "producer_kafka_messages_total{job=\"equity_kafka_producer\"}",
+          "expr": "max(producer_kafka_messages_total{job=\"equity_kafka_producer\",mode=\"$run_mode\"} or producer_kafka_messages_total{exported_job=\"equity_kafka_producer\",mode=\"$run_mode\"})",
           "instant": true
         }
       ]
@@ -101,7 +101,7 @@
       },
       "targets": [
         {
-          "expr": "time() - producer_last_success_timestamp{job=\"equity_kafka_producer\"}",
+          "expr": "time() - max(producer_last_success_timestamp{job=\"equity_kafka_producer\",mode=\"$run_mode\"} or producer_last_success_timestamp{exported_job=\"equity_kafka_producer\",mode=\"$run_mode\"})",
           "instant": true
         }
       ]
@@ -118,7 +118,7 @@
       },
       "targets": [
         {
-          "expr": "producer_missing_tickers_count{job=\"equity_kafka_producer\"}",
+          "expr": "max(producer_missing_tickers_count{job=\"equity_kafka_producer\",mode=\"$run_mode\"} or producer_missing_tickers_count{exported_job=\"equity_kafka_producer\",mode=\"$run_mode\"})",
           "instant": true
         }
       ]
@@ -126,7 +126,7 @@
     {
       "id": 8,
       "type": "row",
-      "title": "Consumer \u2014 All-time totals",
+      "title": "Consumer — Final Metrics",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -146,7 +146,7 @@
       },
       "targets": [
         {
-          "expr": "consumer_batches_total{job=\"equity_stream_consumer\"}",
+          "expr": "max(consumer_batches_total{job=\"equity_stream_consumer\",mode=\"$run_mode\"} or consumer_batches_total{exported_job=\"equity_stream_consumer\",mode=\"$run_mode\"})",
           "instant": true
         }
       ]
@@ -163,7 +163,7 @@
       },
       "targets": [
         {
-          "expr": "consumer_failures_total{job=\"equity_stream_consumer\"}",
+          "expr": "max(consumer_failures_total{job=\"equity_stream_consumer\",mode=\"$run_mode\"} or consumer_failures_total{exported_job=\"equity_stream_consumer\",mode=\"$run_mode\"})",
           "instant": true
         }
       ]
@@ -180,7 +180,7 @@
       },
       "targets": [
         {
-          "expr": "consumer_dlq_total{job=\"equity_stream_consumer\"}",
+          "expr": "max(consumer_dlq_total{job=\"equity_stream_consumer\",mode=\"$run_mode\"} or consumer_dlq_total{exported_job=\"equity_stream_consumer\",mode=\"$run_mode\"})",
           "instant": true
         }
       ]
@@ -197,7 +197,7 @@
       },
       "targets": [
         {
-          "expr": "consumer_processed_s3_writes_total{job=\"equity_stream_consumer\"}",
+          "expr": "max(consumer_processed_s3_writes_total{job=\"equity_stream_consumer\",mode=\"$run_mode\"} or consumer_processed_s3_writes_total{exported_job=\"equity_stream_consumer\",mode=\"$run_mode\"})",
           "instant": true
         }
       ]
@@ -214,7 +214,7 @@
       },
       "targets": [
         {
-          "expr": "consumer_records_processed_total{job=\"equity_stream_consumer\"}",
+          "expr": "max(consumer_records_processed_total{job=\"equity_stream_consumer\",mode=\"$run_mode\"} or consumer_records_processed_total{exported_job=\"equity_stream_consumer\",mode=\"$run_mode\"})",
           "instant": true
         }
       ]
@@ -231,7 +231,7 @@
       },
       "targets": [
         {
-          "expr": "time() - consumer_last_success_timestamp{job=\"equity_stream_consumer\"}",
+          "expr": "time() - max(consumer_last_success_timestamp{job=\"equity_stream_consumer\",mode=\"$run_mode\"} or consumer_last_success_timestamp{exported_job=\"equity_stream_consumer\",mode=\"$run_mode\"})",
           "instant": true
         }
       ]
@@ -239,7 +239,7 @@
     {
       "id": 15,
       "type": "stat",
-      "title": "Replay Jobs Total",
+      "title": "Replay Jobs Total (Replay mode)",
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -248,7 +248,7 @@
       },
       "targets": [
         {
-          "expr": "replay_jobs_total{job=\"equity_stream_consumer\"}",
+          "expr": "max(replay_jobs_total{job=\"equity_stream_consumer\",mode=\"$run_mode\"} or replay_jobs_total{exported_job=\"equity_stream_consumer\",mode=\"$run_mode\"})",
           "instant": true
         }
       ]
@@ -256,7 +256,7 @@
     {
       "id": 16,
       "type": "stat",
-      "title": "Replay Records Processed",
+      "title": "Replay Records Processed (Replay mode)",
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -265,7 +265,7 @@
       },
       "targets": [
         {
-          "expr": "replay_records_processed_total{job=\"equity_stream_consumer\"}",
+          "expr": "max(replay_records_processed_total{job=\"equity_stream_consumer\",mode=\"$run_mode\"} or replay_records_processed_total{exported_job=\"equity_stream_consumer\",mode=\"$run_mode\"})",
           "instant": true
         }
       ]
@@ -273,7 +273,7 @@
     {
       "id": 17,
       "type": "stat",
-      "title": "Replay Failures Total",
+      "title": "Replay Failures Total (Replay mode)",
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -282,7 +282,7 @@
       },
       "targets": [
         {
-          "expr": "replay_failures_total{job=\"equity_stream_consumer\"}",
+          "expr": "max(replay_failures_total{job=\"equity_stream_consumer\",mode=\"$run_mode\"} or replay_failures_total{exported_job=\"equity_stream_consumer\",mode=\"$run_mode\"})",
           "instant": true
         }
       ]
@@ -290,7 +290,7 @@
     {
       "id": 18,
       "type": "timeseries",
-      "title": "Records Processed Over Time (last 90 days)",
+      "title": "Final Records Processed Over Time",
       "gridPos": {
         "h": 8,
         "w": 24,
@@ -299,9 +299,46 @@
       },
       "targets": [
         {
-          "expr": "consumer_records_processed_total{job=\"equity_stream_consumer\"}"
+          "expr": "max(consumer_records_processed_total{job=\"equity_stream_consumer\",mode=\"$run_mode\"} or consumer_records_processed_total{exported_job=\"equity_stream_consumer\",mode=\"$run_mode\"})"
         }
       ]
     }
-  ]
+  ],
+  "description": "Final Equity Kafka producer and consumer metrics pushed through Pushgateway. Real-time live pod metrics are intentionally excluded.",
+  "templating": {
+    "list": [
+      {
+        "name": "run_mode",
+        "label": "Final Run Mode",
+        "type": "custom",
+        "query": "Live Final : live, Backfill : backfill, Replay : replay",
+        "current": {
+          "selected": true,
+          "text": "Backfill",
+          "value": "backfill"
+        },
+        "options": [
+          {
+            "selected": false,
+            "text": "Live Final",
+            "value": "live"
+          },
+          {
+            "selected": true,
+            "text": "Backfill",
+            "value": "backfill"
+          },
+          {
+            "selected": false,
+            "text": "Replay",
+            "value": "replay"
+          }
+        ],
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "skipUrlSync": false
+      }
+    ]
+  }
 }

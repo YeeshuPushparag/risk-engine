@@ -245,6 +245,9 @@ def _push_metrics() -> None:
             CONFIG["pushgateway_url"],
             job=job_name,
             registry=_prom_registry,
+            grouping_key={
+                "mode": CONFIG["run_mode"],
+            },
         )
         
         # ── Log success after push ──────────────────────────────────────
@@ -998,11 +1001,13 @@ def fetch_backfill_for_date(
         "fetch_success":    False,
     }
 
-    # yfinance end date is exclusive — add one day
+    # YFinance intraday date boundaries are effectively UTC.
+    # Fetch the target UTC day and the following UTC day so that
+    # the complete target Eastern Time date, including hours 19-23,
+    # is available after timezone conversion.
     start_str         = target_date.strftime("%Y-%m-%d")
-    end_str           = (target_date + timedelta(days=1)).strftime("%Y-%m-%d")
+    end_str           = (target_date + timedelta(days=2)).strftime("%Y-%m-%d")
     source_fetch_time = pendulum.now("America/New_York").to_iso8601_string()
-    symbols           = [pair + "=X" for pair in pairs]
 
     df = None
     for attempt in range(1, CONFIG["fetch_max_retries"] + 1):
@@ -1406,17 +1411,36 @@ def run_backfill(producer_run_id: str, producer: KafkaProducer) -> None:
         try:
             PROM_RUNS_TOTAL.inc()
 
-            # Fetch all events for this date (all hours)
             events, fetch_metrics = fetch_backfill_for_date(
-                pairs           = CONFIG["currency_pairs"],
-                target_date     = target_date,
-                producer_run_id = producer_run_id,
-                batch_id        = batch_id,
-                dlq_buffer      = dlq_buffer,
+                pairs=CONFIG["currency_pairs"],
+                target_date=target_date,
+                producer_run_id=producer_run_id,
+                batch_id=batch_id,
+                dlq_buffer=dlq_buffer,
             )
-            
-            # FILTER FIRST (remove non-market hours)
+
+            # Remove weekends / closed FX market periods.
             events = filter_backfill_market_hours(events)
+
+            # YFinance fetch boundaries are UTC, while pipeline partitions use ET.
+            # Keep only events whose converted ET date matches the requested
+            # backfill date.
+            target_date_iso = target_date.isoformat()
+
+            events = [
+                event
+                for event in events
+                if event.get("data", {}).get("date") == target_date_iso
+            ]
+
+            log(
+                "INFO",
+                "FX backfill: filtered events to requested ET date",
+                {
+                    "target_date": target_date_iso,
+                    "events_kept": len(events),
+                },
+            )
 
             metrics["events_fetched"] = len(events)
             metrics["missing_pairs"]  = len(fetch_metrics.get("missing_pairs", []))

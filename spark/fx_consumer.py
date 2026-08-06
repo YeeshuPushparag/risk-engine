@@ -480,6 +480,9 @@ def _push_metrics() -> None:
             CONFIG["pushgateway_url"],
             job=job_name,
             registry=_prom_registry,
+            grouping_key={
+                "mode": CONFIG["run_mode"],
+            },
         )
         
         # ── Log success after push ──────────────────────────────────────
@@ -2231,6 +2234,7 @@ def process_batch_backfill_replay(
     # themselves. Safe regardless of fan-out size.
     output_count = final_output_sdf.count()
     metrics["events_processed"] = output_count
+    metrics["output_rows"] = output_count
     PROM_RECORDS_PROCESSED_TOTAL.inc(output_count)
 
     log("INFO", "BACKFILL_REPLAY_ENGINE_DONE",
