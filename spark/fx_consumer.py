@@ -2761,6 +2761,21 @@ def load_s3_replay_partitions(
     # Synthesize Kafka metadata columns if absent — same fields as
     # before, now via Spark withColumn (distributed) instead of pandas.
     existing_cols = set(batch_df.columns)
+
+    # Raw FX producer parquet stores pipeline_name, while the consumer
+    # processing path expects producer_pipeline_name.
+    if "producer_pipeline_name" not in existing_cols:
+        if "pipeline_name" in existing_cols:
+            batch_df = batch_df.withColumn(
+                "producer_pipeline_name",
+                col("pipeline_name"),
+            )
+        else:
+            batch_df = batch_df.withColumn(
+                "producer_pipeline_name",
+                lit("fx_kafka_producer"),
+            )
+
     if "topic" not in existing_cols:
         batch_df = batch_df.withColumn("topic", lit(CONFIG["topic"]))
     if "partition" not in existing_cols:
@@ -2791,8 +2806,23 @@ def load_s3_replay_partitions(
     try:
         process_batch(batch_df, 1, pair_groups)
     except Exception as exc:
-        log("ERROR", "FX S3 replay batch failed", {"error": str(exc)})
+        log(
+            "ERROR",
+            "FX S3 replay batch failed",
+            {"error": str(exc)},
+        )
         PROM_REPLAY_FAILURES_TOTAL.inc()
+
+        replay_duration = time.monotonic() - replay_start
+        PROM_REPLAY_DURATION_SECONDS.observe(replay_duration)
+        _push_metrics()
+
+        send_alert(
+            f"FX REPLAY FAILED: {start_date_str} to {end_date_str} "
+            f"| error={str(exc)}"
+        )
+
+        return
 
     replay_duration = time.monotonic() - replay_start
     PROM_REPLAY_DURATION_SECONDS.observe(replay_duration)
