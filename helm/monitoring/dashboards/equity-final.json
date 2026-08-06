@@ -3,7 +3,7 @@
   "uid": "equity-final",
   "timezone": "utc",
   "schemaVersion": 39,
-  "version": 5,
+  "version": 6,
   "refresh": "5m",
   "time": {
     "from": "now-90d",
@@ -299,16 +299,17 @@
       },
       "targets": [
         {
-          "expr": "max(consumer_records_processed_total{job=\"equity_stream_consumer\",mode=\"$run_mode\"} or consumer_records_processed_total{exported_job=\"equity_stream_consumer\",mode=\"$run_mode\"})",
           "refId": "A",
+          "expr": "consumer_records_processed_total{job=\"pushgateway\",exported_job=\"equity_stream_consumer\",mode=\"${run_mode:raw}\"}",
           "format": "time_series",
           "instant": false,
           "range": true,
-          "legendFormat": "Final records processed"
+          "legendFormat": "{{mode}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
+          "unit": "short",
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "stepAfter",
@@ -317,14 +318,12 @@
             "gradientMode": "none",
             "spanNulls": true,
             "showPoints": "always",
-            "pointSize": 6,
+            "pointSize": 5,
             "axisPlacement": "auto",
-            "axisLabel": "",
             "scaleDistribution": {
               "type": "linear"
             }
-          },
-          "unit": "short"
+          }
         },
         "overrides": []
       },
@@ -348,26 +347,26 @@
         "name": "run_mode",
         "label": "Final Run Mode",
         "type": "custom",
-        "query": "Live Final : live, Backfill : backfill, Replay : replay",
+        "query": "live,backfill,replay",
         "current": {
           "selected": true,
-          "text": "Backfill",
+          "text": "backfill",
           "value": "backfill"
         },
         "options": [
           {
             "selected": false,
-            "text": "Live Final",
+            "text": "live",
             "value": "live"
           },
           {
             "selected": true,
-            "text": "Backfill",
+            "text": "backfill",
             "value": "backfill"
           },
           {
             "selected": false,
-            "text": "Replay",
+            "text": "replay",
             "value": "replay"
           }
         ],
