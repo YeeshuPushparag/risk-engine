@@ -12,11 +12,11 @@ image:
 
   producer:
     repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/producer
-    tag: "30"
+    tag: "31"
 
   spark:
     repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/spark
-    tag: "46"
+    tag: "47"
 
   zookeeper:
     repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/zookeeper
