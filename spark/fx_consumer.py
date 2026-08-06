@@ -2777,7 +2777,15 @@ def load_s3_replay_partitions(
             )
 
     if "topic" not in existing_cols:
-        batch_df = batch_df.withColumn("topic", lit(CONFIG["topic"]))
+        source_topic = (
+            CONFIG["topic_backfill"]
+            if replay_path_lower == "backfill"
+            else CONFIG["topic_live"]
+        )
+        batch_df = batch_df.withColumn(
+            "topic",
+            lit(source_topic).cast("string"),
+        )
     if "partition" not in existing_cols:
         batch_df = batch_df.withColumn("partition", lit(0))
     if "offset" not in existing_cols:
