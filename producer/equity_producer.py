@@ -147,7 +147,7 @@ CONFIG: dict = {
     "ticker_key":                 "historical-equity/tickers50.csv",
     "raw_event_prefix":           "kafka_raw/equity/",
     "dlq_prefix_live":            "kafka_dlq/equity/producer/live/",
-    "dlq_prefix_backfill":        "kafka_dlq/equity/producer/backfill",
+    "dlq_prefix_backfill":        "kafka_dlq/equity/producer/backfill/",
 
     # Lineage
     "pipeline_name":              "equity_kafka_producer",
