@@ -3,7 +3,7 @@
   "uid": "equity-final",
   "timezone": "utc",
   "schemaVersion": 39,
-  "version": 6,
+  "version": 7,
   "refresh": "5m",
   "time": {
     "from": "now-90d",
@@ -290,7 +290,7 @@
     {
       "id": 18,
       "type": "timeseries",
-      "title": "Final Records Processed Over Time",
+      "title": "Final Records Processed Over Time — All Modes",
       "gridPos": {
         "h": 8,
         "w": 24,
@@ -300,11 +300,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "consumer_records_processed_total{job=\"pushgateway\",exported_job=\"equity_stream_consumer\",mode=\"${run_mode:raw}\"}",
+          "expr": "last_over_time(consumer_records_processed_total{job=\"pushgateway\",exported_job=\"equity_stream_consumer\",mode=~\"live|backfill|replay\"}[1h])",
+          "legendFormat": "{{mode}}",
           "format": "time_series",
           "instant": false,
           "range": true,
-          "legendFormat": "{{mode}}"
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -317,9 +318,10 @@
             "fillOpacity": 10,
             "gradientMode": "none",
             "spanNulls": true,
-            "showPoints": "always",
+            "showPoints": "auto",
             "pointSize": 5,
             "axisPlacement": "auto",
+            "axisLabel": "",
             "scaleDistribution": {
               "type": "linear"
             }
@@ -329,18 +331,21 @@
       },
       "options": {
         "legend": {
-          "displayMode": "list",
+          "displayMode": "table",
           "placement": "bottom",
-          "calcs": []
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
-          "mode": "single",
-          "sort": "none"
+          "mode": "multi",
+          "sort": "desc"
         }
-      }
+      },
+      "description": "Historical final consumer record counts scraped from Pushgateway. Shows live, backfill, and replay series when available."
     }
   ],
-  "description": "Final Equity Kafka producer and consumer metrics pushed through Pushgateway. Real-time live pod metrics are intentionally excluded.",
+  "description": "Final producer and consumer metrics from Prometheus Pushgateway. The history panel displays all final run modes directly and does not depend on the dashboard mode selector.",
   "templating": {
     "list": [
       {
