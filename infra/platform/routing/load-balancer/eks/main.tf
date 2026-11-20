@@ -19,13 +19,14 @@ data "terraform_remote_state" "dns" {
   }
 }
 
-# Discover existing Kubernetes ALBs
+# Discover existing Load Balancers
 data "aws_lbs" "all" {}
 
-# Identify the shared EKS ALB
+# Identify the existing shared EKS ALB
 data "aws_lb" "eks_alb" {
   name = one([
-    for name in data.aws_lbs.all.names :
-    name if strcontains(name, "k8s")
+    for arn in data.aws_lbs.all.arns :
+    split("/", arn)[2]
+    if strcontains(split("/", arn)[2], "k8s")
   ])
 }
