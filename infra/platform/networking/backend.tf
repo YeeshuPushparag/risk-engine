@@ -2,7 +2,7 @@ terraform {
   required_version = ">= 1.5.0"
 
   backend "s3" {
-    bucket         = "risk-tf-state-platform-pushpa"
+    bucket         = "risk-tf-state-platform-katra"
     key            = "platform/networking/terraform.tfstate"
     region         = "us-east-1"
     dynamodb_table = "risk-tf-locks"

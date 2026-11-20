@@ -2,7 +2,7 @@ data "terraform_remote_state" "network" {
   backend = "s3"
 
   config = {
-    bucket = "risk-tf-state-platform-pushpa"
+    bucket = "risk-tf-state-platform-katra"
     key    = "platform/networking/terraform.tfstate"
     region = "us-east-1"
   }

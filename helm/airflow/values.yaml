@@ -6,8 +6,8 @@ replicaCount:
   triggerer: 1
 
 image:
-  repository: 363267429137.dkr.ecr.us-east-1.amazonaws.com/airflow
-  tag: "136"
+  repository: 486758670026.dkr.ecr.us-east-1.amazonaws.com/airflow
+  tag: "1"
   pullPolicy: IfNotPresent
 
 service:
@@ -26,7 +26,7 @@ ingress:
   targetType: ip
   listenPorts: '[{"HTTP":80},{"HTTPS":443}]'
   sslRedirect: "443"
-  certificateArn: arn:aws:acm:us-east-1:363267429137:certificate/96bea5e5-6646-4921-8328-0577cfb4f91d
+  certificateArn: arn:aws:acm:us-east-1:486758670026:certificate/c78be1f3-5cbc-4e1d-a2c1-aab192f6ec1f
 
 # Environment injection
 envFrom:

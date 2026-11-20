@@ -1,3 +1,15 @@
+# Comment Whole Block On First Run
+# Routing / Jenkins ALB state
+data "terraform_remote_state" "jenkins_routing" {
+  backend = "s3"
+
+  config = {
+    bucket = "risk-tf-state-platform-katra"
+    key    = "platform/routing/load-balancer/jenkins/terraform.tfstate"
+    region = "us-east-1"
+  }
+}
+
 resource "aws_security_group" "jenkins_sg" {
   name   = "${local.name_prefix}-jenkins-sg"
   vpc_id = data.terraform_remote_state.network.outputs.vpc_id
@@ -13,13 +25,17 @@ resource "aws_security_group" "jenkins_sg" {
   }
 
   ##################################
-  # JENKINS UI
+  # JENKINS UI 
+  # Use cidr_blocks = ["0.0.0.0/0"] instead of security_groups = [] on First Run
   ##################################
   ingress {
-    from_port   = 8080
-    to_port     = 8080
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    description     = "Jenkins UI only from ALB"
+    from_port      = 8080
+    to_port        = 8080
+    protocol       = "tcp"
+    security_groups = [
+      data.terraform_remote_state.jenkins_routing.outputs.jenkins_alb_security_group_id
+    ]
   }
 
   ##################################

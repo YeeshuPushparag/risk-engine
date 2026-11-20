@@ -119,7 +119,7 @@ CONFIG: dict = {
     "window_days": 30,   # market days retained in bonds_features_30d.parquet
 
     # S3 bucket
-    "s3_bucket": "pushpa-bond-bucket",
+    "s3_bucket": "katra-bond-bucket",
 
     # S3 reference files
     "base_bond_key": "synthetic_bond.csv",
