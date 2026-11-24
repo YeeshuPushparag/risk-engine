@@ -1705,7 +1705,7 @@ def update_market_features(
             start_date = pd.to_datetime(start_date_override, utc=True).date()
             print(f"  override -> start_date={start_date}")
         elif last_date is not None:
-            if last_date >= today:
+            if last_date >= end_date:
                 print("  [SKIP] Rolling file already up to date.")
                 write_json_to_s3(
                     {"run_id": run_id, "status": "SKIPPED", "reason": "already_up_to_date"},
@@ -1718,6 +1718,25 @@ def update_market_features(
             start_date = today - timedelta(days=365)
 
         print(f"  date range: {start_date} -> {end_date}")
+
+        if start_date > end_date:
+            print(
+                f"  [SKIP] No new market dates available. "
+                f"start_date={start_date}, end_date={end_date}"
+            )
+
+            write_json_to_s3(
+                {
+                    "run_id": run_id,
+                    "status": "SKIPPED",
+                    "reason": "no_new_market_dates",
+                    "start_date": str(start_date),
+                    "end_date": str(end_date),
+                },
+                bucket,
+                meta_key,
+            )
+            return None, "No new market dates"
 
         # --------------------------------------------------------------
         # STAGE 3 — Acquire raw data  (fetch or replay)

@@ -1642,7 +1642,7 @@ def update_bonds_pipeline(
             print(f"  [INCREMENTAL] last processed date : {start_date}")
             print(f"  [INCREMENTAL] today               : {today}")
 
-            if start_date >= today:
+            if start_date >= end_date:
                 print("  [INCREMENTAL] Rolling parquet is already current — nothing to process.")
                 return "ALREADY_CURRENT"
 

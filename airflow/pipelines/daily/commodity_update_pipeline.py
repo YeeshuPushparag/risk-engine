@@ -1709,7 +1709,7 @@ def update_commodity_pipeline(
             start_date = pd.to_datetime(start_date_override, utc=True).date()
             print(f"  override -> start_date={start_date}")
         elif last_date is not None:
-            if last_date >= today:
+            if last_date >= end_date:
                 print("  [SKIP] Rolling file already up to date.")
                 write_json_to_s3(
                     {"run_id": run_id, "status": "SKIPPED",
