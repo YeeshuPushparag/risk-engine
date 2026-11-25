@@ -1701,7 +1701,7 @@ def process_commodities(
             "open", "high", "low", "close", "volume", "daily_return", "log_return",
             "vol_20d", "sensitivity", "hedge_ratio", "mtm_value", "exposure_amount",
             "commodity_pnl", "VaR_95", "VaR_99", "gdp", "unrate", "cpi", "fedfunds",
-            "pred_vol21", "data_quality_flag"
+            "pred_vol21", "data_quality_flag",
             # Current pipeline lineage
             "pipeline_name", "pipeline_run_id", "data_source", "input_source",
             "transformation", "record_created_at",

@@ -59,6 +59,7 @@ from snowflake.connector.pandas_tools import write_pandas
 from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 import requests
 import json
+import pandas_market_calendars as mcal
 
 # =========================
 # CONSTANTS
@@ -432,10 +433,98 @@ def risk_enrichment(df):
     return df
 
 
+
+# =========================
+# ROLLING HISTORY FOR INFERENCE (from Snowflake EQUITY)
+# =========================
+def fetch_prediction_history(df, run_id=None, n_close=5, n_sector=20):
+    """
+    Fetch the lookback inputs needed by run_all_equity_predictions from the
+    EQUITY clean table, so history rows never go through enrichment.
+
+    Returns dict of slim DataFrames (all keyed by "_dkey" = YYYY-MM-DD string):
+        "close"  : asset_manager, ticker, _dkey, close          (n_close prior dates)
+        "sector" : sector, _dkey, daily_return, turnover_ratio  (n_sector prior dates, means)
+
+    "Prior" = the last N distinct dates strictly before min(date) of df.
+    EQUITY."date" is VARCHAR YYYY-MM-DD, so string comparison is safe.
+    Fewer dates available (first runs) -> NaN features, same as warm-up in training.
+    Raises after retries: wrong history would silently corrupt predictions.
+    """
+    min_key = pd.Timestamp(df["date"].min()).strftime("%Y-%m-%d")
+    tbl = f'"{SNOWFLAKE_CLEAN_TABLE}"'
+    n_max = max(n_close, n_sector)
+
+    def _run():
+        with get_snowflake_conn() as ctx:
+            with ctx.cursor() as cs:
+
+                cs.execute(
+                    f'SELECT DISTINCT "date" FROM {tbl} '
+                    f'WHERE "date" < %s ORDER BY "date" DESC LIMIT {n_max}',
+                    (min_key,),
+                )
+                dates = [str(r[0])[:10] for r in cs.fetchall()]  # newest first
+
+                if not dates:
+                    return {}
+
+                def lower_bound(n):
+                    return dates[min(n, len(dates)) - 1]
+
+                cs.execute(
+                    f'SELECT "asset_manager", "ticker", "date", "close" FROM {tbl} '
+                    f'WHERE "date" >= %s AND "date" < %s',
+                    (lower_bound(n_close), min_key),
+                )
+                close = pd.DataFrame(
+                    cs.fetchall(),
+                    columns=["asset_manager", "ticker", "_dkey", "close"],
+                )
+
+                cs.execute(
+                    f'SELECT "sector", "date", AVG("daily_return"), AVG("turnover_ratio") '
+                    f'FROM {tbl} WHERE "date" >= %s AND "date" < %s '
+                    f'GROUP BY "sector", "date"',
+                    (lower_bound(n_sector), min_key),
+                )
+                sector = pd.DataFrame(
+                    cs.fetchall(),
+                    columns=["sector", "_dkey", "daily_return", "turnover_ratio"],
+                )
+
+        for frame, num_cols in (
+            (close,  ["close"]),
+            (sector, ["daily_return", "turnover_ratio"]),
+        ):
+            frame["_dkey"] = frame["_dkey"].astype(str).str[:10]
+            for c in num_cols:
+                frame[c] = pd.to_numeric(frame[c], errors="coerce")
+
+        return {"close": close, "sector": sector, "n_dates": len(dates)}
+
+    history = retry_with_backoff(
+        _run,
+        retries=3,
+        critical_name="Snowflake prediction history fetch",
+        run_id=run_id,
+    )
+
+    n_found = history.get("n_dates", 0)
+    if n_found < n_sector:
+        print(
+            f"  [HISTORY] Only {n_found} prior dates in {SNOWFLAKE_CLEAN_TABLE} "
+            f"(wanted {n_sector}); early lookback features will be NaN."
+        )
+    else:
+        print(f"  [HISTORY] Loaded {n_found} prior dates before {min_key}")
+
+    return history
+
 # =========================
 # ML MODEL PREDICTIONS (UNCHANGED — SOFT FAIL)
 # =========================
-def run_all_equity_predictions(df):
+def run_all_equity_predictions(df, history=None, macro_data=None):
 
  
     """
@@ -563,79 +652,151 @@ def run_all_equity_predictions(df):
     # INFERENCE-TIME TRANSIENT FEATURES
     # =====================================================
 
+    history = history or {}
+    df["_dkey"] = df["date"].dt.strftime("%Y-%m-%d")
+
     # -----------------------------------------------------
     # PORTFOLIO LAG FEATURES
+    # Only N = 1 and 5 are used by any model (21d is not).
+    # Lookback comes from `history["close"]` (previous 5 dates),
+    # so only the processing rows are ever predicted on.
     # -----------------------------------------------------
 
-    for N in [1, 5, 21]:
+    key = ["asset_manager", "ticker"]
+    lag_periods = [1, 5]
 
-        df[f"lag_ret_{N}d"] = (
-            df.groupby(
-                ["asset_manager", "ticker"]
-            )["close"]
-            .pct_change(N)
-        )
+    cur = df[key + ["_dkey", "close"]].copy()
+    cur["_is_cur"] = True
+    parts = [cur]
 
+    close_hist = history.get("close")
+    if close_hist is not None and not close_hist.empty:
+        h = close_hist[key + ["_dkey", "close"]].copy()
+        h["_is_cur"] = False
+        parts.insert(0, h)
+
+    stk = (
+        pd.concat(parts, ignore_index=True)
+        .sort_values(key + ["_dkey"])
+        .reset_index(drop=True)
+    )
+
+    grp_close = stk.groupby(key)["close"]
+    for N in lag_periods:
+        stk[f"lag_ret_{N}d"] = grp_close.pct_change(N)
+
+    stk = stk[stk["_is_cur"]]
+
+    df = df.merge(
+        stk[key + ["_dkey"] + [f"lag_ret_{N}d" for N in lag_periods]],
+        on=key + ["_dkey"],
+        how="left",
+    )
+
+    for N in lag_periods:
         df[f"lag_port_ret_contrib_{N}d"] = (
-            df["portfolio_weight"] *
-            df[f"lag_ret_{N}d"]
+            df["portfolio_weight"] * df[f"lag_ret_{N}d"]
         )
 
     # -----------------------------------------------------
-    # FACTOR FEATURES
+    # SECTOR FEATURES (grain: one row per (sector, date))
+    # Mirrors training exactly: the sector_rotation model is trained on a
+    # (sector, date) frame, so it is PREDICTED on that frame and the result
+    # is mapped back to ticker rows. `history["sector"]` supplies the
+    # previous 20 dates of sector-mean daily_return / turnover_ratio.
     # -----------------------------------------------------
 
-    df["mkt_fwd_21d"] = (
-        df.groupby("date")["daily_return"]
-        .transform("mean")
+    sector_base_features = [
+        "daily_return", "momentum_20d", "volatility_21d", "vol_20d",
+        "vol_change", "avg_volume_10d", "turnover_ratio",
+        "Amihud_illiquidity", "sharpe_ratio", "sortino_ratio",
+        "downside_risk", "beta_weighted", "sector_beta_weighted",
+        "sector_exposure", "HHI_sector", "diversification_score",
+    ]
+    sector_base_features = [c for c in sector_base_features if c in df.columns]
+
+    sec_cur = df.groupby(["sector", "_dkey"], as_index=False)[sector_base_features].mean()
+    sec_cur["_is_cur"] = True
+    parts = [sec_cur]
+
+    sec_hist = history.get("sector")
+    if sec_hist is not None and not sec_hist.empty:
+        h = sec_hist[["sector", "_dkey", "daily_return", "turnover_ratio"]].copy()
+        h["_is_cur"] = False
+        parts.insert(0, h)
+
+    df_sec = (
+        pd.concat(parts, ignore_index=True)
+        .sort_values(["sector", "_dkey"])
+        .reset_index(drop=True)
     )
 
-    # -----------------------------------------------------
-    # SECTOR FEATURES
-    # MUST MATCH TRAINING LOGIC EXACTLY
-    # -----------------------------------------------------
+    df_sec["sector_avg_return"] = df_sec["daily_return"]
+    df_sec["sector_turnover"]   = df_sec["turnover_ratio"]
 
-    df["sector_avg_return"] = (
-        df.groupby("sector")["daily_return"]
-        .transform("mean")
+    df_sec["sector_index"] = (
+        (1 + df_sec["sector_avg_return"])
+        .groupby(df_sec["sector"])
+        .cumprod()
     )
 
-    df["sector_mom20"] = (
-        df.groupby("sector")["sector_avg_return"]
-        .transform(
-            lambda s: s.pct_change(20)
-        )
+    df_sec["sector_mom20"] = (
+        df_sec.groupby("sector")["sector_index"]
+        .pct_change(20)
     )
 
-    df["sector_vol21"] = (
-        df.groupby("sector")["sector_avg_return"]
-        .transform(
-            lambda s: s.rolling(21).std()
-        )
+    df_sec["sector_vol21"] = (
+        df_sec.groupby("sector")["sector_avg_return"]
+        .transform(lambda s: s.rolling(21).std())
     )
 
-    df["sector_turnover"] = (
-        df.groupby("sector")["turnover_ratio"]
-        .transform("mean")
+    # keep processing-window sector rows only (history rows were just warm-up)
+    sector_frame = (
+        df_sec[df_sec["_is_cur"]]
+        .drop(columns=["_is_cur", "sector_index"])
+        .reset_index(drop=True)
     )
 
     # -----------------------------------------------------
     # MACRO TREND FEATURES
+    # Derived only from macro.csv + the NYSE trading calendar (no EQUITY data):
+    #   trend(t) = macro(month of t) - macro(month of the trading day 63 rows before t)
+    # which is exactly diff(63) over daily rows as in training. Only the
+    # sector model uses these, so they go onto sector_frame.
     # -----------------------------------------------------
 
-    for col in [
-        "gdp",
-        "cpi",
-        "unrate",
-        "fedfunds"
-    ]:
+    macro_columns = [c for c in ["gdp", "cpi", "unrate", "fedfunds"] if c in df.columns]
 
-        if col in df.columns:
+    if macro_columns and macro_data is not None and not macro_data.empty:
 
-            df[f"{col}_trend"] = (
-                df[col]
-                .diff(63)
-            )
+        cal_start = pd.Timestamp(df["_dkey"].min()) - pd.Timedelta(days=150)
+        cal_end   = pd.Timestamp(df["_dkey"].max())
+
+        cal = mcal.get_calendar("NYSE").valid_days(
+            start_date=cal_start, end_date=cal_end
+        )
+
+        macro_daily = pd.DataFrame({"_dkey": cal.strftime("%Y-%m-%d")})
+        macro_daily["month"] = pd.to_datetime(macro_daily["_dkey"]).dt.to_period("M")
+
+        macro_daily = (
+            macro_daily.merge(macro_data, on="month", how="left")
+            .reindex(columns=["_dkey"] + macro_columns)
+        )
+
+        for col in macro_columns:
+            macro_daily[f"{col}_trend"] = macro_daily[col].diff(63)
+
+        trend_columns = [f"{c}_trend" for c in macro_columns]
+
+        sector_frame = sector_frame.merge(
+            macro_daily[["_dkey"] + macro_columns + trend_columns],
+            on="_dkey",
+            how="left",
+        )
+
+    else:
+        print("  [WARNING] macro data unavailable — macro columns/trends for sector_rotation will be 0")
 
     # =====================================================
     # CLEANUP
@@ -698,12 +859,20 @@ def run_all_equity_predictions(df):
             continue
 
         # -------------------------------------------------
+        # PICK PREDICTION FRAME
+        # sector_rotation predicts on the (sector, date) frame it was
+        # trained on; every other model predicts on the ticker rows.
+        # -------------------------------------------------
+
+        frame = sector_frame if name == "sector_rotation" else df
+
+        # -------------------------------------------------
         # ENSURE INFERENCE FEATURE SCHEMA
         # -------------------------------------------------
 
         missing = [
             c for c in features
-            if c not in df.columns
+            if c not in frame.columns
         ]
 
         if missing:
@@ -715,7 +884,7 @@ def run_all_equity_predictions(df):
             )
 
             for col in missing:
-                df[col] = 0
+                frame[col] = 0
 
         # -------------------------------------------------
         # NULL HANDLING
@@ -723,10 +892,10 @@ def run_all_equity_predictions(df):
 
         for col in features:
 
-            if col in df.columns:
+            if col in frame.columns:
 
-                df[col] = (
-                    df[col]
+                frame[col] = (
+                    frame[col]
                     .replace(
                         [np.inf, -np.inf],
                         np.nan
@@ -734,7 +903,7 @@ def run_all_equity_predictions(df):
                     .fillna(0)
                 )
 
-        X = df[features].copy()
+        X = frame[features].copy()
 
         # -------------------------------------------------
         # LOAD MODEL
@@ -788,11 +957,17 @@ def run_all_equity_predictions(df):
             pred = booster.predict(dtest)
 
             if name == "macro_regime":
-
                 df[out_col] = pred.argmax(axis=1)
 
-            else:
+            elif name == "sector_rotation":
+                frame[out_col] = pred
+                df = df.merge(
+                    frame[["sector", "_dkey", out_col]],
+                    on=["sector", "_dkey"],
+                    how="left",
+                )
 
+            else:
                 df[out_col] = pred
 
             print(f"[SUCCESS] {name} completed")
@@ -819,14 +994,9 @@ def run_all_equity_predictions(df):
         # lag features
         "lag_ret_1d",
         "lag_ret_5d",
-        "lag_ret_21d",
 
         "lag_port_ret_contrib_1d",
         "lag_port_ret_contrib_5d",
-        "lag_port_ret_contrib_21d",
-
-        # factor
-        "mkt_fwd_21d",
 
         # sector
         "sector_avg_return",
@@ -839,6 +1009,9 @@ def run_all_equity_predictions(df):
         "cpi_trend",
         "unrate_trend",
         "fedfunds_trend",
+
+        # merge key
+        "_dkey",
     ]
 
     df = df.drop(
@@ -1759,6 +1932,8 @@ def run_equity_risk_pipeline(
     """
     pipeline_start = time.time()
     run_ts = datetime.utcnow()
+    airflow_metadata = airflow_metadata or {}
+    start_date = None   # defined before try so the except block can always report it
     run_id = run_ts.isoformat()
 
     # ──────────────────────────────────────────
@@ -1973,8 +2148,11 @@ def run_equity_risk_pipeline(
         # ══════════════════════════════════════════════════════════════
         # STEP 7 — ML predictions (soft-fail: no pipeline crash on model errors)
         # ══════════════════════════════════════════════════════════════
+        print("  Fetching rolling history from Snowflake...")
+        history = fetch_prediction_history(df_merged, run_id=run_id)
+
         print("  Running ML model predictions...")
-        df_merged = run_all_equity_predictions(df_merged)
+        df_merged = run_all_equity_predictions(df_merged, history=history, macro_data=macro_data)
 
         # ══════════════════════════════════════════════════════════════
         # STEP 8 — Final transformations and metadata
@@ -2147,7 +2325,7 @@ def run_equity_risk_pipeline(
                 run_id=run_id,
                 status="FAILED",
                 dag_run_id=airflow_metadata.get("dag_run_id"),
-                run_type=mode_label,
+                run_type=mode,
                 metrics=metrics,
             )
         except Exception:
