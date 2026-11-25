@@ -130,7 +130,7 @@ def safe_num(x):
 # than keeping a separate baked-into-the-image copy that could silently
 # drift from what the producer is actually streaming.
 
-EQUITY_UNIVERSE_BUCKET     = "pushpa-equity-bucket"
+EQUITY_UNIVERSE_BUCKET     = "katra-equity-bucket"
 EQUITY_TICKERS_KEY         = "historical-equity/tickers50.csv"
 EQUITY_TICKER_MANAGER_KEY  = "historical-equity/tickers50_asset_manager.csv"
 
@@ -151,7 +151,7 @@ def _find_col(df: pd.DataFrame, candidates: list) -> str:
 def load_equity_universe_tickers():
     """
     Return the full equity ticker universe from S3 -- the same file
-    (pushpa-equity-bucket / historical-equity/tickers50.csv) the
+    (katra-equity-bucket / historical-equity/tickers50.csv) the
     producer already reads as its own source-of-truth ticker list.
     Cached; returns None on failure so callers can degrade gracefully
     instead of showing a wrong count.

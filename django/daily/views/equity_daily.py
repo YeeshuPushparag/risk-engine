@@ -12,7 +12,7 @@ from django.core.cache import cache
 
 s3 = boto3.client("s3")
 
-BUCKET_NAME = "pushpa-equity-bucket"
+BUCKET_NAME = "katra-equity-bucket"
 
 # Global scenario dictionary
 # ------------------------
