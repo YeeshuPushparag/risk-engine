@@ -231,6 +231,7 @@ locals {
       description  = "Equity reference files and features/latest.json"
       table_prefix = "file_"
       recrawl      = "CRAWL_EVERYTHING"
+      scheduled    = false
       targets = [
         for f in [
           "asset_managers.csv",
@@ -248,6 +249,7 @@ locals {
       description  = "FX final_merged.parquet and features/latest.json"
       table_prefix = "file_"
       recrawl      = "CRAWL_EVERYTHING"
+      scheduled    = false
       targets = [
         for f in ["final_merged.parquet", "features/latest.json"] :
         { path = "${local.fx_root}/${f}", single_file = true }
@@ -258,6 +260,7 @@ locals {
       description  = "Bond synthetic_bond.csv and features/latest.json"
       table_prefix = "file_"
       recrawl      = "CRAWL_EVERYTHING"
+      scheduled    = false
       targets = [
         for f in ["synthetic_bond.csv", "features/latest.json"] :
         { path = "${local.bond_root}/${f}", single_file = true }
@@ -268,6 +271,7 @@ locals {
       description  = "Commodity unique_tickers_sector.csv and features/latest.json"
       table_prefix = "file_"
       recrawl      = "CRAWL_EVERYTHING"
+      scheduled    = false
       targets = [
         for f in ["unique_tickers_sector.csv", "features/latest.json"] :
         { path = "${local.commodity_root}/${f}", single_file = true }
@@ -278,6 +282,7 @@ locals {
       description  = "Loan base, enriched loan and macro datasets"
       table_prefix = "file_"
       recrawl      = "CRAWL_EVERYTHING"
+      scheduled    = false
       targets = [
         for f in [
           "loan_enriched_fx_bonds_commod_derivatives_collateral.parquet",
@@ -300,6 +305,7 @@ locals {
       description  = c.description
       table_prefix = c.table_prefix
       recrawl      = try(c.recrawl, var.recrawl_behavior)
+      scheduled    = try(c.scheduled, true)
       targets = [
         for t in c.targets : {
           path        = t.path

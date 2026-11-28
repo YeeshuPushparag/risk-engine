@@ -15,7 +15,7 @@ resource "aws_glue_crawler" "this" {
   role          = aws_iam_role.glue_crawler.arn
   database_name = aws_glue_catalog_database.this[each.value.database].name
   table_prefix  = each.value.table_prefix == "" ? null : each.value.table_prefix
-  schedule      = var.crawler_schedule
+  schedule      = each.value.scheduled ? var.crawler_schedule : null
 
   dynamic "s3_target" {
     for_each = each.value.targets

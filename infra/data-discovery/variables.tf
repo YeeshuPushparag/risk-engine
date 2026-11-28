@@ -73,9 +73,9 @@ variable "crawler_sample_size" {
 }
 
 variable "crawler_schedule" {
-  description = "Optional cron expression applied to every crawler, for example cron(0 2 * * ? *). Null keeps crawlers on-demand, which is the cheapest option."
+  description = "Cron expression (UTC) for the dataset crawlers that pick up new partitions. The default runs daily at 23:00 UTC, which is 18:00 US Eastern Standard Time (19:00 during daylight saving time). Set to null to make them on-demand only. Root-file crawlers are never scheduled."
   type        = string
-  default     = null
+  default     = "cron(0 23 * * ? *)"
 }
 
 variable "athena_results_bucket_name" {
