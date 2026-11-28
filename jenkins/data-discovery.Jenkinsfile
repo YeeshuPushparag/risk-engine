@@ -11,8 +11,6 @@ pipeline {
   parameters {
     choice(name: 'ACTION', choices: ['plan', 'apply'],
            description: 'plan = review only. apply = create/update. Destroy has its own pipeline.')
-    booleanParam(name: 'AUTO_APPROVE', defaultValue: false,
-                 description: 'Skip the manual approval prompt for apply.')
     booleanParam(name: 'RUN_CRAWLERS', defaultValue: false,
                  description: 'After a successful apply, start the crawlers owned by this Terraform project once.')
   }
@@ -79,10 +77,7 @@ pipeline {
 
     stage('Approval') {
       when {
-        allOf {
-          expression { params.ACTION == 'apply' }
-          expression { !params.AUTO_APPROVE }
-        }
+        expression { params.ACTION == 'apply' }
       }
       steps {
         input message: 'Review the archived plan.txt. Proceed with terraform apply?', ok: 'Proceed'
