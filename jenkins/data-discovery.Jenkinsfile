@@ -1,132 +1,58 @@
 pipeline {
   agent any
 
-  options {
-    timestamps()
-    timeout(time: 60, unit: 'MINUTES')
-    disableConcurrentBuilds()
-    buildDiscarder(logRotator(numToKeepStr: '20'))
-  }
-
-  parameters {
-    choice(name: 'ACTION', choices: ['plan', 'apply'],
-           description: 'plan = review only. apply = create/update. Destroy has its own pipeline.')
-    booleanParam(name: 'RUN_CRAWLERS', defaultValue: false,
-                 description: 'After a successful apply, start the crawlers owned by this Terraform project once.')
-  }
-
   environment {
-    // Credentials come from the Jenkins EC2 instance profile. No keys are stored here.
-    TF_DIR             = 'infra/data-discovery'
-    TF_IN_AUTOMATION   = 'true'
-    TF_INPUT           = '0'
-    AWS_DEFAULT_REGION = 'us-east-1'
+    AWS_REGION = "us-east-1"
+    TF_DIR     = "infra/data-discovery"
   }
 
   stages {
+
     stage('Checkout') {
       steps {
         checkout scm
       }
     }
 
-    stage('Tool check') {
-      steps {
-        sh '''
-          set -e
-          terraform version
-          aws --version
-          aws sts get-caller-identity --query Arn --output text
-        '''
-      }
-    }
-
-    stage('Init') {
+    stage('Terraform Init') {
       steps {
         dir(env.TF_DIR) {
-          sh 'terraform init -input=false -no-color'
+          sh 'terraform init -reconfigure'
         }
       }
     }
 
-    stage('Format check') {
+    stage('Terraform Format Check') {
       steps {
         dir(env.TF_DIR) {
-          sh 'terraform fmt -check -recursive -no-color'
+          sh 'terraform fmt -check -recursive'
         }
       }
     }
 
-    stage('Validate') {
+    stage('Terraform Validate') {
       steps {
         dir(env.TF_DIR) {
-          sh 'terraform validate -no-color'
+          sh 'terraform validate'
         }
       }
     }
 
-    stage('Plan') {
+    stage('Terraform Plan') {
       steps {
         dir(env.TF_DIR) {
-          sh 'terraform plan -input=false -no-color -out=tfplan'
-          sh 'terraform show -no-color tfplan > plan.txt'
+          sh 'terraform plan -out=tfplan'
         }
-        archiveArtifacts artifacts: "${env.TF_DIR}/plan.txt", allowEmptyArchive: true
       }
     }
 
-    stage('Approval') {
-      when {
-        expression { params.ACTION == 'apply' }
-      }
+    stage('Terraform Apply') {
       steps {
-        input message: 'Review the archived plan.txt. Proceed with terraform apply?', ok: 'Proceed'
-      }
-    }
-
-    stage('Apply') {
-      when {
-        expression { params.ACTION == 'apply' }
-      }
-      steps {
+        input message: 'Apply Terraform to create/update Glue crawlers, Athena workgroup and IAM?', ok: 'Apply'
         dir(env.TF_DIR) {
-          sh 'terraform apply -input=false -no-color tfplan'
+          sh 'terraform apply -input=false tfplan'
         }
       }
-    }
-
-    stage('Start Glue crawlers') {
-      when {
-        allOf {
-          expression { params.ACTION == 'apply' }
-          expression { params.RUN_CRAWLERS }
-        }
-      }
-      steps {
-        dir(env.TF_DIR) {
-          // Names come from Terraform state, so crawlers outside this project are never touched.
-          sh '''
-            for c in $(terraform output -json crawler_name_list | tr -d '[]"' | tr ',' ' '); do
-              echo "Starting $c"
-              aws glue start-crawler --name "$c" || echo "Could not start $c (already running?)"
-            done
-          '''
-        }
-      }
-    }
-  }
-
-  post {
-    always {
-      dir(env.TF_DIR) {
-        sh 'rm -f tfplan'
-      }
-    }
-    success {
-      echo "Terraform ${params.ACTION} finished."
-    }
-    failure {
-      echo 'Pipeline failed. Check the stage logs above.'
     }
   }
 }
