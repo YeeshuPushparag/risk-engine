@@ -34,52 +34,59 @@ resource "aws_iam_role_policy" "jenkins_policy" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-
       {
-        Effect = "Allow"
-        Action = ["s3:*", "dynamodb:*"]
+        Effect   = "Allow"
+        Action   = ["s3:*", "dynamodb:*"]
         Resource = "*"
       },
-
       {
-        Effect = "Allow"
-        Action = ["eks:*"]
+        Effect   = "Allow"
+        Action   = ["eks:*"]
         Resource = "*"
       },
-
       {
-        Effect = "Allow"
-        Action = ["iam:*"]
+        Effect   = "Allow"
+        Action   = ["iam:*"]
         Resource = "*"
       },
-
       {
-        Effect = "Allow"
-        Action = ["ecr:*"]
+        Effect   = "Allow"
+        Action   = ["ecr:*"]
         Resource = "*"
       },
-
       {
-        Effect = "Allow"
-        Action = ["ec2:*", "autoscaling:*"]
+        Effect   = "Allow"
+        Action   = ["ec2:*", "autoscaling:*"]
         Resource = "*"
       },
-
       {
-        Effect = "Allow"
-        Action = ["rds:*"]
+        Effect   = "Allow"
+        Action   = ["rds:*"]
         Resource = "*"
       },
-
       {
-        Effect = "Allow"
-        Action = ["elasticache:*"]
+        Effect   = "Allow"
+        Action   = ["elasticache:*"]
         Resource = "*"
       },
-
       {
-        Effect = "Allow"
-        Action = ["cloudwatch:*", "logs:*"]
+        Effect   = "Allow"
+        Action   = ["cloudwatch:*", "logs:*"]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["glue:*"]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["athena:*"]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["lakeformation:*"]
         Resource = "*"
       }
     ]
